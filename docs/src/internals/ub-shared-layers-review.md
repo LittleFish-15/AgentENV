@@ -91,3 +91,6 @@ Guest CoW, multi-generation references, cleanup/failures, opt-out regression and
 repository delivery. Local tests and ARM64 cross-checks are not target executions.
 No net memory saving or cluster-wide physical-page uniqueness is inferred from
 backing coverage or cross-host PSS.
+
+See [current acceptance status](ub-shared-layers-acceptance.md) and
+[target execution commands](../../../tools/ub-snapshot/README.md).

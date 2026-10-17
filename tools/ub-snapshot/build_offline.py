@@ -119,7 +119,7 @@ directory = ''' + json.dumps(str(vendor)) + '\n')
         run('resolution', cargo + ['metadata', '--frozen', '--format-version', '1'])
         run('check-server-daemon', cargo + ['check', '--frozen', '-p', 'agentenv', '-p', 'uvm-ublk-daemon'])
         run('test-ub-wire-and-file', cargo + ['test', '--frozen', '-p', 'overlaybd', '--lib', 'backend::ub', '--', '--test-threads=2'])
-        run('test-ub-config', cargo + ['test', '--frozen', '-p', 'overlaybd', '--lib', 'config::ub_tests'])
+        run('test-ub-and-legacy-config', cargo + ['test', '--frozen', '-p', 'overlaybd', '--lib', 'config::'])
         run('test-ub-ancestor-staging', cargo + ['test', '--frozen', '-p', 'agentenv', '--lib',
                                               'split_runtime_suffix_keeps_ub_ancestor_without_a_local_duplicate'])
         run('build-runtime', cargo + ['build', '--frozen', '--release', '-p', 'agentenv', '--bin', 'server'])
