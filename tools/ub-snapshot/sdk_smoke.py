@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shlex
 import struct
 import stat
 import subprocess
@@ -46,14 +47,38 @@ def probe(replica, broker):
             raise RuntimeError('Probe reader did not release; do not retire/unmap')
 
 
-def peer_replica(token):
+def peer_replica(token, stored_format=None):
     if not token or len(token) > 4096:
         raise ValueError('Copy the complete current peer command printed by A')
     data = json.loads(base64.b64decode(token, altchars=b'-_', validate=True))
     replica = b.Replica(**data).validate()
-    if replica.mappingBytes != b.ALIGN or replica.fileBytes != b.CHUNK + b.CHUNK // 2:
+    valid_payload = (0 < replica.fileBytes < b.ALIGN - b.HEADER_BYTES if stored_format
+                     else replica.fileBytes == b.CHUNK + b.CHUNK // 2)
+    if replica.mappingBytes != b.ALIGN or not valid_payload:
         raise ValueError('This smoke accepts exactly the one small published test payload')
     return replica
+
+
+def format_probe(program, replica, output, report):
+    image = output / 'layer-image.json'
+    replicas = output / 'replicas.json'
+    b.atomic_json(image, {'lowers': [{'digest': replica.layerDigest, 'size': replica.fileBytes,
+                                    'ub': b.asdict(replica)}]})
+    b.atomic_json(replicas, b.index_for([replica]))
+    result = subprocess.run([str(program), 'check', str(image), str(replicas), str(output / 'cow-check')],
+                            capture_output=True, text=True, timeout=180,
+                            env=dict(os.environ, TMPDIR=str(output)))
+    report['format_probe_exit_code'] = result.returncode
+    report['format_probe_stdout'] = result.stdout[-16000:]
+    report['format_probe_stderr'] = result.stderr[-16000:]
+    if result.returncode:
+        raise RuntimeError('Real OverlayBD stored-format/private-upper probe failed')
+    parsed = json.loads(result.stdout.strip().splitlines()[-1])
+    if (parsed.get('status') != 'UB_LAYER_FORMAT_COW_PROBE_COMPLETED'
+            or any(parsed.get(key) is not True for key in ('required_ub', 'two_private_uppers',
+                                                           'base_unchanged', 'durable_child_reopen_without_ub'))):
+        raise ValueError('Missing real OverlayBD probe completion report')
+    report['format_probe'] = parsed
 
 
 def build(output):
@@ -91,6 +116,8 @@ def main():
     parser.add_argument('node', choices=['node-a', 'node-b'])
     parser.add_argument('--replica-token')
     parser.add_argument('--peer-stopped', action='store_true')
+    parser.add_argument('--format', choices=['raw', 'tar', 'zfile'])
+    parser.add_argument('--probe')
     args = parser.parse_args()
     if (sys.platform != 'linux' or os.getuid() != 1204 or os.geteuid() != 1204
             or os.getgid() != 1205 or os.getegid() != 1205):
@@ -106,6 +133,9 @@ def main():
         raise SystemExit('Standalone smoke must have zero capabilities')
     os.umask(0o077)
     b.check_local_path(Path(__file__), exists=True)
+    if bool(args.format) != bool(args.probe):
+        raise SystemExit('Stored-format mode requires both --format and --probe')
+    probe_program = b.check_local_path(args.probe, exists=True) if args.probe else None
     relay = b.check_local_path(b.ROOT / 'relay', exists=True)
     reports = b.check_local_path(relay / 'reports', exists=True)
     lock = os.open(relay / ('ub-layer-sdk-' + args.node + '.lock'),
@@ -125,6 +155,10 @@ def main():
               'role': args.role, 'report_directory': str(output), 'state': 'FAILED_NO_OBJECT_CREATED',
               'status': 'NOT_COMPLETED', 'allocation_calls_observed': 0,
               'scope': 'One small ordinary SDK object and local readonly broker; no ublk/Guest claim'}
+    report['stored_format'] = args.format
+    report['SDK_runtime_started'] = False
+    if args.format:
+        report['scope'] = 'One small SDK object, real OverlayBD stored format and private local uppers; no ublk/Guest claim'
     backend = publisher = broker = None
     published = False
     receipt_directory = output
@@ -136,6 +170,8 @@ def main():
             raise ValueError('Current NC sharing capability is not advertised; no SDK calls')
         build(output)
         report['compile_exit_code'] = 0
+        import hashlib
+        report['bridge_sha256'] = hashlib.sha256((output / 'libaenv_ub_bridge.so').read_bytes()).hexdigest()
         backend = b.NativeBackend(output / 'libaenv_ub_bridge.so')
         if args.role == 'cleanup':
             receipt_directory = b.check_local_path(old['report_directory'], exists=True)
@@ -145,67 +181,89 @@ def main():
             if state.get('uid') != 1204 or state.get('version') != 1 or len(state.get('objects', [])) != 1:
                 raise ValueError('No exact original owned smoke receipt')
             entry = state['objects'][0]
-            if not entry['creation_confirmed'] or entry['delete_acknowledged']:
-                raise ValueError('Cleanup needs one confirmed create without a deletion acknowledgement')
+            if not entry['creation_confirmed']:
+                raise ValueError('Cleanup needs one confirmed original creation')
             replica = b.Replica(**entry['replica']).validate()
             if replica.mappingBytes != b.ALIGN:
                 raise ValueError('Original smoke object length differs')
-            mapped = backend.map(replica)
-            b.verify_mapping(replica, mapped)
-            mapped.close()
+            report['SDK_runtime_started'] = True
+            if not entry['delete_acknowledged']:
+                mapped = backend.map(replica)
+                b.verify_mapping(replica, mapped)
+                mapped.close()
             publisher = b.Publisher(backend, receipt_directory / 'owner-receipt.json')
             publisher.state = state
             publisher.cleanup()
             report.update(state='COMPLETE_NO_OWNED_OBJECT', status='UB_LAYER_SDK_CLEANUP_COMPLETED',
                           object_name=replica.objectName, delete_acknowledged=True)
         elif args.role == 'owner':
-            source = output / 'test-layer.bin'
-            source.write_bytes(os.urandom(b.CHUNK + b.CHUNK // 2))
-            import hashlib
-            digest = 'sha256:' + hashlib.sha256(source.read_bytes()).hexdigest()
+            if args.format:
+                result = subprocess.run([str(probe_program), 'prepare', str(output / 'fixtures')],
+                                        capture_output=True, text=True, timeout=180,
+                                        env=dict(os.environ, TMPDIR=str(output)))
+                report['fixture_prepare_exit_code'] = result.returncode
+                if result.returncode:
+                    raise RuntimeError('Prepare real layer fixtures failed: ' + result.stderr[-12000:])
+                sources = b.source_layers([output / 'fixtures' / (args.format + '-image.json')])
+            else:
+                source = output / 'test-layer.bin'
+                source.write_bytes(os.urandom(b.CHUNK + b.CHUNK // 2))
+                import hashlib
+                digest = 'sha256:' + hashlib.sha256(source.read_bytes()).hexdigest()
+                sources = {digest: (source, source.stat().st_size)}
             publisher = b.Publisher(backend, output / 'owner-receipt.json')
             # Persist the report pointer before any SDK call. A process crash
             # must not allow a second random object on the next invocation.
             report['state'] = 'INTENT_BEFORE_SDK'
             b.atomic_json(pending, report)
-            replicas, mappings = publisher.publish({digest: (source, source.stat().st_size)},
-                                                     output / 'broker.sock', b.ALIGN)
+            report['SDK_runtime_started'] = True
+            replicas, mappings = publisher.publish(sources, output / 'broker.sock', b.ALIGN)
             replica = replicas[0]
             broker = b.Broker(replicas, mappings)
             broker.start(replica.brokerSocket)
             probe(replica, broker)
+            if args.format:
+                format_probe(probe_program, replica, output, report)
+                probe(replica, broker)
             publisher.published = published = True
             report.update(state='OWNER_READY_HOLDING', object_name=replica.objectName,
                           generation=replica.generation, allocation_calls_observed=backend.allocation_calls)
             b.atomic_json(pending, report)
             token = base64.urlsafe_b64encode(json.dumps(b.asdict(replica), separators=(',', ':')).encode()).decode()
-            print('UB_LAYER_SDK_OWNER_READY', flush=True)
+            print('UB_LAYER_FORMAT_OWNER_READY' if args.format else 'UB_LAYER_SDK_OWNER_READY', flush=True)
             print('NEXT_ON_AGENT1_AS_JWK:', flush=True)
             print('cd /home/jwk/agent/ub-layer-sdk-smoke-v1', flush=True)
-            print('/usr/bin/python3 -I -B sdk_smoke.py peer node-b --replica-token ' + token, flush=True)
+            extra = (' --format ' + args.format + ' --probe ' + shlex.quote(str(probe_program))) if args.format else ''
+            print('/usr/bin/python3 -I -B sdk_smoke.py peer node-b --replica-token ' + token + extra, flush=True)
             print('Keep A open. After B fully exits, return here and type done.', flush=True)
             while input().strip() != 'done':
                 print('Wait for B to fully exit, then type done.', flush=True)
+            probe(replica, broker)
+            report['base_verified_after_peer_exit'] = True
             report['broker_statistics'] = broker.stop()
             broker = None
             publisher.cleanup()
-            report.update(state='COMPLETE_NO_OWNED_OBJECT', status='UB_LAYER_SDK_OWNER_COMPLETED',
+            report.update(state='COMPLETE_NO_OWNED_OBJECT', status=('UB_LAYER_FORMAT_OWNER_COMPLETED' if args.format else 'UB_LAYER_SDK_OWNER_COMPLETED'),
                           delete_acknowledged=True, mappings_released=True, finalize_acknowledged=True)
         else:
-            original = peer_replica(args.replica_token)
+            original = peer_replica(args.replica_token, args.format)
             replica = b.replace(original, brokerSocket=str(output / 'broker.sock'))
             report.update(state='INTENT_BEFORE_SDK', object_name=replica.objectName, generation=replica.generation)
             b.atomic_json(pending, report)
+            report['SDK_runtime_started'] = True
             mapped = backend.map(replica)
             b.verify_mapping(replica, mapped)
             broker = b.Broker([replica], [mapped])
             broker.start(replica.brokerSocket)
             probe(replica, broker)
+            if args.format:
+                format_probe(probe_program, replica, output, report)
+                probe(replica, broker)
             report['broker_statistics'] = broker.stop()
             broker = None
             backend.close_maps()
             backend.finalize()
-            report.update(state='PEER_RELEASED', status='UB_LAYER_SDK_PEER_COMPLETED',
+            report.update(state='PEER_RELEASED', status=('UB_LAYER_FORMAT_PEER_COMPLETED' if args.format else 'UB_LAYER_SDK_PEER_COMPLETED'),
                           mappings_released=True, finalize_acknowledged=True)
         report['allocation_calls_observed'] = backend.allocation_calls
     except BaseException as error:
@@ -227,13 +285,20 @@ def main():
                 elif safe_to_release:
                     backend.close_maps()
                     backend.finalize()
-                    report['state'] = 'OWNERSHIP_UNRESOLVED' if args.role in ('owner', 'cleanup') else 'PEER_RELEASED'
+                    report['state'] = ('FAILED_NO_OBJECT_CREATED' if not report['SDK_runtime_started']
+                                       else 'OWNERSHIP_UNRESOLVED' if args.role in ('owner', 'cleanup') else 'PEER_RELEASED')
                 else:
                     report['state'] = 'OWNERSHIP_OR_IMPORT_UNRESOLVED'
             except Exception as cleanup_error:
                 report.update(state='OWNERSHIP_OR_IMPORT_UNRESOLVED', cleanup_error=str(cleanup_error))
         if args.role == 'cleanup':
             report['old_report_directory'] = str(receipt_directory)
+    if backend is not None:
+        report['mapping_backing_coverage_bytes'] = [getattr(mapped, 'backing_coverage', None)
+                                                   for mapped in backend.mappings]
+    report['physical_increment_measured'] = False
+    report['independent_global_absence_query'] = False
+    report['system_configuration_or_permissions_modified'] = False
     b.atomic_json(output / 'return.json', report)
     if args.role != 'cleanup' or report['status'] == 'UB_LAYER_SDK_CLEANUP_COMPLETED':
         b.atomic_json(pending, report)
@@ -241,6 +306,7 @@ def main():
     print(json.dumps(report, indent=2), flush=True)
     print('END_RETURN_REPORT', flush=True)
     return 0 if report['status'] in ('UB_LAYER_SDK_OWNER_COMPLETED', 'UB_LAYER_SDK_PEER_COMPLETED',
+                                   'UB_LAYER_FORMAT_OWNER_COMPLETED', 'UB_LAYER_FORMAT_PEER_COMPLETED',
                                    'UB_LAYER_SDK_CLEANUP_COMPLETED') else 1
 
 

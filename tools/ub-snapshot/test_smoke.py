@@ -48,6 +48,15 @@ class SmokeGuards(unittest.TestCase):
             with self.assertRaises((ValueError, UnicodeError, json.JSONDecodeError)):
                 s.peer_replica(token)
 
+    def test_format_mode_keeps_the_same_single_object_budget(self):
+        for stored_format in ('raw', 'tar', 'zfile'):
+            small = b.replace(self.replica, fileBytes=16384)
+            self.assertEqual(s.peer_replica(self.token(small), stored_format), small)
+            for invalid in (b.replace(small, mappingBytes=2 * b.ALIGN),
+                            b.replace(small, fileBytes=b.ALIGN - b.HEADER_BYTES)):
+                with self.assertRaises(ValueError):
+                    s.peer_replica(self.token(invalid), stored_format)
+
     def test_unresolved_receipt_is_preserved_and_blocks_new_random_names(self):
         reports = self.path / 'relay/reports'
         output = reports / 'node-a-ub-layer-sdk-old'
