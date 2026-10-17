@@ -1,6 +1,7 @@
 use crate::backend::local::LocalFile;
 use crate::backend::switch::new_switch_file;
 use crate::backend::tar::new_tar_file_adaptor;
+use crate::backend::ub::UbLayerFile;
 use crate::config::{DownloadConfig, ImageConfig, LayerConfig, UpperConfig, UpperMode};
 use crate::image::helper::prepare_runtime_upper;
 use crate::image::image_service::CacheDownloadRequest;
@@ -556,8 +557,28 @@ impl ImageFile {
         layer: LayerConfig,
         index: usize,
     ) -> Result<OpenedLowerLayer> {
-        let local_path = Self::open_localfile_path(&layer).await?;
-        let mut opened = if let Some(local_path) = local_path {
+        let local_path = if layer
+            .ub
+            .as_ref()
+            .is_some_and(|r| !r.allow_repository_fallback)
+        {
+            None
+        } else {
+            Self::open_localfile_path(&layer).await?
+        };
+        let mut opened = if let Some(replica) = &layer.ub {
+            // UB takes precedence even when a durable local file also exists.
+            // Only an explicit, identity-verified fallback may use that copy.
+            replica.validate()?;
+            let file: Arc<dyn VirtualFile> =
+                Arc::new(UbLayerFile::open(replica, local_path).await?);
+            let tar_file = new_tar_file_adaptor(file).await?;
+            let switched = new_switch_file(tar_file, false, None).await?;
+            OpenedLowerLayer {
+                file: switched,
+                download: None,
+            }
+        } else if let Some(local_path) = local_path {
             match Self::open_ro_file(&local_path, image_service).await {
                 Ok(file) => OpenedLowerLayer {
                     file,

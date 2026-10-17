@@ -1799,9 +1799,14 @@ impl FirecrackerSandbox {
             .as_ref()
             .context("fresh sandbox rootfs image config is missing")?;
         let runtime_dir = work_dir.join("overlaybd");
+        let rootfs_source = crate::snapshot::runtime_support::resolve_ub_runtime_config(
+            &rootfs_image_config.image_config_path,
+            "rootfs",
+        )
+        .await?;
         let runtime_device = UblkDeviceManager::global()
             .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
-                source_image_config: &rootfs_image_config.image_config_path,
+                source_image_config: &rootfs_source,
                 global_config: &global_cfg_path,
                 runtime_dir: &runtime_dir,
                 read_only: rootfs_image_config.read_only,
@@ -2044,9 +2049,14 @@ impl FirecrackerSandbox {
             let user_image_symlink = fc_cwd.join(USER_ROOTFS_DRIVE_PATH);
             let global_cfg_path = global_config.ublk.overlaybd.global_config_path.clone();
             let runtime_dir = fc_cwd.join("overlaybd");
+            let rootfs_source = crate::snapshot::runtime_support::resolve_ub_runtime_config(
+                &rootfs_image_config.image_config_path,
+                "rootfs",
+            )
+            .await?;
             let runtime_device = UblkDeviceManager::global()
                 .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
-                    source_image_config: &rootfs_image_config.image_config_path,
+                    source_image_config: &rootfs_source,
                     global_config: &global_cfg_path,
                     runtime_dir: &runtime_dir,
                     read_only: rootfs_image_config.read_only,

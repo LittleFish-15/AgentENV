@@ -170,6 +170,12 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
             )
             .await?;
 
+        let mem_image_config_path = crate::snapshot::runtime_support::resolve_ub_runtime_config(
+            &mem_image_config_path,
+            "memory",
+        )
+        .await?;
+
         // ── rootfs image config ────────────────────────────────────
         let rootfs_cache_key = runtime_image_cache_key(&id, "rootfs/image.json");
         let rootfs_image_config_path = self
@@ -185,6 +191,11 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
                 &mut handles,
             )
             .await?;
+        let rootfs_image_config_path = crate::snapshot::runtime_support::resolve_ub_runtime_config(
+            &rootfs_image_config_path,
+            "rootfs",
+        )
+        .await?;
 
         // ── attached drives ────────────────────────────────────────
         let attached_drives = self

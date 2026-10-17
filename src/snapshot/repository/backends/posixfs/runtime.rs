@@ -82,6 +82,11 @@ impl SnapshotRuntimeResolver for PosixFsRuntimeResolver {
         let mem_image_config_path = self
             .materialize_mem_image_config(&snapshot_id, committed, &mut handles)
             .await?;
+        let mem_image_config_path = crate::snapshot::runtime_support::resolve_ub_runtime_config(
+            &mem_image_config_path,
+            "memory",
+        )
+        .await?;
         let rootfs_label = format!("snapshot '{}'", snapshot.id);
         let rootfs_cache_key = runtime_image_cache_key(&snapshot.id, "rootfs/image.json");
         let rootfs_image_config_path = self
@@ -100,6 +105,11 @@ impl SnapshotRuntimeResolver for PosixFsRuntimeResolver {
                 &mut handles,
             )
             .await?;
+        let rootfs_image_config_path = crate::snapshot::runtime_support::resolve_ub_runtime_config(
+            &rootfs_image_config_path,
+            "rootfs",
+        )
+        .await?;
         let attached_drives = self
             .resolve_attached_drives(&snapshot_id, committed, &mut handles)
             .await?;
@@ -248,7 +258,35 @@ impl PosixFsRuntimeResolver {
     ) -> RepositoryResult<LayerConfig> {
         let path =
             PosixFsSnapshotArtifactLayout::managed_layer_path(&self.repository_root, &layer.digest);
-        if !path.exists() {
+        let ub_required = if !path.exists() {
+            let kind = match artifact_prefix {
+                "memory_layer" => "memory",
+                "rootfs_layer" => "rootfs",
+                _ => "",
+            };
+            if let Some(index) = crate::snapshot::runtime_support::ub_replica_index(kind) {
+                let mut selected = overlaybd::config::ImageConfig {
+                    lowers: vec![LayerConfig {
+                        digest: layer.digest.clone(),
+                        size: layer.size,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                overlaybd::config::bind_ub_layer_replicas(&mut selected, &index).map_err(
+                    |error| RepositoryError::backend("select missing local layer from UB", error),
+                )?;
+                selected.lowers[0]
+                    .ub
+                    .as_ref()
+                    .is_some_and(|r| !r.allow_repository_fallback)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !path.exists() && !ub_required {
             return Err(RepositoryError::ArtifactNotFound {
                 artifact: format!("{artifact_prefix}_{index} at {}", path.display()),
             });

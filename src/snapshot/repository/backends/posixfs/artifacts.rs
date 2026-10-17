@@ -424,6 +424,16 @@ impl PosixFsArtifactStore {
             .into_iter()
             .enumerate()
             .map(|(index, layer)| {
+                if let Some(replica) = &layer.ub {
+                    if !replica.allow_repository_fallback
+                        || layer.file.is_empty()
+                        || !Path::new(&layer.file).exists()
+                    {
+                        return self
+                            .import_ub_stored_layer(replica)
+                            .map(OverlaybdLayerRef::Managed);
+                    }
+                }
                 if !layer.file.is_empty() {
                     let layer_path = Path::new(&layer.file);
                     if !layer.digest.is_empty() && layer.size > 0 {
@@ -505,6 +515,14 @@ impl PosixFsArtifactStore {
             .into_iter()
             .enumerate()
             .map(|(index, layer)| {
+                if let Some(replica) = &layer.ub {
+                    if !replica.allow_repository_fallback
+                        || layer.file.is_empty()
+                        || !Path::new(&layer.file).exists()
+                    {
+                        return self.import_ub_stored_layer(replica);
+                    }
+                }
                 if layer.file.is_empty() {
                     return Err(RepositoryError::Unsupported {
                         feature: format!("memory layer {index} without local file path"),
@@ -521,6 +539,28 @@ impl PosixFsArtifactStore {
                 self.import_managed_layer_by_hash(layer_path)
             })
             .collect()
+    }
+
+    fn import_ub_stored_layer(
+        &self,
+        replica: &overlaybd::config::UbLayerRef,
+    ) -> RepositoryResult<ManagedLayer> {
+        let parent = PosixFsSnapshotArtifactLayout::managed_layers_dir(&self.root);
+        fs::create_dir_all(&parent).map_err(|error| {
+            RepositoryError::backend("create UB ancestor import directory", error)
+        })?;
+        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
+            RepositoryError::backend("create UB ancestor import temporary", error)
+        })?;
+        overlaybd::backend::ub::copy_verified_stored_layer(replica, temporary.as_file_mut())
+            .map_err(|error| {
+                RepositoryError::backend("preserve UB ancestor before snapshot commit", error)
+            })?;
+        self.import_managed_layer_with_descriptor(
+            temporary.path(),
+            &replica.layer_digest,
+            replica.file_bytes,
+        )
     }
 }
 

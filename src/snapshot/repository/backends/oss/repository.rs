@@ -1340,6 +1340,18 @@ impl OssSnapshotRepository {
         let mut layers = Vec::with_capacity(image_config.lowers.len());
 
         for (index, layer) in image_config.lowers.into_iter().enumerate() {
+            if let Some(replica) = &layer.ub {
+                if !replica.allow_repository_fallback
+                    || layer.file.is_empty()
+                    || !Path::new(&layer.file).exists()
+                {
+                    let managed = self
+                        .import_ub_stored_layer(replica, image_config_path, artifact)
+                        .await?;
+                    layers.push(OverlaybdLayerRef::Managed(managed));
+                    continue;
+                }
+            }
             if !layer.file.is_empty() {
                 let layer_path = Path::new(&layer.file);
                 if !layer.digest.is_empty() && layer.size > 0 {
@@ -1417,6 +1429,22 @@ impl OssSnapshotRepository {
 
         let mut layers = Vec::with_capacity(image_config.lowers.len());
         for (index, layer) in image_config.lowers.into_iter().enumerate() {
+            if let Some(replica) = &layer.ub {
+                if !replica.allow_repository_fallback
+                    || layer.file.is_empty()
+                    || !Path::new(&layer.file).exists()
+                {
+                    layers.push(
+                        self.import_ub_stored_layer(
+                            replica,
+                            mem_image_config_path,
+                            OssUploadArtifact::MemoryLayer,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+            }
             if layer.file.is_empty() {
                 let repo_blob_url = layer
                     .effective_repo_blob_url(&image_config.repo_blob_url)
@@ -1710,6 +1738,44 @@ impl OssSnapshotRepository {
         let upload = prepare_layer_upload(&canonical, self.publish_compression, None).await?;
         let uuid = overlaybd_layer_uuid(upload.path());
         self.upload_prepared_layer(upload, uuid, artifact).await
+    }
+
+    /// Preserve imported ancestors when a consumer commits a child snapshot.
+    /// Capture has already finished; this copy belongs to durable publication.
+    async fn import_ub_stored_layer(
+        &self,
+        replica: &overlaybd::config::UbLayerRef,
+        image_config_path: &Path,
+        artifact: OssUploadArtifact,
+    ) -> RepositoryResult<ManagedLayer> {
+        let parent = image_config_path
+            .parent()
+            .ok_or_else(|| RepositoryError::Backend {
+                message: "UB ancestor config has no local parent".into(),
+                source: None,
+            })?
+            .to_path_buf();
+        let export_replica = replica.clone();
+        let temporary = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+            overlaybd::backend::ub::copy_verified_stored_layer(
+                &export_replica,
+                temporary.as_file_mut(),
+            )?;
+            Ok(temporary)
+        })
+        .await
+        .map_err(|error| RepositoryError::backend("join UB ancestor export", error))?
+        .map_err(|error| {
+            RepositoryError::backend("preserve UB ancestor before OSS commit", error)
+        })?;
+        self.import_managed_layer_with_descriptor(
+            temporary.path(),
+            &replica.layer_digest,
+            replica.file_bytes,
+            artifact,
+        )
+        .await
     }
 
     async fn import_managed_layer_with_descriptor(
