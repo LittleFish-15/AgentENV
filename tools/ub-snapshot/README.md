@@ -46,11 +46,25 @@ archive or exact old source tree read-only, adds the actual committed changes,
 and creates a separate source prefix. Its Git tip/tree are the exact real feature
 objects with shallow parent history, so the build's Git identity is not invented.
 It then invokes the existing offline builder, including checks/tests and four
-artifacts, without changing or starting a service. No ZIP or network download is
+artifacts, without changing or starting a service. No ZIP or source download is
 needed. Unknown/different existing source is preserved; completed matching source
 can be reused. Build logs progress periodically and stops its own build process
 group if free disk falls below the reserve. Target full builds still require
 actual execution; source preparation tests are not build results.
+
+The builder treats old `.path` registrations as optional hints. It discovers
+already installed real ARM64 Rust/Cargo binaries and their standard library,
+including existing private/system/rustup-toolchain directories, without invoking
+rustup proxies or syncing a channel. It does not require Rust 1.99 specifically;
+the locked project dependencies determine compiler compatibility at build time.
+It reports all missing native/compiler/dependency prerequisites together.
+
+An existing matching vendor remains preferred (`--frozen`). If the target can
+access the network, explicitly pass `--allow-locked-network` to permit Cargo
+`--locked` downloads when no vendor is available. It does not install/upgrade a
+compiler or system package. Downloads and reusable targets stay in the new owned
+`/home/jwk/agent/builds/agentenv-ub-build-v2` cache; each attempt has separate logs
+and reports. Existing compiler/vendor files and original services remain intact.
 
 ## Runtime path
 

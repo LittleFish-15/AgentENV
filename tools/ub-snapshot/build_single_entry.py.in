@@ -273,6 +273,7 @@ def preflight():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare-only', action='store_true', help='prepare exact source without invoking Cargo')
+    parser.add_argument('--allow-locked-network', action='store_true', help='allow locked dependencies in a private build cache')
     args = parser.parse_args()
     preflight()
     import fcntl

@@ -1,7 +1,9 @@
-"""Node A only: check/build this independent source with existing offline inputs.
-Never installs dependencies, starts a service, accesses SDK objects or changes devices.
+"""Node A only: check/build independent source with an existing compiler.
+Never installs/upgrades a toolchain/system package or changes a service/device.
+Locked dependency downloads into a private cache require --allow-locked-network.
 """
 import hashlib
+import argparse
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import re
+import stat
 
 ROOT = Path('/home/jwk/agent')
 LOCK_SHA = '6cb5431f5fd58fc0fbfa3f8094e3a3c3801a11fc47a976ebb841b32deab325e4'
@@ -24,14 +28,165 @@ def path_under_root(value, exists=True):
     return path
 
 
-def pointer(variable, filename):
-    value = os.environ.get(variable)
-    if not value:
-        value = path_under_root(filename).read_text().strip()
-    return path_under_root(value)
+def bounded_directories(roots, max_depth=5, limit=160):
+    """Inspect known toolchain locations, never a whole-home recursive search."""
+    skip = {'target', 'cache', 'tmp', 'unpack', 'downloads', 'registry', '.git', 'vendor',
+            'cargo', 'cargo-offline', 'lib', 'share', 'etc'}
+    queue, seen = [(Path(root), 0) for root in roots], set()
+    while queue and len(seen) < limit:
+        path, depth = queue.pop(0)
+        try:
+            path = path.resolve(strict=True)
+            if path in seen or not path.is_dir():
+                continue
+            seen.add(path)
+            yield path
+            if depth < max_depth:
+                queue.extend((child, depth + 1) for child in sorted(path.iterdir())
+                             if child.name not in skip and not child.is_symlink() and child.is_dir())
+        except OSError:
+            continue
+
+
+def pointer_value(path, warnings):
+    try:
+        path_under_root(path)
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+            raise ValueError('pointer is too large')
+        return path.read_text().strip()
+    except (OSError, ValueError) as error:
+        warnings.append({'pointer': str(path), 'reason': str(error)})
+        return None
+
+
+def real_compiler_binary(path):
+    """Reject rustup proxies before executing anything; queries cannot sync a channel."""
+    path = Path(path).resolve(strict=True)
+    if path.name == 'rustup' or not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError('not an existing executable compiler binary')
+    manager = path.parent / 'rustup'
+    if manager.exists() and os.path.samefile(path, manager):
+        raise ValueError('rustup proxy, not the real installed toolchain')
+    with path.open('rb') as stream:
+        header = stream.read(20)
+    if len(header) < 20 or header[:4] != b'\x7fELF' or int.from_bytes(header[18:20], 'little') != 183:
+        raise ValueError('not an ARM64 ELF executable; wrapper/proxy not run')
+    return path
+
+
+def probe_rust(directory, runner=subprocess.run):
+    rustc = real_compiler_binary(Path(directory) / 'rustc')
+    cargo = real_compiler_binary(Path(directory) / 'cargo')
+    # Stock sysroot proof is checked before running the binary. An unpacked rustc
+    # component or cargo-bin rustup proxy is not an installed compiler+stdlib.
+    standard = next((rustc.parent.parent / lib / 'rustlib/aarch64-unknown-linux-gnu/lib'
+                     for lib in ('lib', 'lib64')
+                     if (rustc.parent.parent / lib / 'rustlib/aarch64-unknown-linux-gnu/lib').is_dir()
+                     and any((rustc.parent.parent / lib / 'rustlib/aarch64-unknown-linux-gnu/lib').glob('libstd-*.rlib'))), None)
+    if standard is None:
+        raise ValueError('installed ARM64 standard library not found beside compiler')
+    env = dict(os.environ)
+    for name in ('LD_PRELOAD', 'LD_AUDIT'):
+        env.pop(name, None)
+    result = runner([str(rustc), '-Vv'], capture_output=True, text=True, timeout=15, env=env)
+    version = re.search(r'^release: (\d+)\.(\d+)\.(\d+)\s*$', result.stdout, re.M)
+    if result.returncode or not version or 'host: aarch64-unknown-linux-gnu' not in result.stdout:
+        raise ValueError('existing stable ARM64 compiler identity query failed')
+    cargo_result = runner([str(cargo), '-V'], capture_output=True, text=True, timeout=15, env=env)
+    if cargo_result.returncode or not cargo_result.stdout.startswith('cargo '):
+        raise ValueError('existing cargo identity query failed')
+    return {'bin': str(rustc.parent), 'rustc': str(rustc), 'cargo': str(cargo),
+            'version': '.'.join(version.groups()), 'cargo_version': cargo_result.stdout.strip(),
+            'standard_library': str(standard)}
+
+
+def discover_rust(environment, which=shutil.which, runner=subprocess.run):
+    warnings, candidates = [], []
+    explicit = environment.get('AENV_RUST_BIN_DIR')
+    if explicit:
+        try:
+            return probe_rust(explicit, runner), warnings
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return None, [{'override': explicit, 'reason': str(error)}]
+    pointer = pointer_value(ROOT / 'toolchains/agentenv-rust-1.99.0-offline.path', warnings)
+    if pointer:
+        candidates.append(Path(pointer))
+    for name in ('rustc', 'cargo'):
+        found = which(name)
+        if found:
+            candidates.append(Path(found).parent)
+    roots = [ROOT / 'toolchains', ROOT / 'rustup/toolchains', ROOT / '.rustup/toolchains',
+             Path.home() / '.rustup/toolchains']
+    if environment.get('RUSTUP_HOME'):
+        roots.append(Path(environment['RUSTUP_HOME']) / 'toolchains')
+    for path in bounded_directories(roots):
+        if (path / 'rustc').is_file():
+            candidates.append(path)
+        if (path / 'bin/rustc').is_file():
+            candidates.append(path / 'bin')
+    available, seen = [], set()
+    for directory in candidates:
+        try:
+            directory = directory.resolve(strict=True)
+            if directory in seen:
+                continue
+            seen.add(directory)
+            available.append(probe_rust(directory, runner))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            warnings.append({'candidate': str(directory), 'reason': str(error)})
+    if not available:
+        return None, warnings
+    return max(available, key=lambda item: tuple(map(int, item['version'].split('.')))), warnings
+
+
+def discover_vendor(environment):
+    warnings = []
+    explicit = environment.get('AENV_VENDOR_DIR')
+    candidates = [Path(explicit)] if explicit else []
+    if not explicit:
+        value = pointer_value(ROOT / 'offline/agentenv-vendor-ae9c626.path', warnings)
+        if value:
+            candidates.append(Path(value))
+        if (ROOT / 'offline').is_dir():
+            candidates.extend(sorted((ROOT / 'offline').glob('vendor-ae9c626-*'))[:32])
+    for candidate in candidates:
+        try:
+            candidate = path_under_root(candidate)
+            marker = candidate / 'agentenv-vendor-manifest.json'
+            path_under_root(marker)
+            if marker.stat().st_size > 65536:
+                raise ValueError('vendor marker is too large')
+            manifest = json.loads(marker.read_text())
+            if manifest.get('lock_sha256') != LOCK_SHA:
+                raise ValueError('vendor belongs to another Cargo.lock')
+            return candidate, warnings
+        except (OSError, ValueError) as error:
+            warnings.append({'candidate': str(candidate), 'reason': str(error)})
+    return None, warnings
+
+
+def owned_cache():
+    cache = path_under_root(ROOT / 'builds/agentenv-ub-build-v2', exists=False)
+    marker = cache / 'build-cache.json'
+    if cache.exists():
+        if cache.stat().st_uid != os.getuid() or not marker.is_file() or marker.is_symlink():
+            raise ValueError('Unknown existing build cache; preserved')
+        record = json.loads(marker.read_text())
+        if record != {'revision': 'ub-build-cache-v2', 'uid': 1204, 'lock_sha256': LOCK_SHA}:
+            raise ValueError('Build cache identity differs; preserved')
+    else:
+        cache.mkdir(parents=True, mode=0o700)
+        with marker.open('x') as stream:
+            json.dump({'revision': 'ub-build-cache-v2', 'uid': 1204, 'lock_sha256': LOCK_SHA}, stream)
+    return cache
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--allow-locked-network', action='store_true',
+                        help='use locked Cargo downloads in a private cache if an offline vendor is unavailable')
+    args = parser.parse_args()
     if (sys.platform != 'linux' or socket.gethostname() != 'server1'
             or os.getuid() != 1204 or os.geteuid() != 1204 or os.getgid() != 1205):
         raise SystemExit('Use node-a/server1 ordinary jwk UID1204/GID1205')
@@ -45,24 +200,36 @@ def main():
     source = path_under_root(Path(__file__).absolute().parents[2])
     if hashlib.sha256((source / 'Cargo.lock').read_bytes()).hexdigest() != LOCK_SHA:
         raise SystemExit('Lockfile differs from the fixed offline baseline; no online resolution')
-    rust = pointer('AENV_RUST_BIN_DIR', ROOT / 'toolchains/agentenv-rust-1.99.0-offline.path')
-    vendor = pointer('AENV_VENDOR_DIR', ROOT / 'offline/agentenv-vendor-ae9c626.path')
-    if not rust.is_relative_to(ROOT / 'toolchains') or (rust / 'rustup').exists():
-        raise SystemExit('Use the existing standalone private compiler, never rustup proxies')
-    manifest = json.loads((vendor / 'agentenv-vendor-manifest.json').read_text())
-    if not vendor.is_relative_to(ROOT / 'offline') or manifest['lock_sha256'] != LOCK_SHA:
-        raise SystemExit('Offline dependency bundle belongs to another source lockfile')
-    for tool in ('gcc', 'g++', 'ar', 'make', 'cmake', 'clang', 'protoc', 'pkg-config', 'readelf'):
-        if shutil.which(tool) is None:
-            raise SystemExit('Missing existing build tool: ' + tool + '; no installation attempted')
-    for tool in ('cargo', 'rustc', 'rustdoc'):
-        if not (rust / tool).is_file():
-            raise SystemExit('Missing private compiler component: ' + tool)
-    if shutil.disk_usage(ROOT).free < 16 * 1024**3:
-        raise SystemExit('Independent full build needs at least 16GiB free working space; no cleanup attempted')
     reports = path_under_root(ROOT / 'relay/reports')
     output = Path(tempfile.mkdtemp(prefix='node-a-ub-layers-build-', dir=reports))
     print('REPORT_DIRECTORY=' + str(output), flush=True)
+    rust_info, rust_warnings = discover_rust(os.environ)
+    vendor, vendor_warnings = discover_vendor(os.environ)
+    missing = [name for name in ('git', 'gcc', 'g++', 'ar', 'make', 'cmake', 'clang', 'protoc', 'pkg-config', 'readelf')
+               if shutil.which(name) is None]
+    if rust_info is None:
+        missing.append('existing_real_ARM64_Rust_and_Cargo_with_standard_library')
+    if vendor is None and (not args.allow_locked_network or os.environ.get('AENV_VENDOR_DIR')):
+        missing.append('matching_offline_vendor_or_explicit_allow_locked_network')
+    if shutil.disk_usage(ROOT).free < 16 * 1024**3:
+        missing.append('16GiB_free_build_space')
+    discovery = {'rust': rust_info, 'rust_diagnostics': rust_warnings, 'vendor': str(vendor) if vendor else None,
+                 'vendor_diagnostics': vendor_warnings, 'missing': missing,
+                 'dependency_mode': 'vendor_frozen' if vendor else 'locked_network' if args.allow_locked_network else 'blocked'}
+    if missing:
+        report = {'status': 'STOPPED_BUILD_PRECONDITION_NO_BUILD_STARTED', 'directory': str(output),
+                  'node': 'node-a', 'hostname': socket.gethostname(), 'uid': os.getuid(),
+                  'discovery': discovery, 'service_started': False, 'SDK_called': False,
+                  'next_action': 'Return this complete report. No installation, upgrade or service change was attempted.'}
+        (output / 'return.json').write_text(json.dumps(report, indent=2))
+        print('BEGIN_RETURN_REPORT')
+        print(json.dumps(report, indent=2))
+        print('END_RETURN_REPORT')
+        return 1
+    rust = Path(rust_info['bin'])
+    cache = owned_cache()
+    print('RUST_SELECTED=' + rust_info['rustc'] + ' version=' + rust_info['version'], flush=True)
+    print('DEPENDENCY_MODE=' + discovery['dependency_mode'], flush=True)
     env = dict(os.environ)
     for variable in list(env):
         if variable.startswith('GIT_'):
@@ -74,21 +241,25 @@ def main():
                                 'TMPDIR': 'tmp', 'XDG_CACHE_HOME': 'cache', 'XDG_CONFIG_HOME': 'config',
                                 'XDG_STATE_HOME': 'state', 'CARGO_TARGET_DIR': 'target',
                                 'CCACHE_DIR': 'cache/ccache', 'SCCACHE_DIR': 'cache/sccache'}.items():
-        path = output / directory
+        path = path_under_root(cache / directory, exists=False)
         path.mkdir(parents=True, exist_ok=True)
         env[variable] = str(path)
-    env.update(PATH=str(rust) + os.pathsep + env['PATH'], RUSTC=str(rust / 'rustc'),
-               RUSTDOC=str(rust / 'rustdoc'), CARGO_NET_OFFLINE='true', CARGO_BUILD_JOBS='2',
+    env.update(PATH=str(rust) + os.pathsep + env['PATH'], RUSTC=rust_info['rustc'],
+               CARGO_NET_OFFLINE='true' if vendor else 'false', CARGO_BUILD_JOBS='2',
                CMAKE_BUILD_PARALLEL_LEVEL='2', GIT_TERMINAL_PROMPT='0',
                PROTOC=shutil.which('protoc'))
     env.update(CARGO_INCREMENTAL='0', CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0')
-    env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONPYCACHEPREFIX=str(output / 'cache/pycache'))
+    env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONPYCACHEPREFIX=str(cache / 'cache/pycache'))
+    if (rust / 'rustdoc').is_file():
+        env['RUSTDOC'] = str(rust / 'rustdoc')
+    else:
+        env.pop('RUSTDOC', None)
     env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                GIT_CEILING_DIRECTORIES=str(source.parent))
     if Path('/usr/lib64/libclang.so').is_file():
         env['LIBCLANG_PATH'] = '/usr/lib64'
     config = output / 'cargo-offline.toml'
-    config.write_text('''[net]
+    config.write_text(('''[net]
 offline = true
 [source.crates-io]
 replace-with = "agentenv-offline"
@@ -97,11 +268,13 @@ git = "https://github.com/ublk-org/libublk-rs.git"
 rev = "c6a3e06"
 replace-with = "agentenv-offline"
 [source.agentenv-offline]
-directory = ''' + json.dumps(str(vendor)) + '\n')
-    cargo = [str(rust / 'cargo'), '--config', str(config)]
+directory = ''' + json.dumps(str(vendor)) + '\n') if vendor else '[net]\noffline = false\n')
+    cargo = [rust_info['cargo'], '--config', str(config)]
+    locked = '--frozen' if vendor else '--locked'
     report = {'status': 'NOT_COMPLETED', 'directory': str(output), 'source': str(source),
               'node': 'node-a', 'uid': 1204, 'phases': {}, 'service_started': False,
-              'SDK_called': False, 'Guest_or_ublk_tests_executed': False}
+              'SDK_called': False, 'Guest_or_ublk_tests_executed': False,
+              'discovery': discovery, 'build_cache': str(cache)}
     try:
         commit = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'],
                                          env=env, stderr=subprocess.DEVNULL, timeout=15).decode().strip()
@@ -144,31 +317,33 @@ directory = ''' + json.dumps(str(vendor)) + '\n')
             raise RuntimeError(name + ' failed; preserve logs and do not install/upgrade system components')
 
     try:
-        run('rust-version', [str(rust / 'rustc'), '-Vv'])
-        run('resolution', cargo + ['metadata', '--frozen', '--format-version', '1'])
-        run('check-server-daemon', cargo + ['check', '--frozen', '-p', 'agentenv', '-p', 'uvm-ublk-daemon'])
-        run('test-ub-wire-and-file', cargo + ['test', '--frozen', '-p', 'overlaybd', '--lib', 'backend::ub', '--', '--test-threads=2'])
-        run('test-ub-and-legacy-config', cargo + ['test', '--frozen', '-p', 'overlaybd', '--lib', 'config::'])
-        run('test-ub-ancestor-staging', cargo + ['test', '--frozen', '-p', 'agentenv', '--lib',
+        run('rust-version', [rust_info['rustc'], '-Vv'])
+        run('resolution', cargo + ['metadata', locked, '--format-version', '1'])
+        run('check-server-daemon', cargo + ['check', locked, '-p', 'agentenv', '-p', 'uvm-ublk-daemon'])
+        run('test-ub-wire-and-file', cargo + ['test', locked, '-p', 'overlaybd', '--lib', 'backend::ub', '--', '--test-threads=2'])
+        run('test-ub-and-legacy-config', cargo + ['test', locked, '-p', 'overlaybd', '--lib', 'config::'])
+        run('test-ub-ancestor-staging', cargo + ['test', locked, '-p', 'agentenv', '--lib',
                                               'split_runtime_suffix_keeps_ub_ancestor_without_a_local_duplicate'])
-        run('build-runtime', cargo + ['build', '--frozen', '--release', '-p', 'agentenv', '--bin', 'server'])
-        run('build-cli', cargo + ['build', '--frozen', '--release', '-p', 'aenv', '--bin', 'aenv'])
-        run('build-daemon', cargo + ['build', '--frozen', '--release', '-p', 'uvm-ublk-daemon', '--bin', 'uvm-ublk-daemon'])
-        run('build-layer-probe', cargo + ['build', '--frozen', '--release', '-p', 'overlaybd', '--example', 'ub_layer_probe'])
+        run('build-runtime', cargo + ['build', locked, '--release', '-p', 'agentenv', '--bin', 'server'])
+        run('build-cli', cargo + ['build', locked, '--release', '-p', 'aenv', '--bin', 'aenv'])
+        run('build-daemon', cargo + ['build', locked, '--release', '-p', 'uvm-ublk-daemon', '--bin', 'uvm-ublk-daemon'])
+        run('build-layer-probe', cargo + ['build', locked, '--release', '-p', 'overlaybd', '--example', 'ub_layer_probe'])
         artifacts = output / 'artifacts'
         artifacts.mkdir()
         for name in ('server', 'aenv', 'uvm-ublk-daemon', 'examples/ub_layer_probe'):
-            shutil.copy2(output / 'target/release' / name, artifacts / Path(name).name)
+            shutil.copy2(cache / 'target/release' / name, artifacts / Path(name).name)
         report['artifacts'] = str(artifacts)
         report['sha256'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in artifacts.iterdir()}
-        report['status'] = 'UB_LAYERS_OFFLINE_BUILD_COMPLETED_NO_SERVICE_STARTED'
+        report['status'] = ('UB_LAYERS_OFFLINE_BUILD_COMPLETED_NO_SERVICE_STARTED' if vendor
+                            else 'UB_LAYERS_LOCKED_BUILD_COMPLETED_NO_SERVICE_STARTED')
     except BaseException as error:
         report.update(status='STOPPED_UB_LAYERS_BUILD', error=type(error).__name__ + ': ' + str(error))
     (output / 'return.json').write_text(json.dumps(report, indent=2))
     print('BEGIN_RETURN_REPORT')
     print(json.dumps(report, indent=2))
     print('END_RETURN_REPORT')
-    return 0 if report['status'].startswith('UB_LAYERS_OFFLINE_BUILD_COMPLETED') else 1
+    return 0 if report['status'] in ('UB_LAYERS_OFFLINE_BUILD_COMPLETED_NO_SERVICE_STARTED',
+                                   'UB_LAYERS_LOCKED_BUILD_COMPLETED_NO_SERVICE_STARTED') else 1
 
 
 if __name__ == '__main__':
