@@ -34,6 +34,8 @@ class Tests(unittest.TestCase):
         self.create_status = 201
         self.fail_warmup = False
         self.bad_owner = False
+        self.visible_matches = []
+        self.child_calls = []
         self.manifest = b'{"layers":[{"size":1}],"config":{"size":1}}'
 
     def tearDown(self):
@@ -43,13 +45,18 @@ class Tests(unittest.TestCase):
     def api(self, method, path, data=None, timeout=20):
         self.calls.append((method, path))
         if path == '/health': return 204, None
+        if path.startswith('/v2/sandboxes?'):
+            self.assertEqual(method, 'GET')
+            self.assertIn('metadata=cow_parent_run%3D', path)
+            return 200, self.visible_matches
         if path == '/sandboxes-cold':
             self.assertEqual(data['cpuCount'], 1)
             self.assertEqual(data['memoryMB'], 512)
             self.assertFalse(data['autoPause'])
             self.assertFalse(data['allowInternetAccess'])
+            self.assertNotIn('diskSizeMB', data)
             self.marker = data['metadata']['cow_parent_run']
-            return self.create_status, {'sandboxID':'owned-parent'}
+            return self.create_status, {'sandboxID':'owned-parent','diskSizeMB':65536}
         if path.endswith('/snapshots'): return 201, {'snapshotID':'owned-snapshot'}
         self.assertEqual(path, '/sandboxes/owned-parent')
         if method == 'DELETE': self.deleted = True; return 204, None
@@ -68,6 +75,7 @@ class Tests(unittest.TestCase):
         def mkdtemp(prefix, dir):
             path=Path(dir)/(prefix+uuid.uuid4().hex[:5]);path.mkdir(mode=0o755);return str(path)
         def child(command, env, log, timeout):
+            self.child_calls.append(command)
             if 'manifest' in command: log.write_bytes(self.manifest)
             elif 'exec' in command:
                 if self.fail_warmup: raise RuntimeError('Guest import failed')
@@ -110,6 +118,7 @@ class Tests(unittest.TestCase):
         config=json.loads((Path(r['report_directory'])/'regctl.json').read_text())
         self.assertEqual(config,{'incDockerCert':False,'incDockerCred':False})
         self.assertEqual(self.calls.count(('POST','/sandboxes-cold')),1)
+        self.assertEqual(r['disk_logical_mib_observed'],65536)
         self.assertEqual([x for x in self.calls if x[0]=='DELETE'],[('DELETE','/sandboxes/owned-parent')])
 
     def test_failed_warmup_still_releases_known_parent(self):
@@ -183,6 +192,53 @@ class Tests(unittest.TestCase):
         self.assertNotIn('hidden-token',data)
         self.assertNotIn('fixture-pass',(self.root/'manifest.stderr.log').read_text())
         self.assertEqual(caught.exception.diagnostics['exit_code'],3)
+
+    def prior_size_failure(self):
+        old = self.root/'relay/reports/node-a-cow-parent-prior'
+        (old/'image').mkdir(parents=True)
+        prior={'revision':'cow-parent-once-v2','node':'node-a',
+               'report_directory':str(old),'run_id':'a'*32,
+               'image':'registry.example/repo@sha256:'+hashlib.sha256(self.manifest).hexdigest(),
+               'Guest_workdir':'/repo','warm_module':'sample',
+               'create_http_status':400,'create_calls':1,'parent_id':None,'snapshot_id':None,
+               'create_error':{'code':400,'message':'requested overlaybd runtime virtual size 2147483648 is smaller than base virtual size 68719476736; shrinking is disabled'}}
+        (old/'return.json').write_text(json.dumps(prior))
+        (self.root/'relay/cow-parent-node-a.pending.json').write_text(json.dumps(prior))
+        return prior
+
+    def test_size_rejection_reconciles_and_reuses_input_without_network_download(self):
+        prior=self.prior_size_failure()
+        rc,result=self.run_fixture()
+        self.assertEqual(rc,0)
+        self.assertFalse(result['image_downloaded_this_run'])
+        self.assertEqual(result['previous_attempt_resolution']['matching_sandboxes'],0)
+        self.assertEqual(self.calls.count(('POST','/sandboxes-cold')),1)
+        self.assertFalse(any('manifest' in c or 'copy' in c for c in self.child_calls))
+        backup=Path(result['previous_attempt_resolution']['prior_pending_backup'])
+        self.assertEqual(json.loads(backup.read_text()),prior)
+
+    def test_visible_prior_object_blocks_new_create_and_preserves_receipt(self):
+        prior=self.prior_size_failure()
+        self.visible_matches=[{'sandboxID':'existing-owned-object'}]
+        rc,result=self.run_fixture()
+        self.assertEqual(rc,1)
+        self.assertFalse(any(m in ('POST','DELETE') for m,path in self.calls))
+        self.assertEqual(json.loads((self.root/'relay/cow-parent-node-a.pending.json').read_text()),prior)
+
+    def test_unknown_400_is_not_automatically_reconciled(self):
+        prior=self.prior_size_failure()
+        prior['create_error']['message']='A different error'
+        (self.root/'relay/cow-parent-node-a.pending.json').write_text(json.dumps(prior))
+        rc,result=self.run_fixture()
+        self.assertEqual(result['status'],'PARENT_RECEIPT_EXISTS_NO_NEW_CREATE')
+        self.assertEqual(self.calls,[])
+
+    def test_parent_inventory_is_not_a_shared_ram_claim_and_missing_is_not_zero(self):
+        with patch.object(p,'BASE',self.base):
+            result=p.parent_layer_inventory('snapshot')
+        self.assertFalse(result['available'])
+        self.assertNotIn('shared_bytes',result)
+        self.assertEqual(result['scope'],'stored_layer_metadata_only_no_shared_page_claim')
 
 
 if __name__=='__main__': unittest.main(verbosity=2)

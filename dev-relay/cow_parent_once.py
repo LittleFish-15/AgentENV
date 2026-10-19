@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 import uuid
 
 ROOT = Path('/home/jwk/agent')
@@ -130,6 +130,8 @@ class Api:
     def call(self, method, path, data=None, timeout=20):
         need(runtime_pid() == self.identity, 'Original service changed; no request sent')
         allowed = path in ('/health', '/sandboxes-cold') or re.fullmatch(r'/sandboxes/[A-Za-z0-9_-]+(?:/snapshots)?', path)
+        allowed = allowed or (method == 'GET' and re.fullmatch(
+            r'/v2/sandboxes\?metadata=cow_parent_run%3D[0-9a-f]{32}&limit=2', path))
         need(allowed and method in ('GET', 'POST', 'DELETE'), 'API route outside experiment')
         conn = http.client.HTTPConnection('127.0.0.1', 18080, timeout=timeout)
         try:
@@ -154,6 +156,76 @@ def error_summary(body, key):
     message = re.sub(r'https?://\S+\?\S+', '[URL query withheld]', message)
     return {'code': body.get('code') if isinstance(body.get('code'), int) else None,
             'message': message[:3000]}
+
+
+def known_size_rejection(prior, args):
+    error = prior.get('create_error') or {}
+    return (prior.get('revision') == 'cow-parent-once-v2' and prior.get('node') == 'node-a'
+            and prior.get('create_http_status') == 400 and error.get('code') == 400
+            and prior.get('create_calls') == 1 and prior.get('parent_id') is None
+            and prior.get('snapshot_id') is None and prior.get('image') == args.image
+            and prior.get('Guest_workdir') == args.workdir and prior.get('warm_module') == args.warm_module
+            and isinstance(prior.get('run_id'), str) and re.fullmatch(r'[0-9a-f]{32}', prior['run_id']) is not None
+            and re.search(r'requested overlaybd runtime virtual size 2147483648 is smaller than base virtual size 68719476736; shrinking is disabled',
+                          str(error.get('message', ''))) is not None)
+
+
+def reconcile_size_rejection(api, prior, args, work):
+    need(known_size_rejection(prior, args), 'Prior attempt is not the reviewed disk-size rejection')
+    old_dir = safe(Path(prior['report_directory']))
+    need(old_dir.parent == ROOT / 'relay/reports' and old_dir.name.startswith('node-a-cow-parent-'), 'Unexpected previous report path')
+    need(json.loads(read(old_dir / 'return.json')) == prior, 'Pending and completed report differ; preserved')
+    query = '/v2/sandboxes?' + urlencode({'metadata': 'cow_parent_run=' + prior['run_id'], 'limit': 2})
+    status, rows = api.call('GET', query)
+    need(status == 200 and isinstance(rows, list), 'Cannot reconcile previous request; no new create')
+    need(not rows, 'Previous run still has a visible sandbox; preserve it, no new create/delete')
+    image = safe(old_dir / 'image')
+    need(image.is_dir(), 'Previously verified OCI directory missing')
+    verification = verify_layout(image, args.image.split('@')[1])
+    save(work / 'previous-pending.json', prior)
+    return image, verification, {
+        'prior_run_id': prior['run_id'], 'prior_http_status': 400,
+        'classification': 'KNOWN_SIZE_REJECTION_NO_VISIBLE_MATCHING_SANDBOX',
+        'matching_sandboxes': 0, 'query_includes_all_states': True,
+        'prior_report_preserved': True, 'prior_pending_backup': str(work / 'previous-pending.json'),
+        'prior_runtime_directory_removed': False, 'new_attempt_limit': 1}
+
+
+def parent_layer_inventory(snapshot_id):
+    """Capture stored/allocated bytes, not Guest physical sharing or cache sizes."""
+    result = {'phase': 'after_parent_capture_before_replay',
+              'scope': 'stored_layer_metadata_only_no_shared_page_claim',
+              'snapshot_id': snapshot_id, 'content_hashes_verified': False}
+    try:
+        repo = BASE / 'state/snapshot-store'
+        record = json.loads(read(repo / 'catalog/records' / (snapshot_id + '.json')))
+        need(record.get('id') == snapshot_id and isinstance(record.get('committed'), dict), 'Committed snapshot record mismatch')
+        committed = record['committed']
+        for kind in ('memory', 'rootfs'):
+            rows = []
+            for item in committed.get(kind + '_layers', []):
+                origin = 'Managed' if kind == 'memory' else next(iter(item), '')
+                layer = item if kind == 'memory' else item.get(origin, {})
+                digest = layer.get('digest', '')
+                need(re.fullmatch(r'sha256:[0-9a-f]{64}', digest), 'Unexpected committed digest')
+                row = {'origin': origin, 'digest': digest, 'stored_bytes_declared': layer.get('size')}
+                if origin == 'Managed':
+                    path = safe(repo / 'managed-layers' / (digest.replace(':', '_') + '.overlaybd.commit'))
+                    try:
+                        m = path.stat()
+                        need(stat.S_ISREG(m.st_mode), 'Managed layer is not a regular file')
+                        row.update(path=str(path), file_bytes=m.st_size, allocated_file_bytes=m.st_blocks * 512,
+                                   dev=m.st_dev, inode=m.st_ino, mtime_ns=m.st_mtime_ns)
+                    except Exception as e:
+                        row['file_measurement'] = {'available': False, 'error_type': type(e).__name__}
+                else:
+                    row['file_measurement'] = {'available': False, 'reason': 'EXTERNAL_PLACEMENT_NOT_RESOLVED'}
+                rows.append(row)
+            result[kind] = rows
+        result['available'] = True
+    except Exception as e:
+        result.update(available=False, error_type=type(e).__name__)
+    return result
 
 
 def verify_layout(layout, digest):
@@ -241,18 +313,19 @@ def main():
     import fcntl
     with open(safe(ROOT / 'relay/cow-parent-node-a.lock'), 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if PENDING.exists():
-            prior = json.loads(read(PENDING))
+        prior = json.loads(read(PENDING)) if PENDING.exists() else None
+        if prior and not known_size_rejection(prior, args):
             print('BEGIN_RETURN_REPORT')
             print(json.dumps({'status': 'PARENT_RECEIPT_EXISTS_NO_NEW_CREATE', 'prior': prior}, indent=2))
             print('END_RETURN_REPORT')
             return 1
         work = Path(tempfile.mkdtemp(prefix='node-a-cow-parent-', dir=safe(ROOT / 'relay/reports')))
-        report = {'revision': 'cow-parent-once-v2', 'node': 'node-a', 'report_directory': str(work),
+        report = {'revision': 'cow-parent-once-v3', 'node': 'node-a', 'report_directory': str(work),
                   'image': args.image, 'Guest_workdir': args.workdir, 'warm_module': args.warm_module,
                   'run_id': uuid.uuid4().hex, 'SDK_called': False, 'services_modified': False,
                   'cow_validation_executed': False, 'cpu_count': 1, 'memory_mib': 512,
-                  'disk_logical_mib': 2048, 'max_cold_create_calls': 1,
+                  'disk_logical_mib_requested': None, 'disk_policy': 'INHERIT_BASE_NO_RESIZE',
+                  'disk_logical_mib_observed': None, 'max_cold_create_calls': 1,
                   'create_calls': 0, 'snapshot_id': None, 'parent_id': None,
                   'parent_deleted': False, 'create_outcome_uncertain': False,
                   'started_unix': time.time()}
@@ -263,6 +336,10 @@ def main():
             need(receipt.get('node') == 'node-a' and receipt.get('commit') == 'ae9c62693839ce7effa2b45df31c0039ae4f9fbc', 'Original installation identity differs')
             api = Api()
             need(api.call('GET', '/health')[0] == 204, 'Original health failed')
+            reused_image = None
+            if prior:
+                print('PHASE=reconcile_previous_size_rejection', flush=True)
+                reused_image, report['image_verification'], report['previous_attempt_resolution'] = reconcile_size_rejection(api, prior, args, work)
             regctl = safe(BASE / 'deps/regctl/v0.11.5/regctl')
             need(regctl.is_file(), 'Existing regctl missing; no installation attempted')
             for name in ('tmp', 'cache', 'docker', 'cli-config/aenv'):
@@ -279,26 +356,37 @@ def main():
                    'REGCTL_CONFIG': str(work / 'regctl.json'), 'GOMAXPROCS': '2'}
             network_env, report['network_environment'] = network_environment(os.environ)
             env.update(network_env)
-            print('PHASE=resolve_fixed_image_metadata', flush=True)
-            checked_process([regctl, 'manifest', 'get', '--format', 'raw-body', args.image], env,
-                            work / 'manifest.json', 60)
-            raw = read(work / 'manifest.json')
             expected = args.image.split('@')[1]
-            need('sha256:' + hashlib.sha256(raw).hexdigest() == expected, 'Manifest digest differs')
-            manifest = json.loads(raw)
-            need(0 < sum(x['size'] for x in manifest['layers']) + manifest['config']['size'] <= MAX_IMAGE_BYTES,
-                 'Fixed image exceeds compressed byte budget')
-            image = work / 'image'
-            print('PHASE=download_one_image_to_local_oci', flush=True)
-            checked_process([regctl, 'image', 'copy', '--platform', 'linux/arm64', args.image,
-                             'ocidir://' + str(image) + ':parent'], env, work / 'image-copy.log', 600)
-            report['image_verification'] = verify_layout(image, expected)
+            if reused_image:
+                image = reused_image
+                report['image_downloaded_this_run'] = False
+                print('PHASE=reuse_verified_local_oci', flush=True)
+            else:
+                print('PHASE=resolve_fixed_image_metadata', flush=True)
+                checked_process([regctl, 'manifest', 'get', '--format', 'raw-body', args.image], env,
+                                work / 'manifest.json', 60)
+                raw = read(work / 'manifest.json')
+                need('sha256:' + hashlib.sha256(raw).hexdigest() == expected, 'Manifest digest differs')
+                manifest = json.loads(raw)
+                need(0 < sum(x['size'] for x in manifest['layers']) + manifest['config']['size'] <= MAX_IMAGE_BYTES,
+                     'Fixed image exceeds compressed byte budget')
+                image = work / 'image'
+                print('PHASE=download_one_image_to_local_oci', flush=True)
+                checked_process([regctl, 'image', 'copy', '--platform', 'linux/arm64', args.image,
+                                 'ocidir://' + str(image) + ':parent'], env, work / 'image-copy.log', 600)
+                report['image_verification'] = verify_layout(image, expected)
+                report['image_downloaded_this_run'] = True
+            report['local_oci_directory'] = str(image)
             print('PHASE=one_original_parent_create', flush=True)
+            if prior:
+                need(json.loads(read(PENDING)) == prior, 'Prior pending changed during reconciliation; no create')
+            else:
+                need(not PENDING.exists(), 'A pending receipt appeared concurrently; no create')
             report.update(create_calls=1, create_outcome_uncertain=True)
             save(PENDING, report)
             status, body = api.call('POST', '/sandboxes-cold', {
                 'image': 'ocidir://' + str(image) + '@' + expected,
-                'cpuCount': 1, 'memoryMB': 512, 'diskSizeMB': 2048,
+                'cpuCount': 1, 'memoryMB': 512,
                 'secure': True, 'autoPause': False, 'allowInternetAccess': False,
                 'timeout': 900, 'metadata': {'cow_parent_run': report['run_id']}}, timeout=600)
             report['create_http_status'] = status
@@ -308,6 +396,8 @@ def main():
             sid = body.get('sandboxID')
             need(isinstance(sid, str) and ID.fullmatch(sid), 'Invalid created sandbox identity')
             report.update(parent_id=sid, create_outcome_uncertain=False)
+            actual_disk = body.get('diskSizeMB')
+            report['disk_logical_mib_observed'] = actual_disk if isinstance(actual_disk, int) else None
             save(PENDING, report)
             # CLI consumes the same already-authorized loopback API key. Kept
             # only in this 0700 run directory and removed in finally.
@@ -329,6 +419,7 @@ def main():
             snapshot = body.get('snapshotID')
             need(isinstance(snapshot, str) and ID.fullmatch(snapshot), 'Snapshot ID not confirmed')
             report['snapshot_id'] = snapshot
+            report['parent_layer_inventory'] = parent_layer_inventory(snapshot)
             save(PENDING, report)
         except Exception as e:
             report['error'] = {'type': type(e).__name__, 'errno': getattr(e, 'errno', None),
