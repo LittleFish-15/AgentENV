@@ -150,6 +150,8 @@ def discover_vendor(environment):
             candidates.append(Path(value))
         if (ROOT / 'offline').is_dir():
             candidates.extend(sorted((ROOT / 'offline').glob('vendor-ae9c626-*'))[:32])
+        locations = existing_inputs()
+        candidates.extend(locations['vendors'])
     for candidate in candidates:
         try:
             candidate = path_under_root(candidate)
@@ -164,6 +166,141 @@ def discover_vendor(environment):
         except (OSError, ValueError) as error:
             warnings.append({'candidate': str(candidate), 'reason': str(error)})
     return None, warnings
+
+
+def existing_inputs():
+    """Read-only bounded inventory of old experiment inputs; never reads credentials.
+
+    Old build reports/configs may record a vendor outside the historical offline
+    directory. Cargo homes are detected by registry/cache, without loading their
+    config, credentials, Git checkout or build scripts.
+    """
+    queue = [(ROOT / name, 0) for name in
+             ('toolchains', 'src', 'offline', 'builds', 'deps', 'vendor', 'cache',
+              '.cargo', 'cargo', 'cargo-home', 'cargo-offline')]
+    original_report = ROOT / 'relay/reports/node-a-build-20261015T063406Z-wAjyMg'
+    vendors, cargo_homes, seen = [], [], set()
+    for filename in ('cargo-offline.toml', 'build-environment.txt'):
+        try:
+            config = path_under_root(original_report / filename)
+            if config.stat().st_size > 65536:
+                continue
+            for line in config.read_text().splitlines():
+                match = re.fullmatch(r'\s*directory\s*=\s*(".*")\s*', line)
+                value = json.loads(match.group(1)) if match else (
+                    line.split('=', 1)[1] if line.startswith('vendor_directory=') else None)
+                if value:
+                    vendors.append(path_under_root(value))
+        except (OSError, ValueError):
+            continue
+    skip = {'target', '.git', 'git', 'registry', 'tmp', 'unpack', 'downloads',
+            'node_modules', 'rustup', 'lib', 'lib64', 'share', 'bin', 'include',
+            'agentenv-ub-build-v2'}
+    while queue and len(seen) < 700:
+        path, depth = queue.pop(0)
+        try:
+            path = path_under_root(path)
+            if path in seen or not path.is_dir():
+                continue
+            seen.add(path)
+            if (path / 'agentenv-vendor-manifest.json').is_file():
+                vendors.append(path)
+                continue
+            if (path / 'registry/cache').is_dir():
+                path_under_root(path / 'registry/cache')
+                cargo_homes.append(path)
+            # These are package sources, never build-cache discovery roots.
+            if (path / '.cargo-checksum.json').is_file():
+                continue
+            if depth < 5:
+                queue.extend((child, depth + 1) for child in sorted(path.iterdir())
+                             if child.name not in skip and not child.is_symlink() and child.is_dir())
+        except (OSError, ValueError):
+            continue
+    return {'vendors': list(dict.fromkeys(vendors)),
+            'cargo_homes': list(dict.fromkeys(cargo_homes)), 'directories_scanned': len(seen)}
+
+
+def reuse_crate_archives(source, cache, locations):
+    """Copy only lockfile-hashed .crate archives into existing private registry slots.
+
+    Never shares mutable old Cargo homes/target directories, copies config or
+    credentials, unpacks archives, or overwrites an existing destination.
+    """
+    expected = {}
+    for block in (source / 'Cargo.lock').read_text().split('[[package]]')[1:]:
+        fields = dict(re.findall(r'^(name|version|source|checksum) = "([^"\n]+)"$', block, re.M))
+        if fields.get('source') == 'registry+https://github.com/rust-lang/crates.io-index':
+            name = fields.get('name', '') + '-' + fields.get('version', '') + '.crate'
+            if re.fullmatch(r'[A-Za-z0-9_.+\-]+\.crate', name) and re.fullmatch(r'[a-f0-9]{64}', fields.get('checksum', '')):
+                expected[name] = fields['checksum']
+    result = {'old_cargo_homes': [str(p) for p in locations['cargo_homes']],
+              'archives_copied': 0, 'bytes_copied': 0, 'invalid_archives_skipped': 0,
+              'existing_archives_preserved': 0, 'directories_scanned': locations['directories_scanned']}
+    registry = path_under_root(cache / 'cargo/registry/cache', exists=False)
+    # Cargo chooses its namespace. Do not invent a registry identity or import
+    # an old cache's mirror configuration. A previous partial fetch creates it.
+    destinations = ([path_under_root(p) for p in sorted(registry.iterdir())
+                     if p.is_dir() and not p.is_symlink()] if registry.is_dir() else [])
+    result['destination_slots'] = len(destinations)
+    for home in locations['cargo_homes']:
+        try:
+            old_registry = path_under_root(home / 'registry/cache')
+            slots = [path_under_root(p) for p in sorted(old_registry.iterdir())
+                     if p.is_dir() and not p.is_symlink()][:32]
+        except (OSError, ValueError):
+            continue
+        for slot in slots:
+            for name, digest in expected.items():
+                missing = []
+                for dest in destinations:
+                    target = dest / name
+                    if target.exists() or target.is_symlink():
+                        result['existing_archives_preserved'] += 1
+                    else:
+                        missing.append(target)
+                if not missing:
+                    continue
+                try:
+                    archive = path_under_root(slot / name)
+                    size = archive.stat().st_size
+                    if not archive.is_file() or size > 128 * 1024**2:
+                        continue
+                    # Stage the verified bytes in the new owned cache. This also
+                    # avoids trusting an old file that changes during the copy.
+                    with archive.open('rb') as src, tempfile.TemporaryFile(dir=cache) as staged:
+                        checksum, count = hashlib.sha256(), 0
+                        while chunk := src.read(1024**2):
+                            count += len(chunk)
+                            if count > 128 * 1024**2:
+                                break
+                            checksum.update(chunk)
+                            staged.write(chunk)
+                        if count != size or checksum.hexdigest() != digest:
+                            result['invalid_archives_skipped'] += 1
+                            continue
+                        for target in missing:
+                            staged.seek(0)
+                            temporary = None
+                            try:
+                                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
+                                    temporary = Path(output.name)
+                                    shutil.copyfileobj(staged, output)
+                                    output.flush()
+                                    os.fsync(output.fileno())
+                                # Publish complete data atomically, exclusively.
+                                # Link only a new private file, never the old cache.
+                                os.link(temporary, target)
+                            except FileExistsError:
+                                continue
+                            finally:
+                                if temporary is not None:
+                                    temporary.unlink()
+                            result['archives_copied'] += 1
+                            result['bytes_copied'] += count
+                except (OSError, ValueError):
+                    continue
+    return result
 
 
 def owned_cache():
@@ -228,6 +365,9 @@ def main():
         return 1
     rust = Path(rust_info['bin'])
     cache = owned_cache()
+    reuse = reuse_crate_archives(source, cache, existing_inputs()) if not vendor else {
+        'mode': 'reuse_existing_vendor_readonly', 'vendor': str(vendor)}
+    print('EXISTING_INPUT_REUSE=' + json.dumps(reuse), flush=True)
     print('RUST_SELECTED=' + rust_info['rustc'] + ' version=' + rust_info['version'], flush=True)
     print('DEPENDENCY_MODE=' + discovery['dependency_mode'], flush=True)
     env = dict(os.environ)
@@ -274,7 +414,7 @@ directory = ''' + json.dumps(str(vendor)) + '\n') if vendor else '[net]\noffline
     report = {'status': 'NOT_COMPLETED', 'directory': str(output), 'source': str(source),
               'node': 'node-a', 'uid': 1204, 'phases': {}, 'service_started': False,
               'SDK_called': False, 'Guest_or_ublk_tests_executed': False,
-              'discovery': discovery, 'build_cache': str(cache)}
+              'discovery': discovery, 'build_cache': str(cache), 'existing_input_reuse': reuse}
     try:
         commit = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'],
                                          env=env, stderr=subprocess.DEVNULL, timeout=15).decode().strip()

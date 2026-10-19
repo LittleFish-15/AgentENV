@@ -1,5 +1,6 @@
 """Environment discovery regressions. Query results are mocked, no compiler/install/network calls."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -157,6 +158,98 @@ class DiscoveryTests(unittest.TestCase):
         paths = list(b.bounded_directories([self.path / 'toolchains']))
         self.assertIn(visible, paths)
         self.assertNotIn(hidden, paths)
+
+    def old_cache_fixture(self, payload=b'locked archive'):
+        source = self.path / 'src/modified'
+        source.mkdir(parents=True)
+        digest = hashlib.sha256(payload).hexdigest()
+        (source / 'Cargo.lock').write_text(
+            '[[package]]\nname = "cast"\nversion = "0.3.0"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+            'checksum = "' + digest + '"\n')
+        old = self.path / 'toolchains/agentenv-rust-1.99.0/cargo/registry/cache/old-registry'
+        old.mkdir(parents=True)
+        archive = old / 'cast-0.3.0.crate'
+        archive.write_bytes(payload)
+        cache = self.path / 'builds/agentenv-ub-build-v2'
+        dest = cache / 'cargo/registry/cache/current-registry'
+        dest.mkdir(parents=True)
+        return source, archive, cache, dest / archive.name
+
+    def test_original_cargo_cache_is_discovered_and_copied_by_lock_checksum(self):
+        source, old, cache, target = self.old_cache_fixture()
+        before = old.read_bytes()
+        locations = b.existing_inputs()
+        result = b.reuse_crate_archives(source, cache, locations)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(old.read_bytes(), before)
+        self.assertFalse(os.path.samefile(old, target))
+        self.assertEqual(result['archives_copied'], 1)
+        self.assertEqual(len(locations['cargo_homes']), 1)
+
+    def test_wrong_checksum_is_not_reused(self):
+        source, old, cache, target = self.old_cache_fixture()
+        old.write_bytes(b'corrupt')
+        result = b.reuse_crate_archives(source, cache, b.existing_inputs())
+        self.assertFalse(target.exists())
+        self.assertEqual(result['invalid_archives_skipped'], 1)
+
+    def test_existing_new_cache_file_is_never_overwritten(self):
+        source, old, cache, target = self.old_cache_fixture()
+        target.write_bytes(b'already here')
+        result = b.reuse_crate_archives(source, cache, b.existing_inputs())
+        self.assertEqual(target.read_bytes(), b'already here')
+        self.assertEqual(result['archives_copied'], 0)
+
+    def test_nonlocked_archive_is_not_imported(self):
+        source, old, cache, target = self.old_cache_fixture()
+        (old.parent / 'other-9.0.0.crate').write_bytes(b'extra')
+        b.reuse_crate_archives(source, cache, b.existing_inputs())
+        self.assertFalse((target.parent / 'other-9.0.0.crate').exists())
+
+    def test_old_config_and_credentials_are_not_imported(self):
+        source, old, cache, target = self.old_cache_fixture()
+        home = old.parents[3]
+        (home / 'credentials.toml').write_text('secret fixture')
+        (home / 'config.toml').write_text('untrusted fixture')
+        b.reuse_crate_archives(source, cache, b.existing_inputs())
+        self.assertTrue(target.exists())
+        self.assertFalse((cache / 'cargo/credentials.toml').exists())
+        self.assertFalse((cache / 'cargo/config.toml').exists())
+
+    def test_no_registry_slot_does_not_invent_a_mirror_or_namespace(self):
+        source, old, cache, target = self.old_cache_fixture()
+        target.parent.rmdir()
+        result = b.reuse_crate_archives(source, cache, b.existing_inputs())
+        self.assertEqual(result['destination_slots'], 0)
+        self.assertEqual(result['archives_copied'], 0)
+
+    def test_old_report_can_locate_vendor_outside_offline_directory(self):
+        vendor = self.path / 'deps/original-vendor'
+        vendor.mkdir(parents=True)
+        (vendor / 'agentenv-vendor-manifest.json').write_text(json.dumps({'lock_sha256': b.LOCK_SHA}))
+        report = self.path / 'relay/reports/node-a-build-20261015T063406Z-wAjyMg'
+        report.mkdir(parents=True)
+        (report / 'cargo-offline.toml').write_text('directory = ' + json.dumps(str(vendor)))
+        selected, _ = b.discover_vendor({})
+        self.assertEqual(selected, vendor)
+
+    def test_old_cache_write_failure_never_publishes_partial_crate(self):
+        source, old, cache, target = self.old_cache_fixture()
+        with patch.object(b.shutil, 'copyfileobj', side_effect=OSError('disk full')):
+            b.reuse_crate_archives(source, cache, b.existing_inputs())
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.iterdir()), [])
+
+    @unittest.skipIf(os.name == 'nt', 'Creating symlinks requires special Windows privilege')
+    def test_symlink_archive_is_not_imported(self):
+        source, old, cache, target = self.old_cache_fixture()
+        outside = self.path / 'payload'
+        old.rename(outside)
+        old.symlink_to(outside)
+        result = b.reuse_crate_archives(source, cache, b.existing_inputs())
+        self.assertFalse(target.exists())
+        self.assertEqual(result['archives_copied'], 0)
 
 
 if __name__ == '__main__':
