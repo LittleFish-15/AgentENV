@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import stat
 import sys
 import tempfile
 import types
@@ -132,19 +133,101 @@ def stage_b_launcher():
     return {library.name: hashlib.sha256(library.read_bytes()).hexdigest()}
 
 
-def combined_health(post_disconnect=False):
+def redact(text):
+    text = re.sub(r'e2b_[A-Za-z0-9._~-]+', '[REDACTED]', str(text))
+    # Do not include lines containing other authentication material in tails.
+    return '\n'.join('[REDACTED authentication line]' if re.search(
+        r'authorization|api[_ -]?key|password|secret|bearer\s|token\s*[:=]', line, re.I)
+        else line for line in text.splitlines())
+
+
+def read_tail(path):
+    core.safe(path, True)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        meta = os.fstat(stream.fileno())
+        core.require(stat.S_ISREG(meta.st_mode), 'Not a regular diagnostic file')
+        stream.seek(max(0, meta.st_size - 6000))
+        data = stream.read(6000)
+    return {'mtime_ns': meta.st_mtime_ns, 'size': meta.st_size,
+            'tail': redact(data.decode(errors='replace'))}
+
+
+def service_diagnostics(base, runtime, unit, port):
+    """Read both deployments even when the first health check fails. Never repair."""
+    result = {'unit': unit, 'diagnostic_only': True, 'logs': {}, 'runtime_files': {}}
+    commands = {
+        'systemd': ['systemctl', 'show', unit, '--no-pager',
+                    '--property=LoadState,ActiveState,SubState,MainPID,Result,ExecMainCode,ExecMainStatus,User,Group,PrivateNetwork,PrivateMounts,ActiveEnterTimestamp,InactiveEnterTimestamp'],
+        'current_boot_journal': ['journalctl', '--no-pager', '-b', '-u', unit,
+                                 '-n', '40', '-o', 'short-iso'],
+    }
+    for key, command in commands.items():
+        try:
+            rc, output = core.run(command, timeout=10)
+            result[key] = {'rc': rc, 'output': redact(output[-12000:])}
+        except Exception as error:
+            result[key] = {'error': redact(error)}
+    try:
+        core.http_health(port)
+        result['existing_http_endpoint'] = 204
+    except Exception as error:
+        result['existing_http_endpoint'] = {'error': redact(error)}
+    for name in ('launcher.log', 'server.log', 'ublk-daemon.log', 'proxy-inside.log', 'proxy-host.log'):
+        try:
+            result['logs'][name] = read_tail(base / 'logs' / name)
+        except Exception as error:
+            result['logs'][name] = {'error': redact(error)}
+    try:
+        receipt = core.load(base / 'installation.json')
+        result['installation_context'] = {k: receipt.get(k) for k in
+            ('revision', 'node', 'boot_id', 'host_netns', 'host_mntns', 'launcher')}
+        result['receipt_matches_current_boot'] = receipt.get('boot_id') == Path(
+            '/proc/sys/kernel/random/boot_id').read_text().strip()
+    except Exception as error:
+        result['installation_context'] = {'error': redact(error)}
+    for name in ('runtime-attestation.json', 'api.sock', 'host-proxy.json'):
+        try:
+            path = core.safe(runtime / name, True)
+            meta = path.lstat()
+            result['runtime_files'][name] = {'mode': oct(meta.st_mode), 'mtime_ns': meta.st_mtime_ns}
+        except Exception as error:
+            result['runtime_files'][name] = {'error': redact(error)}
+    result['interpretation'] = 'HTTP204 alone is not process verification; file tails may predate this boot. Journal visibility depends on existing jwk access.'
+    return result
+
+
+def original_health(post_disconnect):
     _, launcher = original_receipt()
     spec = importlib.util.spec_from_file_location('installed_original_B_runtime', launcher)
     original = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = original
     spec.loader.exec_module(original)
     original.identity('node-b')
-    print('PHASE=B_original_runtime_health', flush=True)
-    old = original.health(types.SimpleNamespace(node='node-b', post_disconnect=post_disconnect))
-    print('PHASE=B_modified_runtime_health', flush=True)
-    result = NORMAL_HEALTH(post_disconnect)
-    result['original_runtime_verification'] = old
-    return result
+    return original.health(types.SimpleNamespace(node='node-b', post_disconnect=post_disconnect))
+
+
+def combined_health(post_disconnect=False):
+    phase = 'B_original_runtime_health'
+    old = None
+    try:
+        print('PHASE=' + phase, flush=True)
+        old = original_health(post_disconnect)
+        phase = 'B_modified_runtime_health'
+        print('PHASE=' + phase, flush=True)
+        result = NORMAL_HEALTH(post_disconnect)
+        result['original_runtime_verification'] = old
+        return result
+    except Exception as error:
+        print('PHASE=B_both_services_failure_diagnostics', flush=True)
+        return {'status': 'STOPPED_B_UB_HEALTH', 'failed_phase': phase, 'error': redact(error),
+                'diagnostics_revision': 'b-both-services-v2',
+                'original_runtime_verification': old,
+                'modified_full_health_attempted': phase == 'B_modified_runtime_health',
+                'services': {
+                    'original': service_diagnostics(core.BASE, core.ROOT / 'r/node-b', core.OLD_UNIT, 18080),
+                    'modified': service_diagnostics(core.D, core.RUNTIME, core.UNIT, 18081)},
+                'next_action': 'RETURN_REPORT_NO_REINSTALL_OR_RESTART', 'SDK_called': False}
 
 
 core.stage_launcher = stage_b_launcher

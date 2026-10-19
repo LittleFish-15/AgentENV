@@ -134,6 +134,71 @@ class Tests(unittest.TestCase):
         self.assertNotIn('modprobe', text.decode())
         self.assertNotIn('usermod', text.decode())
 
+    def test_original_failure_collects_both_profiles_without_running_modified_health(self):
+        with patch.object(b, 'original_health', side_effect=RuntimeError('New unit exited')), \
+                patch.object(b, 'NORMAL_HEALTH') as modified, \
+                patch.object(b, 'service_diagnostics', side_effect=lambda *args: {'unit': args[2]}) as diag, \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = b.combined_health()
+        self.assertEqual(result['failed_phase'], 'B_original_runtime_health')
+        self.assertFalse(result['modified_full_health_attempted'])
+        self.assertEqual(result['status'], 'STOPPED_B_UB_HEALTH')
+        self.assertEqual(diag.call_count, 2)
+        self.assertEqual(result['services']['original']['unit'], c.OLD_UNIT)
+        self.assertEqual(result['services']['modified']['unit'], c.UNIT)
+        modified.assert_not_called()
+
+    def test_modified_failure_preserves_completed_original_verification(self):
+        old = {'status': 'AGENTENV_SERVICE_RUNNING_HEALTHY'}
+        with patch.object(b, 'original_health', return_value=old), \
+                patch.object(b, 'NORMAL_HEALTH', side_effect=RuntimeError('Modified exited')), \
+                patch.object(b, 'service_diagnostics', return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = b.combined_health(True)
+        self.assertEqual(result['original_runtime_verification'], old)
+        self.assertEqual(result['failed_phase'], 'B_modified_runtime_health')
+        self.assertTrue(result['modified_full_health_attempted'])
+
+    def test_success_keeps_post_disconnect_checks_and_does_not_run_diagnostics(self):
+        with patch.object(b, 'original_health', return_value={'status': 'ok'}) as original, \
+                patch.object(b, 'NORMAL_HEALTH', return_value={'status': 'B_UB_AND_ORIGINAL_SERVICES_HEALTHY'}) as modified, \
+                patch.object(b, 'service_diagnostics') as diag, contextlib.redirect_stdout(io.StringIO()):
+            result = b.combined_health(True)
+        self.assertEqual(result['status'], 'B_UB_AND_ORIGINAL_SERVICES_HEALTHY')
+        original.assert_called_once_with(True)
+        modified.assert_called_once_with(True)
+        diag.assert_not_called()
+
+    def test_diagnostics_return_real_bounded_tails_and_missing_files_without_mutation(self):
+        base = self.path / 'original'
+        logs = base / 'logs'
+        logs.mkdir(parents=True)
+        log = logs / 'launcher.log'
+        log.write_bytes(b'x' * 10000 + b'\nRuntimeError: stale socket\ne2b_do_not_print\npassword=hidden\n')
+        before = log.read_bytes()
+        def safe(path, exists=False):
+            if exists and not path.exists(): raise FileNotFoundError(str(path))
+            return path
+        with patch.object(c, 'safe', safe), patch.object(c.os, 'O_NOFOLLOW', 0, create=True), \
+                patch.object(c.os, 'O_NONBLOCK', 0, create=True), \
+                patch.object(c, 'run', return_value=(0, 'ActiveState=inactive\n')) as run, \
+                patch.object(c, 'http_health', side_effect=ConnectionRefusedError('Connection refused')):
+            result = b.service_diagnostics(base, self.path / 'runtime', c.OLD_UNIT, 18080)
+        tail = result['logs']['launcher.log']
+        self.assertIn('RuntimeError: stale socket', tail['tail'])
+        self.assertNotIn('do_not_print', json.dumps(result))
+        self.assertNotIn('hidden', json.dumps(result))
+        self.assertLess(len(tail['tail']), 6100)
+        self.assertEqual(tail['size'], len(before))
+        self.assertIn('mtime_ns', tail)
+        self.assertIn('error', result['logs']['server.log'])
+        self.assertIn('error', result['installation_context'])
+        self.assertEqual(log.read_bytes(), before)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands[0][:2], ['systemctl', 'show'])
+        self.assertEqual(commands[1][:4], ['journalctl', '--no-pager', '-b', '-u'])
+        self.assertEqual(len(commands), 2)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
