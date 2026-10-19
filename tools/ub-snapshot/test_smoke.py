@@ -3,8 +3,9 @@ import base64
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
+import shlex
 import sys
 import unittest
 import uuid
@@ -35,6 +36,19 @@ class SmokeGuards(unittest.TestCase):
     def test_peer_uses_exact_owner_identity_without_creating_an_object(self):
         parsed = s.peer_replica(self.token(self.replica))
         self.assertEqual(parsed, self.replica)
+
+    def test_peer_command_uses_current_single_or_multifile_entrypoint(self):
+        for filename in ('ub_layer_once.py', 'sdk_smoke.py', "entry's copy.py"):
+            entry = PurePosixPath('/home/jwk/agent') / filename
+            directory, command = s.peer_launch_lines(entry, 'SAFE_TOKEN', ' --format raw --probe /home/jwk/agent/probe')
+            self.assertEqual(shlex.split(directory), ['cd', '/home/jwk/agent'])
+            argv = shlex.split(command)
+            self.assertEqual(argv[:8], ['/usr/bin/python3', '-I', '-B', filename, 'peer', 'node-b', '--replica-token', 'SAFE_TOKEN'])
+            self.assertEqual(argv[8:], ['--format', 'raw', '--probe', '/home/jwk/agent/probe'])
+
+    def test_peer_command_rejects_ambiguous_relative_entrypoint(self):
+        with self.assertRaises(ValueError):
+            s.peer_launch_lines('sdk_smoke.py', 'SAFE_TOKEN')
 
     def test_peer_rejects_expanded_budget_or_wrong_payload(self):
         for replica in (b.replace(self.replica, mappingBytes=2 * b.ALIGN),

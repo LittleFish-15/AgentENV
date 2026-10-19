@@ -6,7 +6,7 @@ import base64
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import socket
 import shlex
 import struct
@@ -57,6 +57,15 @@ def peer_replica(token, stored_format=None):
     if replica.mappingBytes != b.ALIGN or not valid_payload:
         raise ValueError('This smoke accepts exactly the one small published test payload')
     return replica
+
+
+def peer_launch_lines(entrypoint, token, extra=''):
+    entrypoint = PurePosixPath(entrypoint)
+    if not entrypoint.is_absolute():
+        raise ValueError('Peer launcher requires an absolute entrypoint')
+    return ('cd ' + shlex.quote(str(entrypoint.parent)),
+            '/usr/bin/python3 -I -B ' + shlex.quote(entrypoint.name)
+            + ' peer node-b --replica-token ' + token + extra)
 
 
 def format_probe(program, replica, output, report):
@@ -133,6 +142,7 @@ def main():
         raise SystemExit('Standalone smoke must have zero capabilities')
     os.umask(0o077)
     b.check_local_path(Path(__file__), exists=True)
+    entrypoint = b.check_local_path(Path(sys.argv[0]).absolute(), exists=True)
     if bool(args.format) != bool(args.probe):
         raise SystemExit('Stored-format mode requires both --format and --probe')
     probe_program = b.check_local_path(args.probe, exists=True) if args.probe else None
@@ -232,9 +242,9 @@ def main():
             token = base64.urlsafe_b64encode(json.dumps(b.asdict(replica), separators=(',', ':')).encode()).decode()
             print('UB_LAYER_FORMAT_OWNER_READY' if args.format else 'UB_LAYER_SDK_OWNER_READY', flush=True)
             print('NEXT_ON_AGENT1_AS_JWK:', flush=True)
-            print('cd /home/jwk/agent/ub-layer-sdk-smoke-v1', flush=True)
             extra = (' --format ' + args.format + ' --probe ' + shlex.quote(str(probe_program))) if args.format else ''
-            print('/usr/bin/python3 -I -B sdk_smoke.py peer node-b --replica-token ' + token + extra, flush=True)
+            for line in peer_launch_lines(entrypoint, token, extra):
+                print(line, flush=True)
             print('Keep A open. After B fully exits, return here and type done.', flush=True)
             while input().strip() != 'done':
                 print('Wait for B to fully exit, then type done.', flush=True)

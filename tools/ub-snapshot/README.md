@@ -7,6 +7,38 @@ keeps each node's original local CoW. It includes memory and rootfs lowers.
 Guest RAM physical Base sharing, zero-copy and a cluster-Fork scheduler remain
 separate work. This experimental branch requires target acceptance before use.
 
+## Preferred relay: one readable Python script
+
+For manual relay, generate `ub_layer_once.py` with
+`python3 -I -B tools/ub-snapshot/make_single_file.py OUTPUT_PATH`.
+It embeds the actual bridge/broker/controller as uncompressed readable source;
+there is no ZIP, downloader or third-party Python dependency. Copy only this file
+to `/home/jwk/agent/ub_layer_once.py` on both original nodes. On A as ordinary jwk:
+
+```bash
+cd /home/jwk/agent
+python3 -I -B ub_layer_once.py owner node-a
+```
+
+Run the complete peer command printed by A on B. B invokes the same single file,
+prepares its own sources, and imports the same object. After B fully exits, type
+`done` on A. Success/cleanup criteria are the E2 criteria below. The entrypoint
+also accepts the same `--format/--probe` and explicit owner `cleanup --peer-stopped`
+options when their prerequisites hold.
+
+Generated helpers are stored under `/home/jwk/agent/relay/ub-layer-single-v1`;
+byte-equivalent sources can be reused, different/incomplete/unknown files are
+preserved and rejected. Original smoke locks and pending receipts are shared, so
+an unresolved older ZIP run still blocks new random objects. Neither a directory
+presence check nor this packaging change clears an unresolved SDK result. BOM
+and CRLF text transfer are supported. Revision directories must change if a later
+release changes embedded code; do not overwrite an existing helper directory.
+
+The single-file package/entrypoint checks are local only; target SDK linking,
+mapping and all Guest acceptance remain pending. The older ZIP instructions below
+remain for already delivered packages; the single-file entry supersedes their
+manual unpack step.
+
 ## Runtime path
 
 ```text
