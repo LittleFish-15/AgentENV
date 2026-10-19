@@ -1,0 +1,74 @@
+Review scope for the user's requested B service startup:
+Only agent1; retain an active original unit, otherwise create its already-approved
+jwk-aenv-ae9c626-node-b.service. Create only the new modified unit
+jwk-aenv-ub-b019f27-node-b.service. Both applications run as jwk:jwk with process
+kvm/aenv groups, CAP_SYS_ADMIN/CAP_NET_ADMIN and private network/mount namespaces.
+The capabilities are powerful and not restricted to /home. No persistent groups,
+device permissions, host network, kernel/driver, SDK or existing service change.
+No Guest or UB object is created by this step. Later ordinary health steps may
+start only cap0 loopback proxies 18080/18081. Inspect this exact block, then paste
+it directly into B's root Bash terminal; never run a jwk-writable script as root.
+
+/bin/bash --noprofile --norc -p <<'B_AENV_REVIEWED_START'
+set -eu
+stop() { printf 'STOP: %s\n' "$*" >&2; exit 1; }
+[ "$(/usr/bin/id -u)" = 0 ] || stop 'Expected B root terminal'
+[ "$(/usr/bin/hostname)" = agent1 ] || stop 'B/agent1 only'
+[ "$(/usr/bin/id -u jwk)" = 1204 ] || stop 'Unexpected jwk UID'
+[ "$(/usr/bin/id -g jwk)" = 1205 ] || stop 'Unexpected jwk GID'
+[ "$(/usr/bin/getent group kvm | /usr/bin/cut -d: -f3)" = 36 ] || stop 'Unexpected kvm group'
+[ "$(/usr/bin/getent group aenv | /usr/bin/cut -d: -f3)" = 982 ] || stop 'Unexpected aenv group'
+[ -d /sys/module/ublk_drv ] || stop 'Existing ublk driver missing; no module load attempted'
+[ -c /dev/kvm ] && [ -c /dev/ublk-control ] && [ -c /dev/net/tun ] || stop 'Existing devices missing'
+old=/home/jwk/agent/deployments/agentenv-ae9c626-baseline
+new=/home/jwk/agent/deployments/agentenv-ub-b019f27
+for base in "$old" "$new"; do
+  [ "$(/usr/bin/readlink -f "$base")" = "$base" ] || stop 'Redirected installation'
+  [ -f "$base/installation.json" ] && [ ! -L "$base/installation.json" ] || stop 'Complete B preparation/install first'
+  [ "$(/usr/bin/stat -c %u "$base/installation.json")" = 1204 ] || stop 'Unexpected receipt owner'
+done
+old_launcher=$(/usr/bin/python3 -I -B - <<'B_READ_PUBLIC_RECEIPT'
+import json,os,re,stat
+p='/home/jwk/agent/deployments/agentenv-ae9c626-baseline/installation.json'
+fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+m=os.fstat(fd)
+if m.st_uid!=1204 or not stat.S_ISREG(m.st_mode) or m.st_size>65536:raise SystemExit('Unexpected receipt metadata')
+with os.fdopen(fd,'r') as f:r=json.load(f)
+if r.get('revision')!='aenv-offline-install-start-v4' or r.get('node')!='node-b':raise SystemExit('Unexpected original B installation')
+s=r.get('launcher','')
+if not re.fullmatch(r'/home/jwk/agent/relay/aenv-run-v4-[0-9a-f]+/deployment\.py',s):raise SystemExit('Unexpected original launcher')
+print(s)
+B_READ_PUBLIC_RECEIPT
+) || stop 'Cannot read original launcher metadata'
+new_launcher=$new/libexec/deploy_b_ub.py
+for launcher in "$old_launcher" "$new_launcher" "$new/libexec/deploy_a_ub.py"; do
+  [ -f "$launcher" ] && [ "$(/usr/bin/readlink -f "$launcher")" = "$launcher" ] || stop 'Unexpected launcher path'
+  [ "$(/usr/bin/stat -c %u "$launcher")" = 1204 ] || stop 'Unexpected launcher owner'
+done
+start_one() {
+  local unit=$1 base=$2
+  shift 2
+  if [ "$(/usr/bin/systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" = active ]; then
+    printf 'RETAINED_ACTIVE_UNIT=%s\n' "$unit"
+    return
+  fi
+  [ "$(/usr/bin/systemctl show "$unit" --property=LoadState --value 2>/dev/null)" = not-found ] || stop "Unit exists but is not active: $unit; preserved"
+  /usr/bin/systemd-run --unit="$unit" --collect \
+    --property=Description="jwk AgentENV B experiment $unit" \
+    --property=User=jwk --property=Group=jwk \
+    --property='SupplementaryGroups=kvm aenv' \
+    --property='CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN' \
+    --property='AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN' \
+    --property=NoNewPrivileges=yes --property=RestrictSUIDSGID=yes \
+    --property=PrivateNetwork=yes --property=PrivateMounts=yes \
+    --property=Type=exec --property=Restart=no --property=KillMode=control-group \
+    --property=TimeoutStopSec=90s --property=LimitNOFILE=65536 \
+    --property="WorkingDirectory=$base" \
+    --property=StandardOutput=null --property=StandardError=null \
+    "$@"
+  printf 'SUBMITTED_UNIT=%s\n' "$unit"
+}
+start_one jwk-aenv-ae9c626-node-b.service "$old" /usr/bin/python3 -I -B "$old_launcher" inside node-b
+start_one jwk-aenv-ub-b019f27-node-b.service "$new" /usr/bin/python3 -I -B "$new_launcher" inside
+printf '%s\n' B_BOTH_UNITS_SUBMITTED_RUN_JWK_HEALTH_NEXT
+B_AENV_REVIEWED_START

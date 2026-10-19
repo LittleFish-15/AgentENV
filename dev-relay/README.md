@@ -2,6 +2,20 @@
 
 此目录集中存放本轮个人实验环境使用的协调入口和控制测试，方便从功能分支获取。允许含实验节点、账号、路径及已验证产物身份等环境绑定信息；不存凭据、二进制、完整日志或实验数据。
 
+## 当前优先：B恢复后启动两套服务
+
+用户已明确B恢复并要求先启动原版/修改版检查健康，不再单独做环境调查。仅普通jwk执行以下prepare/install/health，root只在最后直接粘贴打印的审查块。B不用编译或下载依赖，A已有服务与安装文件不改。
+
+1. B取得本功能分支审查过的提交，在已有源码目录运行`python3 -I -B dev-relay/deploy_b_ub.py prepare`。缺源码目录时用Git新建，不删/覆盖旧目录。该命令核对原版v4安装和原二进制；若确实重启过且原单元不在运行，只原子刷新原启动回执的boot_id/host_netns/host_mntns并保留旧回执，不改原配置/数据/程序。创建带身份标记的`/home/jwk/agent/relay/ub-b019f27-artifacts`接收目录；原单元已正常运行则保留。
+2. 用既有文件转运把A的qkkuxbta artifacts中`server`、`aenv`、`uvm-ublk-daemon`三个文件传到该B目录，无ZIP、不传凭据。可在A以jwk用正常SSH/SCP直传B原地址141.61.84.87，保持主机密钥验证；若直达不可用，用已有绿区SFTP中转相同三个文件，不改网络/SSH配置。
+3. B运行`python3 -I -B dev-relay/deploy_b_ub.py install`。复用B原版native/deps，校验三个修改版产物并安装到独立前缀，准备r/ub-b-b019、18081、独立key和aenv-ub。若原版尚未启动，报告original_health=null而不是伪报204；本步骤仍不启动服务。安装器会打印经固定SHA核对的`BEGIN_REVIEWED_ROOT_COMMANDS_COPY_BODY_ONLY`块。
+4. 审阅该精确B范围后，把标记之间的块体直接粘贴到B/root Bash终端，不用root执行仓库/jwk可写脚本。保留已运行原版，否则创建原已批准的jwk-aenv-ae9c626-node-b.service；只新增jwk-aenv-ub-b019f27-node-b.service。应用均User/Group=jwk、仅进程kvm/aenv、CAP_SYS_ADMIN/CAP_NET_ADMIN和PrivateNetwork/PrivateMounts；两capabilities高权限不局限/home，不变更持久组/设备权限/宿主网络。A的单元批准不是B的隐式授权，打印的B具体内容须经用户审阅执行确认；没有脚本自动root/systemd-run行为。
+5. B运行`python3 -I -B dev-relay/deploy_b_ub.py health`，一次检查原版和修改版身份、namespace自证、HTTP204、修改版CLI与各自cap0宿主代理；成功B_UB_AND_ORIGINAL_SERVICES_HEALTHY。再开新的B/jwk SSH会话运行相同入口`health --post-disconnect`，确认两代理存活，不自动重启掩盖断线失败。可source `/home/jwk/agent/env-aenv-ub-b019.sh`使用aenv-ub；旧aenv保持原版。
+
+任一步失败即返回完整汇总/错误，不清目录、不强制checkout、不重复申请权限、不停止现有服务。未知已有单元/文件或活动旧单元的过期回执均保留，不盲目修复。模板/Guest/SDK实验不在本服务启动批中；服务正常后，按原版双沙箱CoW→修改版UB关闭对照→实际快照预算/发布→修改版UB开启→跨节点CoW依次验证，避免将UB一份源对象误称所有节点物理Guest RAM仅一份。
+
+入口以B adapter配置公共部署逻辑，安装时复制受哈希约束的wrapper+library到B自身libexec。A已安装的fdadce3启动器和运行态不覆盖；已有A config文本逐字节回归检查。B控制测试`python3 -I -B dev-relay/test_deploy_b_ub.py`，结合原A部署控制测试及root块bash -n检查，不当作B目标已启动证据。
+
 这些内容属于调试交付，最终向官方社区提交前须统一审查、移除无用辅助文件、消除个人环境绑定并整理相关提交。不要将当前实验分支原样作为上游补丁；当前也不自动改写历史。新增临时中转入口优先放在此目录。
 
 ## 当前入口：仅A的真实层格式验证

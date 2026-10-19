@@ -23,6 +23,9 @@ import tempfile
 import time
 
 ROOT = Path('/home/jwk/agent')
+NODE = 'node-a'
+EXPECTED_HOST = 'server1'
+STATUS_PREFIX = 'A_UB'
 BASE = ROOT / 'deployments/agentenv-ae9c626-baseline'
 D = ROOT / 'deployments/agentenv-ub-b019f27'
 RUNTIME = ROOT / 'r/ub-a-b019'
@@ -153,7 +156,7 @@ def process_identity(pid):
 
 
 def identity():
-    require(sys.platform == 'linux' and socket.gethostname() == 'server1', 'A/server1 only; B stays paused')
+    require(sys.platform == 'linux' and socket.gethostname() == EXPECTED_HOST, 'Expected original host ' + EXPECTED_HOST)
     require(os.getuid() == os.geteuid() == 1204 and os.getgid() == os.getegid() == 1205,
             'Run as ordinary jwk UID1204/GID1205, never root')
     require(os.uname().machine == 'aarch64', 'Expected original ARM64 A')
@@ -208,9 +211,9 @@ startup_prewarm = false
 [observability]
 enabled = false
 [node_identity]
-node_id = "ub-node-a"
+node_id = "ub-{NODE}"
 cluster_id = "2834be81-b0f0-48d3-b120-5cc7daf00244"
-service_instance_id = "jwk-aenv-ub-b019f27-node-a"
+service_instance_id = "jwk-aenv-ub-b019f27-{NODE}"
 '''
 
 
@@ -252,7 +255,7 @@ def http_health(port):
 def baseline():
     receipt = load(BASE / 'installation.json')
     require(receipt.get('commit') == 'ae9c62693839ce7effa2b45df31c0039ae4f9fbc'
-            and receipt.get('node') == 'node-a' and receipt.get('revision') == 'aenv-offline-install-start-v4',
+            and receipt.get('node') == NODE and receipt.get('revision') == 'aenv-offline-install-start-v4',
             'Expected independent original installation missing/different; do not reinstall it')
     old = properties(OLD_UNIT)
     require(old.get('ActiveState') == 'active' and int(old.get('MainPID', 0)) > 1,
@@ -314,6 +317,11 @@ def cli_files(key):
     put(ROOT / 'env-aenv-ub-b019.sh', activation.encode())
 
 
+def stage_launcher():
+    put(LAUNCHER, Path(__file__).read_bytes())
+    return {}
+
+
 def install():
     no_caps()
     old_pid = baseline()
@@ -351,7 +359,7 @@ def install():
     key = key_data.decode('ascii').strip()
     require(re.fullmatch(r'e2b_[0-9a-f]{48}', key), 'New API key format differs; value withheld')
     cli_files(key)
-    put(LAUNCHER, Path(__file__).read_bytes())
+    launcher_dependencies = stage_launcher()
     env = environment()
     for binary in [D / 'bin' / name for name in BINARIES] + [D / 'deps/firecracker/1.15.1-patch-v3/firecracker']:
         rc, text = run(['/usr/bin/ldd', binary], env)
@@ -365,16 +373,19 @@ def install():
     rc, _ = run([D / 'bin/aenv', '--version'], env)
     require(rc == 0, 'New CLI cannot execute; child output withheld')
     require(baseline() == old_pid, 'Original main process changed during preparation; no restart attempted')
-    receipt = dict(definition, root=str(D), launcher=str(LAUNCHER), node='node-a',
+    receipt = dict(definition, root=str(D), launcher=str(LAUNCHER), node=NODE,
                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                    host_netns=os.stat('/proc/self/ns/net').st_ino,
                    host_mntns=os.stat('/proc/self/ns/mnt').st_ino,
-                   binaries=BINARIES, launcher_sha256=hashlib.sha256(LAUNCHER.read_bytes()).hexdigest())
+                   binaries=BINARIES, launcher_sha256=hashlib.sha256(LAUNCHER.read_bytes()).hexdigest(),
+                   launcher_dependencies=launcher_dependencies)
     dump(D / 'input-manifest.json', manifest)
     dump(D / 'installation.json', receipt)
-    return {'status': 'A_UB_INSTALLED_AWAITING_NEW_UNIT_APPROVAL', 'root': str(D),
+    return {'status': STATUS_PREFIX + '_INSTALLED_AWAITING_NEW_UNIT_APPROVAL', 'root': str(D),
             'unit': UNIT, 'api': 'http://127.0.0.1:' + str(PORT), 'runtime_started': False,
-            'original_health': 204, 'original_main_pid_unchanged': True,
+            'original_health': 204 if old_pid is not None else None,
+            'original_was_running': old_pid is not None,
+            'original_main_pid_unchanged': old_pid is not None,
             'copied_inputs': len(inputs), 'copied_bytes': sum(row['bytes'] for row in manifest.values()),
             'launcher': str(LAUNCHER), 'CLI': str(D / 'cli/bin/aenv-ub'),
             'next_action': 'Return this report. Review/approve the exact NEW transient unit before root activation. Do not run the old baseline installer.'}
@@ -389,6 +400,10 @@ def installed():
     for name, digest in BINARIES.items():
         require(hashlib.sha256(stable_file(D / 'bin' / name)[0]).hexdigest() == digest, 'New binary identity differs: ' + name)
     require(hashlib.sha256(stable_file(LAUNCHER)[0]).hexdigest() == receipt['launcher_sha256'], 'Installed launcher identity differs')
+    for name, digest in receipt.get('launcher_dependencies', {}).items():
+        path = safe(D / 'libexec' / name, True)
+        require(path.parent == D / 'libexec' and hashlib.sha256(stable_file(path)[0]).hexdigest() == digest,
+                'Installed launcher dependency differs')
     require(stable_file(D / 'config/runtime.toml')[0] == config_text().encode(), 'New runtime config differs')
     return receipt
 
@@ -564,7 +579,7 @@ def health(post_disconnect=False):
         raise RuntimeError('New CLI response is not a list; child output withheld') from None
     require(isinstance(entries, list), 'Unexpected new CLI list schema; response withheld')
     require(baseline() == old_pid, 'Original main process changed during new health checks')
-    return {'status': 'A_UB_AND_ORIGINAL_SERVICES_HEALTHY', 'runtime_started': True,
+    return {'status': STATUS_PREFIX + '_AND_ORIGINAL_SERVICES_HEALTHY', 'runtime_started': True,
             'unit': UNIT, 'api': 'http://127.0.0.1:' + str(PORT), 'health_checks': checks,
             'main_process': actual, 'host_proxy_pid': proxy_pid, 'CLI_list_count': len(entries),
             'original_health': 204, 'original_main_pid_unchanged': True,
@@ -596,14 +611,14 @@ def main():
     lock = os.open(ROOT / 'relay/aenv-ub-b019f27-install.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        work = Path(tempfile.mkdtemp(prefix='node-a-aenv-ub-' + args.mode + '-', dir=ROOT / 'relay/reports'))
-        report = {'revision': REVISION, 'mode': args.mode, 'node': 'node-a', 'hostname': 'server1',
+        work = Path(tempfile.mkdtemp(prefix=NODE + '-aenv-ub-' + args.mode + '-', dir=ROOT / 'relay/reports'))
+        report = {'revision': REVISION, 'mode': args.mode, 'node': NODE, 'hostname': EXPECTED_HOST,
                   'uid': 1204, 'source_commit': COMMIT, 'report_directory': str(work),
-                  'existing_services_modified': False, 'B_accessed': False, 'SDK_called': False}
+                  'existing_services_modified': False, 'B_accessed': NODE == 'node-b', 'SDK_called': False}
         try:
             report.update(install() if args.mode == 'install' else health(args.post_disconnect))
         except BaseException as error:
-            report.update(status='STOPPED_A_UB_' + args.mode.upper(),
+            report.update(status='STOPPED_' + STATUS_PREFIX + '_' + args.mode.upper(),
                           error=re.sub(r'e2b_[A-Za-z0-9._~-]+', '[REDACTED]', str(error)))
             if args.mode == 'health':
                 report['logs'] = {}
@@ -616,7 +631,7 @@ def main():
         print('BEGIN_RETURN_REPORT')
         print(json.dumps(report, indent=2))
         print('END_RETURN_REPORT')
-        return 0 if report['status'] in ('A_UB_INSTALLED_AWAITING_NEW_UNIT_APPROVAL', 'A_UB_AND_ORIGINAL_SERVICES_HEALTHY') else 1
+        return 0 if report['status'] in (STATUS_PREFIX + '_INSTALLED_AWAITING_NEW_UNIT_APPROVAL', STATUS_PREFIX + '_AND_ORIGINAL_SERVICES_HEALTHY') else 1
     finally:
         os.close(lock)
 
@@ -626,7 +641,7 @@ if __name__ == '__main__':
         rc = main()
     except BaseException as error:
         print('BEGIN_RETURN_REPORT')
-        print(json.dumps({'status': 'STOPPED_A_UB_DEPLOY_ENTRY', 'error': type(error).__name__,
+        print(json.dumps({'status': 'STOPPED_' + STATUS_PREFIX + '_DEPLOY_ENTRY', 'error': type(error).__name__,
                           'detail': re.sub(r'e2b_[A-Za-z0-9._~-]+', '[REDACTED]', str(error)),
                           'existing_services_modified': False}, indent=2))
         print('END_RETURN_REPORT')
