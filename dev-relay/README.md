@@ -18,7 +18,27 @@
 
 这些内容属于调试交付，最终向官方社区提交前须统一审查、移除无用辅助文件、消除个人环境绑定并整理相关提交。不要将当前实验分支原样作为上游补丁；当前也不自动改写历史。新增临时中转入口优先放在此目录。
 
-## 当前入口：P0 服务收尾、样本与计量能力
+## B重启后的精确恢复
+
+`recover_b_after_boot.py` 是普通jwk运行的独立入口。仅B、两实验单元均not-found/PID0、
+18080/18081未监听、代理锁未占用时继续。核对六个已安装二进制摘要、两套安装身份、
+修改版启动器/库摘要；只有回执boot_id与当前boot不同，才把指定旧运行回执和拒绝连接的
+旧socket逐个移入本轮报告备份，更新installation.json的boot_id/host_netns/host_mntns。
+业务state、配置、二进制、其他文件、全局服务/权限均不修改；没有递归删除或进程信号。
+同boot仍有运行状态、活动单元/监听者、身份不同、并发变化都停止保留。
+
+成功`B_REBOOT_CONTEXT_PREPARED_NOT_STARTED`后打印完整Python stdin root块，避免Shell
+美元符号转录损坏。用户审阅后直接粘贴至B/root；root只执行所显示的标准库管理代码，
+应用仍由精确临时单元User=jwk启动。两项capabilities、进程kvm/aenv组和私有namespace
+沿用已展示范围，不设开机自启、不修改Restart、不root执行jwk可写脚本。
+之后普通jwk运行既有B health启动cap0代理，再断开重连运行已有cow_p0.py node-b。
+成功准备/提交均不是服务健康通过。失败备份目录保留，不自动恢复旧boot回执或全局清理。
+
+本地检查：`python -I -B dev-relay/test_recover_b_after_boot.py`；包括同boot保护、
+文件变更保护、全部单元先检查、仅三字段更新、指定运行文件归档及root块语法/范围。
+Windows测试目录使用继承ACL，Linux生产仍0700。目标恢复尚需回执。
+
+## P0 服务收尾、样本与计量能力
 
 `cow_p0.py node-a` / `cow_p0.py node-b` 是独立标准库脚本，可单文件转运，
 不依赖当前源码checkout版本。应在关闭旧SSH并重新登录后，以普通jwk执行。
