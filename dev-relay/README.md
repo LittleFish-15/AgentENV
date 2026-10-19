@@ -35,3 +35,47 @@ python3 -I -B dev-relay/test_a_local_runner.py
 ```
 
 测试使用真实Publisher和内存SDK double，broker/probe调用替身用于故障注入；检查顺序生命周期、探针失败清理、读者未退出、申请未知、删除失败、原guard兼容、源码身份验证。通过这些测试不代表目标SDK、真实Rust格式或Guest已验证。Windows测试使用继承ACL/短路径，Linux生产目录仍使用私有权限。
+
+## A修改版独立共存部署
+
+A已回传上述raw/tar/zfile实际运行全部成功，SDK正常清理。下一阶段使用`deploy_a_ub.py`；B仍暂停，最终跨节点/Guest验收仍未完成。
+
+只在A/server1、普通jwk执行安装准备：
+
+```bash
+cd /home/jwk/agent/src/agentenv-ub-0118ebb &&
+python3 -I -B dev-relay/deploy_a_ub.py install
+```
+
+它校验qkkuxbta三个修改版二进制SHA，读取原版安装回执和原服务健康，独立复制原版只读native/deps输入（不复制状态、日志、缓存、API key/凭据），不重新下载或构建。新配置、认证、业务状态和运行目录分离，保留原服务/文件。目标定义如下：
+
+| 项目 | 原版保持 | 修改版 |
+|---|---|---|
+| 安装 | deployments/agentenv-ae9c626-baseline | deployments/agentenv-ub-b019f27 |
+| 宿主API | 127.0.0.1:18080 | 127.0.0.1:18081 |
+| 临时单元 | jwk-aenv-ae9c626-node-a.service | jwk-aenv-ub-b019f27-node-a.service |
+| runtime | r/node-a | r/ub-a-b019 |
+| daemon socket | 原路径 | r/ub-a-b019/ublk.sock |
+| CLI | 现有aenv | 新目录cli/bin/aenv-ub |
+
+所有相对路径均在/home/jwk/agent下。未知已有目录、文件、端口或单元均停止保留，不覆盖、不清理、不全局kill。安装仅启动ldd/CLI版本等只读检查子进程，不启动服务、代理、Guest、UB SDK或设备测试；缺依赖一次报告，不安装系统包/改权限/加载模块。私有key不写Git或回执输出。
+
+成功`A_UB_INSTALLED_AWAITING_NEW_UNIT_APPROVAL`，返回完整BEGIN/END汇总。文件准备不等于部署完成。`start_a_ub_REVIEW_ONLY.txt`中是拟定的精确管理员启动范围，尚未获批准：仅新增上述修改版单元，User/Group=jwk，进程补充kvm/aenv组、两项CAP_SYS_ADMIN/CAP_NET_ADMIN，PrivateNetwork/PrivateMounts和后续普通用户loopback代理。两项capability不受/home路径约束；不改持久组/设备权限或原服务，不在root UID执行jwk可写脚本。完成普通安装后先审查确认，再由用户在root终端直接粘贴已审查内容；安装脚本不会执行或要求绕过批准。
+
+获批并提交新单元后，以jwk运行：
+
+```bash
+python3 -I -B dev-relay/deploy_a_ub.py health
+```
+
+该步骤校验新服务进程/能力/namespace自证及实际systemd属性，必要时启动仅本实验的普通宿主代理，真实HTTP204三次、CLI只读list和原18080健康/原进程不变。特权进程/proc链接不可读时保留PTRACE_ACCESS_DENIED，不提权绕过；结合启动前自证、相同PID/start_ticks和单元属性，不伪报直接读取成功。失败自动附仅新实例的有限日志并过滤key，不重启任何服务。
+
+健康成功后换一个新的jwk SSH会话，以相同目录运行：
+
+```bash
+python3 -I -B dev-relay/deploy_a_ub.py health --post-disconnect
+```
+
+本模式不重启代理掩盖断线存活失败。最终`A_UB_AND_ORIGINAL_SERVICES_HEALTHY`后才可记A共存启动通过，仍非Guest/UB路径通过。不要注入已清理的A-local replica索引；真实Guest快照、模板与新预算就绪后另行发布活对象。CLI可用`source /home/jwk/agent/env-aenv-ub-b019.sh`加载，仅增加独立aenv-ub入口，不改.bashrc或原aenv。
+
+本地安装/隔离检查：`python3 -I -B dev-relay/test_deploy_a_ub.py`。fixture替代Linux身份、设备、systemd及内核namespace，验证真实文件复制/哈希/原版不变/配置凭据隔离/冲突保留，并实际测试本机TCP字节中转；不是目标安装或权限启动证据。临时单元不持久化，重启后须按已确认配置重新激活；不为本阶段测试主动重启主机。

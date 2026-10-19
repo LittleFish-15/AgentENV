@@ -1,0 +1,50 @@
+NOT YET APPROVED: review this precise NEW transient unit after ordinary-jwk
+installation succeeds. Do not run the old baseline start block or execute a
+jwk-writable script as root. The application below runs as jwk via systemd.
+
+Scope: only jwk-aenv-ub-b019f27-node-a.service on server1; User/Group=jwk;
+process supplementary kvm/aenv groups; CAP_SYS_ADMIN and CAP_NET_ADMIN;
+PrivateNetwork/PrivateMounts. These capabilities are powerful and not confined
+to /home. No persistent account/group/capability/device permission change, old
+service operation or host network change. Inside the verified new private
+network namespace the launcher may enable IPv4 forwarding. The later ordinary
+host proxy binds only 127.0.0.1:18081. No sandbox or UB object is created here.
+
+After explicit approval, paste the following reviewed block directly into the
+A/server1 root Bash terminal. Do not run this text file from a jwk-writable path.
+
+/bin/bash --noprofile --norc -p <<'A_UB_REVIEWED_START'
+set -eu
+stop() { printf 'STOP: %s\n' "$*" >&2; exit 1; }
+[ "$(/usr/bin/id -u)" = 0 ] || stop 'Expected administrator terminal'
+[ "$(/usr/bin/hostname)" = server1 ] || stop 'A/server1 only; B stays paused'
+[ "$(/usr/bin/id -u jwk)" = 1204 ] || stop 'Unexpected jwk UID'
+[ "$(/usr/bin/id -g jwk)" = 1205 ] || stop 'Unexpected jwk GID'
+[ "$(/usr/bin/getent group kvm | /usr/bin/cut -d: -f3)" = 36 ] || stop 'Unexpected kvm group'
+[ "$(/usr/bin/getent group aenv | /usr/bin/cut -d: -f3)" = 982 ] || stop 'Unexpected aenv group'
+[ -d /sys/module/ublk_drv ] || stop 'Existing ublk module missing; no module load attempted'
+[ -c /dev/kvm ] && [ -c /dev/ublk-control ] && [ -c /dev/net/tun ] || stop 'Existing devices missing'
+unit=jwk-aenv-ub-b019f27-node-a.service
+base=/home/jwk/agent/deployments/agentenv-ub-b019f27
+launcher=$base/libexec/deploy_a_ub.py
+[ "$(/usr/bin/readlink -f "$base")" = "$base" ] || stop 'Redirected new installation'
+[ -f "$base/installation.json" ] && [ ! -L "$base/installation.json" ] || stop 'Finish new ordinary-jwk install first'
+[ "$(/usr/bin/stat -c %u "$base/installation.json")" = 1204 ] || stop 'Receipt owner differs'
+[ -f "$launcher" ] && [ "$(/usr/bin/readlink -f "$launcher")" = "$launcher" ] || stop 'Unexpected launcher path'
+[ "$(/usr/bin/stat -c %u "$launcher")" = 1204 ] || stop 'Launcher owner differs'
+[ "$(/usr/bin/systemctl show "$unit" --property=LoadState --value 2>/dev/null)" = not-found ] || stop 'New unit already exists; preserve it'
+/usr/bin/systemd-run --unit="$unit" --collect \
+  --property=Description='jwk AgentENV UB b019f27 node-a' \
+  --property=User=jwk --property=Group=jwk \
+  --property='SupplementaryGroups=kvm aenv' \
+  --property='CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN' \
+  --property='AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN' \
+  --property=NoNewPrivileges=yes --property=RestrictSUIDSGID=yes \
+  --property=PrivateNetwork=yes --property=PrivateMounts=yes \
+  --property=Type=exec --property=Restart=no --property=KillMode=control-group \
+  --property=TimeoutStopSec=90s --property=LimitNOFILE=65536 \
+  --property="WorkingDirectory=$base" \
+  --property=StandardOutput=null --property=StandardError=null \
+  /usr/bin/python3 -I -B "$launcher" inside
+printf 'A_UB_NEW_UNIT_SUBMITTED=%s\n' "$unit"
+A_UB_REVIEWED_START
