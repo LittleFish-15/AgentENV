@@ -18,7 +18,30 @@
 
 这些内容属于调试交付，最终向官方社区提交前须统一审查、移除无用辅助文件、消除个人环境绑定并整理相关提交。不要将当前实验分支原样作为上游补丁；当前也不自动改写历史。新增临时中转入口优先放在此目录。
 
-## 当前入口：仅A的真实层格式验证
+## 当前入口：P0 服务收尾、样本与计量能力
+
+`cow_p0.py node-a` / `cow_p0.py node-b` 是独立标准库脚本，可单文件转运，
+不依赖当前源码checkout版本。应在关闭旧SSH并重新登录后，以普通jwk执行。
+它校验部署回执和启动器摘要，调用已安装启动器的`health --post-disconnect`，
+不补启动代理。然后用固定loopback端点只读查询模板/快照，限量枚举本实验
+state中的catalog record和image.json，分别列memory/rootfs层元数据及可见文件大小。
+不读取层数据、不输出配置原文/凭据/环境变量，不把声明摘要当成内容校验通过。
+
+P0保存服务进程smaps可读性和整进程汇总（不是Guest RAM），只在自身报告目录
+创建四页小文件测试mincore并清理，读取自己的pagemap判断PFN屏蔽；这些结果
+不代表未来Guest或块设备采样权限。cachestat暂未调用，不猜syscall编号。
+I/O配置只取数值/枚举白名单，不把配置声明当实际fd flags验证。
+
+成功采集标记`P0_COLLECTED_REVIEW_CAPABILITIES_AND_SAMPLE_INPUTS`，不是CoW通过；
+缺少权限/样本、分页/枚举上限会明确记录，不能将未知写成0。每节点返回完整
+BEGIN_RETURN_REPORT/END_RETURN_REPORT；完整文件在该次report_directory。
+无SDK、Guest创建、镜像下载、服务管理、权限变更或全局缓存清理。
+下一步根据两节点真实输入固定P1样本并绑定Guest映射采样，不自动选未知镜像启动。
+
+本地检查：`python -I -B dev-relay/test_cow_p0.py`。本地替身检查不代表
+目标Linux内核的mincore/PFN可用或正式Guest实验已执行。
+
+## 历史入口：仅A的真实层格式验证
 
 `run_a_local_layers.py` 复用已通过完整构建的b019f27 ARM64探针，以及`tools/ub-snapshot`中已验证身份的桥、broker和测试辅助函数。无需重新编译AgentENV，也不需要复制脚本或产物到B。
 
