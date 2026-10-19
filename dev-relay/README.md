@@ -18,6 +18,28 @@
 
 这些内容属于调试交付，最终向官方社区提交前须统一审查、移除无用辅助文件、消除个人环境绑定并整理相关提交。不要将当前实验分支原样作为上游补丁；当前也不自动改写历史。新增临时中转入口优先放在此目录。
 
+## 一次性原版父样本准备
+
+`cow_parent_once.py --image REGISTRY/REPOSITORY@sha256:DIGEST --workdir /guest/path --warm-module MODULE`
+仅A/server1普通jwk。复用原版ae9c626的regctl/aenv/依赖和18080端点；通过宿主用户环境
+下载一个已固定摘要的ARM64 OCI镜像，再由隔离Runtime读取本地ocidir引用。元数据声明的
+压缩输入须<=512MiB，磁盘可用>=8GiB；这是前置检查，不是文件系统硬配额。
+读取整个输入做哈希发生在测量前的准备阶段，不能把它称为冷缓存/按需读取实验。
+
+最多一次冷启动请求：1vCPU/512MiB RAM/2GiB逻辑rootfs，900秒TTL、autoPause=false，
+禁止Guest公网访问。只在Guest执行指定工作目录的Python模块导入，捕获独立随机别名父快照，
+通过run ID核对持有身份后删除本批父沙箱并GET确认404。父快照与校验后OCI输入保留供后续
+同父孩子实验。没有UB申请、服务/权限/主机网络变更或benchmark回放；成功标记为
+`ORIGINAL_PARENT_SNAPSHOT_READY_PARENT_RELEASED`，不是CoW验收。
+
+在冷启动请求前持久记录pending；请求不明确、清理不明确或已有pending均停止，不重复创建，
+不手工删回执。HTTP错误包含经过脱敏的标准错误信息。CLI临时凭据仅存在私有运行目录，
+finally删除，不写入源码/公开报告。所有日志和状态均在/home/jwk/agent内。
+本地`test_cow_parent_once.py`验证正常捕获/清理、导入失败清理、创建不明确不重试、
+持有身份不符不删除；真实ocidir接入、Guest启动和快照仍须目标验证。
+
+这是通用AgentENV辅助脚本；私有benchmark源码与轨迹不复制到此公共目录。
+
 ## B重启后的精确恢复
 
 `recover_b_after_boot.py` 是普通jwk运行的独立入口。仅B、两实验单元均not-found/PID0、
