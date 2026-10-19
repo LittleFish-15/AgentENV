@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -106,6 +107,8 @@ class Tests(unittest.TestCase):
         self.assertEqual(r['snapshot_id'],'owned-snapshot')
         self.assertTrue(r['parent_deleted'])
         self.assertTrue(r['temporary_cli_credentials_removed'])
+        config=json.loads((Path(r['report_directory'])/'regctl.json').read_text())
+        self.assertEqual(config,{'incDockerCert':False,'incDockerCred':False})
         self.assertEqual(self.calls.count(('POST','/sandboxes-cold')),1)
         self.assertEqual([x for x in self.calls if x[0]=='DELETE'],[('DELETE','/sandboxes/owned-parent')])
 
@@ -134,6 +137,52 @@ class Tests(unittest.TestCase):
         self.assertEqual(rc,1)
         self.assertFalse(r['parent_deleted'])
         self.assertFalse(any(x[0]=='DELETE' for x in self.calls))
+
+    def test_existing_proxies_and_ca_are_inherited_without_unrelated_secrets(self):
+        source={'https_proxy':'http://fixture-user:fixture-pass@proxy.invalid:8080',
+                'NO_PROXY':'internal.example', 'SSL_CERT_FILE':'/existing/public-ca.pem',
+                'UNRELATED_SECRET':'must-not-copy'}
+        env, report=p.network_environment(source)
+        self.assertEqual(env['https_proxy'],source['https_proxy'])
+        self.assertEqual(env['SSL_CERT_FILE'],source['SSL_CERT_FILE'])
+        self.assertNotIn('UNRELATED_SECRET',env)
+        for key in ('NO_PROXY','no_proxy'):
+            self.assertIn('internal.example',env[key])
+            self.assertIn('127.0.0.1',env[key])
+        self.assertNotIn('fixture-pass',json.dumps(report))
+        self.assertFalse(report['tls_verification_disabled'])
+
+    def test_all_proxy_is_used_only_when_scheme_specific_route_is_missing(self):
+        env, report=p.network_environment({'ALL_PROXY':'socks5h://proxy.invalid:1080',
+                                          'HTTPS_PROXY':'http://specific.invalid:8080'})
+        self.assertEqual(env['HTTPS_PROXY'],'http://specific.invalid:8080')
+        self.assertEqual(env['HTTP_PROXY'],'socks5h://proxy.invalid:1080')
+        self.assertEqual(report['all_proxy_mapped_to'],['HTTP_PROXY'])
+        env, report=p.network_environment({})
+        self.assertNotIn('HTTPS_PROXY',env)
+        self.assertEqual(report['inherited_variable_names'],[])
+
+    def test_warning_stderr_cannot_contaminate_manifest_bytes(self):
+        log=self.root/'manifest.json'
+        raw=b'{"schemaVersion":2}'
+        p.checked_process([sys.executable,'-I','-B','-c',
+            'import sys;sys.stdout.write(\'{"schemaVersion":2}\');sys.stderr.write("CA warning")'],
+            dict(os.environ),log,10)
+        self.assertEqual(log.read_bytes(),raw)
+        self.assertEqual((self.root/'manifest.stderr.log').read_text(),'CA warning')
+
+    def test_child_error_report_includes_dns_reason_but_not_credentials(self):
+        log=self.root/'manifest.json'
+        env=dict(os.environ,HTTPS_PROXY='http://fixture-user:fixture-pass@proxy.invalid:8080')
+        with self.assertRaises(p.ChildFailure) as caught:
+            p.checked_process([sys.executable,'-I','-B','-c',
+                'import sys;sys.stderr.write("lookup registry.invalid on [::1]:53: connection refused\\nhttp://fixture-user:fixture-pass@proxy.invalid:8080\\nAuthorization: Bearer hidden-token");sys.exit(3)'],env,log,10)
+        data=json.dumps(caught.exception.diagnostics)
+        self.assertIn('connection refused',data)
+        self.assertNotIn('fixture-pass',data)
+        self.assertNotIn('hidden-token',data)
+        self.assertNotIn('fixture-pass',(self.root/'manifest.stderr.log').read_text())
+        self.assertEqual(caught.exception.diagnostics['exit_code'],3)
 
 
 if __name__=='__main__': unittest.main(verbosity=2)

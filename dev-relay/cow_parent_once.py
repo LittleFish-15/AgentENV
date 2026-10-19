@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 import uuid
 
 ROOT = Path('/home/jwk/agent')
@@ -25,6 +26,53 @@ UNIT = 'jwk-aenv-ae9c626-node-a.service'
 MAX_IMAGE_BYTES = 512 * 1024**2
 PENDING = ROOT / 'relay/cow-parent-node-a.pending.json'
 ID = re.compile(r'[A-Za-z0-9_-]{1,128}')
+NETWORK_KEYS = ('HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy',
+                'NO_PROXY', 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR')
+
+
+def network_environment(source):
+    """Use existing user routes/trust paths; never invent a proxy or DNS server."""
+    env = {k: source[k] for k in NETWORK_KEYS if source.get(k)}
+    inherited = sorted(env)
+    mapped = []
+    # Go's ProxyFromEnvironment uses HTTP(S)_PROXY, unlike curl's ALL_PROXY.
+    # Use only a route already configured by the caller, when scheme-specific
+    # settings are absent. Keep existing NO_PROXY exclusions.
+    fallback = env.get('all_proxy') or env.get('ALL_PROXY')
+    if fallback:
+        for upper, lower in (('HTTP_PROXY', 'http_proxy'), ('HTTPS_PROXY', 'https_proxy')):
+            if not env.get(upper) and not env.get(lower):
+                need(urlsplit(fallback).scheme.lower() in ('http', 'https', 'socks5', 'socks5h'),
+                     'Existing ALL_PROXY has unsupported scheme; value withheld')
+                env[upper] = fallback
+                mapped.append(upper)
+    for key in ('NO_PROXY', 'no_proxy'):
+        previous = env.get(key) or env.get('no_proxy' if key == 'NO_PROXY' else 'NO_PROXY', '')
+        parts = [x.strip() for x in previous.split(',') if x.strip()]
+        env[key] = ','.join(dict.fromkeys(parts + ['127.0.0.1', 'localhost', '::1']))
+    return env, {'inherited_variable_names': inherited, 'all_proxy_mapped_to': mapped,
+                 'proxy_values_in_report': False, 'system_dns_modified': False,
+                 'tls_verification_disabled': False, 'docker_certificate_import': False}
+
+
+def redact_child_output(text, env):
+    for key in NETWORK_KEYS:
+        value = env.get(key)
+        if value and len(value) >= 8:
+            text = text.replace(value, '[NETWORK_ENV_VALUE]')
+    text = re.sub(r'e2b_[A-Za-z0-9._~-]+', '[REDACTED]', text)
+    text = re.sub(r'(?i)(https?|socks5h?)://[^/\s@]+@', r'\1://[REDACTED]@', text)
+    text = re.sub(r'https?://\S+\?\S+', '[URL query withheld]', text)
+    return '\n'.join('[REDACTED authentication line]' if re.search(
+        r'authorization|password|secret|bearer\s|access_token\s*[:=]', line, re.I)
+        else line for line in text.splitlines())
+
+
+class ChildFailure(RuntimeError):
+    def __init__(self, log, code, stdout, stderr):
+        super().__init__('Child command failed; diagnostics included: ' + log.name)
+        self.diagnostics = {'stdout_file': log.name, 'stderr_file': log.stem + '.stderr.log',
+                            'exit_code': code, 'stdout_tail': stdout, 'stderr_tail': stderr}
 
 
 def need(ok, text):
@@ -138,10 +186,34 @@ def verify_layout(layout, digest):
 
 
 def checked_process(command, env, log, timeout):
-    with log.open('wb') as output:
-        r = subprocess.run([str(x) for x in command], stdin=subprocess.DEVNULL,
-                           stdout=output, stderr=subprocess.STDOUT, env=env, timeout=timeout)
-    need(r.returncode == 0, 'Child command failed; inspect own report log: ' + log.name)
+    stderr_path = log.with_name(log.stem + '.stderr.log')
+    code = None
+    try:
+        with log.open('wb') as output, stderr_path.open('wb') as error:
+            r = subprocess.run([str(x) for x in command], stdin=subprocess.DEVNULL,
+                               stdout=output, stderr=error, env=env, timeout=timeout)
+        code = r.returncode
+    except subprocess.TimeoutExpired:
+        code = 'TIMEOUT'
+    # stderr is diagnostic text, never manifest content. Bound and sanitize it
+    # before returning or including it in the report; keep successful stdout
+    # byte-for-byte intact for content-addressed manifest verification.
+    def sanitized_log(path):
+        with path.open('rb') as f:
+            f.seek(0, os.SEEK_END)
+            length = f.tell()
+            f.seek(max(0, length - 65536))
+            text = redact_child_output(f.read(65536).decode(errors='replace'), env)
+        path.write_text(('[EARLIER DIAGNOSTICS TRUNCATED]\n' if length > 65536 else '') + text)
+    sanitized_log(stderr_path)
+    if code != 0:
+        sanitized_log(log)
+        def tail(path):
+            with path.open('rb') as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 6000))
+                return redact_child_output(f.read(6000).decode(errors='replace'), env)
+        raise ChildFailure(log, code, tail(log), tail(stderr_path))
 
 
 WARM = '''import importlib,json,os,sys
@@ -176,7 +248,7 @@ def main():
             print('END_RETURN_REPORT')
             return 1
         work = Path(tempfile.mkdtemp(prefix='node-a-cow-parent-', dir=safe(ROOT / 'relay/reports')))
-        report = {'revision': 'cow-parent-once-v1', 'node': 'node-a', 'report_directory': str(work),
+        report = {'revision': 'cow-parent-once-v2', 'node': 'node-a', 'report_directory': str(work),
                   'image': args.image, 'Guest_workdir': args.workdir, 'warm_module': args.warm_module,
                   'run_id': uuid.uuid4().hex, 'SDK_called': False, 'services_modified': False,
                   'cow_validation_executed': False, 'cpu_count': 1, 'memory_mib': 512,
@@ -196,14 +268,17 @@ def main():
             for name in ('tmp', 'cache', 'docker', 'cli-config/aenv'):
                 (work / name).mkdir(parents=True)
             save(work / 'docker/config.json', {'auths': {}})
-            save(work / 'regctl.json', {})
+            # regctl v0.11.5 Config.IncDockerCert/Cred: avoid root-owned Docker
+            # directories; standard system CA verification remains enabled.
+            save(work / 'regctl.json', {'incDockerCert': False, 'incDockerCred': False})
             env = {'HOME': '/home/jwk', 'USER': 'jwk', 'LOGNAME': 'jwk', 'LANG': 'C.UTF-8',
                    'PATH': str(BASE / 'native/bin') + ':/usr/bin:/bin',
                    'LD_LIBRARY_PATH': str(BASE / 'native/lib') + ':' + str(BASE / 'native/fallback/lib'),
                    'TMPDIR': str(work / 'tmp'), 'XDG_CACHE_HOME': str(work / 'cache'),
                    'XDG_CONFIG_HOME': str(work / 'cli-config'), 'DOCKER_CONFIG': str(work / 'docker'),
-                   'REGCTL_CONFIG': str(work / 'regctl.json'), 'GOMAXPROCS': '2',
-                   'NO_PROXY': '127.0.0.1,localhost,::1', 'no_proxy': '127.0.0.1,localhost,::1'}
+                   'REGCTL_CONFIG': str(work / 'regctl.json'), 'GOMAXPROCS': '2'}
+            network_env, report['network_environment'] = network_environment(os.environ)
+            env.update(network_env)
             print('PHASE=resolve_fixed_image_metadata', flush=True)
             checked_process([regctl, 'manifest', 'get', '--format', 'raw-body', args.image], env,
                             work / 'manifest.json', 60)
@@ -258,6 +333,8 @@ def main():
         except Exception as e:
             report['error'] = {'type': type(e).__name__, 'errno': getattr(e, 'errno', None),
                                'reason': str(e) if type(e) is RuntimeError else 'See own bounded logs; no create retry'}
+            if isinstance(e, ChildFailure):
+                report['error']['child_diagnostics'] = e.diagnostics
         finally:
             sid = report['parent_id']
             if sid and api:

@@ -20,6 +20,15 @@
 
 ## 一次性原版父样本准备
 
+v2修正目标机首次网络失败：子进程只继承用户当前已有的HTTP(S)/ALL_PROXY、NO_PROXY与
+标准CA路径变量；ALL_PROXY仅在缺少协议专用代理时映射到Go支持的HTTP(S)_PROXY，
+保留现有绕过列表并加本机loopback。没有新代理或DNS服务器，没有system resolver变更。
+报告只列变量名称，不输出代理值。无可用已有网络路径时仍停止，不绕过TLS或修改权限。
+用户私有REGCTL_CONFIG设置官方v0.11.5的incDockerCert=false/incDockerCred=false，
+避免导入root所有的Docker专用目录，正常系统CA/TLS验证仍启用。
+stdout/stderr分离，成功manifest正文原样哈希；诊断stderr脱敏并限制大小，失败时
+自动把尾部错误及退出码放入BEGIN/END报告，避免再单独中转cat日志。
+
 `cow_parent_once.py --image REGISTRY/REPOSITORY@sha256:DIGEST --workdir /guest/path --warm-module MODULE`
 仅A/server1普通jwk。复用原版ae9c626的regctl/aenv/依赖和18080端点；通过宿主用户环境
 下载一个已固定摘要的ARM64 OCI镜像，再由隔离Runtime读取本地ocidir引用。元数据声明的
