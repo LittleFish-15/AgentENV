@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path('/home/jwk/agent')
 LOCK_SHA = '6cb5431f5fd58fc0fbfa3f8094e3a3c3801a11fc47a976ebb841b32deab325e4'
@@ -34,6 +35,8 @@ def main():
     if (sys.platform != 'linux' or socket.gethostname() != 'server1'
             or os.getuid() != 1204 or os.geteuid() != 1204 or os.getgid() != 1205):
         raise SystemExit('Use node-a/server1 ordinary jwk UID1204/GID1205')
+    if os.uname().machine != 'aarch64':
+        raise SystemExit('Expected original ARM64 server1')
     caps = [line.split(':')[1].strip() for line in Path('/proc/self/status').read_text().splitlines()
             if line.startswith(('CapInh:', 'CapPrm:', 'CapEff:', 'CapAmb:'))]
     if len(caps) != 4 or any(int(value, 16) for value in caps):
@@ -61,7 +64,10 @@ def main():
     output = Path(tempfile.mkdtemp(prefix='node-a-ub-layers-build-', dir=reports))
     print('REPORT_DIRECTORY=' + str(output), flush=True)
     env = dict(os.environ)
-    for variable in ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS',
+    for variable in list(env):
+        if variable.startswith('GIT_'):
+            env.pop(variable)
+    for variable in ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_TARGET',
                      'LD_PRELOAD', 'LD_AUDIT'):
         env.pop(variable, None)
     for variable, directory in {'CARGO_HOME': 'cargo', 'RUSTUP_HOME': 'rustup-unused',
@@ -75,6 +81,10 @@ def main():
                RUSTDOC=str(rust / 'rustdoc'), CARGO_NET_OFFLINE='true', CARGO_BUILD_JOBS='2',
                CMAKE_BUILD_PARALLEL_LEVEL='2', GIT_TERMINAL_PROMPT='0',
                PROTOC=shutil.which('protoc'))
+    env.update(CARGO_INCREMENTAL='0', CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0')
+    env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONPYCACHEPREFIX=str(output / 'cache/pycache'))
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_CEILING_DIRECTORIES=str(source.parent))
     if Path('/usr/lib64/libclang.so').is_file():
         env['LIBCLANG_PATH'] = '/usr/lib64'
     config = output / 'cargo-offline.toml'
@@ -92,6 +102,12 @@ directory = ''' + json.dumps(str(vendor)) + '\n')
     report = {'status': 'NOT_COMPLETED', 'directory': str(output), 'source': str(source),
               'node': 'node-a', 'uid': 1204, 'phases': {}, 'service_started': False,
               'SDK_called': False, 'Guest_or_ublk_tests_executed': False}
+    try:
+        commit = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'],
+                                         env=env, stderr=subprocess.DEVNULL, timeout=15).decode().strip()
+        report['source_commit'] = commit if len(commit) == 40 and all(c in '0123456789abcdef' for c in commit) else None
+    except (OSError, subprocess.SubprocessError):
+        report['source_commit'] = None
 
     def run(name, command):
         print('PHASE=' + name, flush=True)
@@ -99,7 +115,20 @@ directory = ''' + json.dumps(str(vendor)) + '\n')
             process = subprocess.Popen(command, cwd=source, env=env, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)
             try:
-                rc = process.wait()
+                started = last_progress = time.monotonic()
+                while True:
+                    try:
+                        rc = process.wait(timeout=5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        free = shutil.disk_usage(ROOT).free
+                        if free < 2 * 1024**3:
+                            raise RuntimeError('Build free-space floor reached; stopping only this build process group')
+                        now = time.monotonic()
+                        if now - last_progress >= 30:
+                            print('BUILD_PROGRESS phase=' + name + ' elapsed_s=' + str(int(now - started))
+                                  + ' free_disk_mib=' + str(free // 1024**2), flush=True)
+                            last_progress = now
             except BaseException:
                 # Only this newly created build process group; never global process cleanup.
                 os.killpg(process.pid, signal.SIGTERM)

@@ -1,6 +1,6 @@
 # UB layer reuse: acceptance status
 
-2026-10-17. **Experimental implementation; target acceptance is incomplete.**
+2026-10-19. **Experimental implementation; full target acceptance is incomplete.**
 Scope is the explicitly selected UB snapshot-layer reuse plus each node's
 original local CoW, including immutable rootfs lowers. The source baseline is
 `ae9c62693839ce7effa2b45df31c0039ae4f9fbc` / 0.2.2. Nothing below claims physical
@@ -8,16 +8,27 @@ Guest RAM Base sharing, zero-copy, measured memory savings or automatic cluster
 placement. The [review](ub-shared-layers-review.md) distinguishes baseline source
 facts, the prior ordinary-object UB experiment, assumptions and required tests.
 
+**New target evidence, 2026-10-19:** the user returned both E2 reports for
+source `a544e87`. Both nodes compiled/loaded the new bridge and read the same
+object/generation through their local Python brokers. A allocated once; B zero.
+B read and verified 1.5MiB; A reverified the base after the peer exit. Both had
+zero active leases and successful unmap/finalize; A received SDK deletion
+acknowledgement. Bridge binary identities matched. The logical mapping was
+4MiB, backing coverage 128MiB (not a measured exclusive increment). This compiled
+the small C++ SDK bridge, **not the full AgentENV server**. Rust UbLayerFile,
+real stored-layer formats, ublk and Guest execution remain untested on target.
+Full private reports remain outside the public source repository.
+
 ## Results by requirement
 
 | ID | Required behavior | Implementation / local evidence | Target result |
 |---|---|---|---|
-| A1 | A/B memory lowers use one object/generation; B allocates zero; actual broker reads | Stored-identity binding, importer and generation-bound client implemented. Real Rust/Python wire interoperation passed. | New bridge/broker and memory ublk/Guest path not run on A/B. |
+| A1 | A/B memory lowers use one object/generation; B allocates zero; actual broker reads | Stored-identity binding, importer and generation-bound client implemented. Real Rust/Python wire interoperation passed. | New bridge/Python broker E2 passed on both nodes; memory layer/Rust/ublk/Guest path still pending. |
 | A2 | Rootfs immutable lowers shared through UB; independent writable uppers | Both fresh/resume rootfs construction and snapshot resolvers bind UB views; original upper construction remains. | Actual rootfs layer/upper probe and Guest disks not run. |
 | A3 | Raw, tar, ZFile/LSMT bytes parse correctly; EOF/ranges are correct | Original adapters retained. Wire EOF/range/chunk/error tests passed. The real-format/private-upper/durable-child probe cross-checks for ARM64 Linux. | Raw/tar/ZFile runs prepared, not executed. Cross-check is not runtime proof. |
 | A4 | Guest RAM restored; first and repeated writes stay private; base/sibling unchanged | Original Firecracker File RAM restore unchanged; no direct UB RAM mapping introduced. | Both original Guest baseline and modified A/B Guest tests remain mandatory. |
 | A5 | Capture-consistent dependencies and durable multi-generation closure; unchanged ancestor reuse | Original capture retained. UB ancestors are stable lowers; POSIX/OSS publication exports and verifies stored bytes. Publisher tests demonstrate borrowed ancestors allocate/delete zero and need no local duplicate. | Full server integration, real recapture and durable repository reopen not run. |
-| A6 | No release while active; correct owner cleanup; unknown state preserved | Live/in-flight lease rejection, SDK-busy, failed-unmap, unknown-create, owner/borrower and history tests passed. Receipt writes and parent directories synced. | New bridge unmap/delete/finalize and interruption recovery need SDK execution. No independent global absence query claimed. |
+| A6 | No release while active; correct owner cleanup; unknown state preserved | Live/in-flight lease rejection, SDK-busy, failed-unmap, unknown-create, owner/borrower and history tests passed. Receipt writes and parent directories synced. | Normal bridge unmap/finalize and owner SDK deletion passed in E2. Target interruption/fault recovery still pending; no independent global absence query claimed. |
 | A7 | Broker loss/short replies do not produce partial success or corrupt siblings | Protocol fault tests passed. Full-range verified fallback and shared-session/export tests type-check for Linux. Fallback is explicit local-file only. | Linux fallback tests and process-fault/Guest behavior not executed. |
 | A8 | Disabled feature and legacy configs retain baseline; actual source/degradation visible | Optional field omitted when absent; opt-in environment hooks return original paths when unset. 39 actual config/protocol tests passed on Windows with one existing POSIX-path-only case filtered. | Linux legacy config run and actual opt-out runtime regression pending. |
 | A9 | Only AgentENV modified; no external component/system/privilege changes | Source changes confined to AgentENV. Public SDK headers read for compile only; no remote connections, service/device/ACL/capability changes performed by this implementation work. | Target scripts enforce original ordinary jwk/workspace; future operations must preserve scope. |
@@ -52,7 +63,7 @@ integration module. This limit must not be reported as a full build pass.
 ## Target sequence and unresolved assumptions
 
 Follow [the complete tool instructions](../../../tools/ub-snapshot/README.md):
-E2 uses one 4MiB NC object through this bridge/broker, then A performs a frozen
+E2 has passed using one 4MiB NC object through this bridge/broker. Next A performs a frozen
 offline full build, then one-pass E3 separately tests raw/tar/ZFile layers on
 both nodes. Each format uses one small object, two private uppers and durable
 child reopening; owner cleanup follows complete peer exit. No service or VM is

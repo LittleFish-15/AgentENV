@@ -39,6 +39,19 @@ mapping and all Guest acceptance remain pending. The older ZIP instructions belo
 remain for already delivered packages; the single-file entry supersedes their
 manual unpack step.
 
+For the following full AgentENV build, `make_build_single.py OUTPUT_PATH` creates
+a readable `build_modified_a.py`. Copy it only to node A's `/home/jwk/agent` and
+run `python3 -I -B build_modified_a.py`. It reuses the existing ae9c626 source
+archive or exact old source tree read-only, adds the actual committed changes,
+and creates a separate source prefix. Its Git tip/tree are the exact real feature
+objects with shallow parent history, so the build's Git identity is not invented.
+It then invokes the existing offline builder, including checks/tests and four
+artifacts, without changing or starting a service. No ZIP or network download is
+needed. Unknown/different existing source is preserved; completed matching source
+can be reused. Build logs progress periodically and stops its own build process
+group if free disk falls below the reserve. Target full builds still require
+actual execution; source preparation tests are not build results.
+
 ## Runtime path
 
 ```text

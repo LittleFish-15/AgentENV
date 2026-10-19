@@ -1,0 +1,325 @@
+"""Prepare the exact modified AgentENV tree and build it offline on node A.
+
+Copy only this file to /home/jwk/agent/build_modified_a.py on server1.
+Run: python3 -I -B build_modified_a.py
+Reuses local baseline sources/archive, never downloads, installs or starts services.
+"""
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import uuid
+import zlib
+
+ROOT = Path('/home/jwk/agent')
+REVISION = 'ub-full-build-single-v1'
+PAYLOAD = @PAYLOAD@
+
+
+def checked(path):
+    path = Path(path).absolute()
+    if not path.is_relative_to(ROOT) or path.resolve() != path:
+        raise ValueError('Path outside/redirected from /home/jwk/agent')
+    return path
+
+
+def relative(name):
+    path = PurePosixPath(name)
+    if (path.is_absolute() or '..' in path.parts or '\\' in name or '\0' in name
+            or not path.parts or '.git' in path.parts or path.as_posix() != name):
+        raise ValueError('Unexpected source member path')
+    return path
+
+
+def private_mkdir(path, **kwargs):
+    path.mkdir(mode=0o700 if os.name == 'posix' else 0o755, **kwargs)
+
+
+def object_id(kind, data):
+    return hashlib.sha1(kind.encode() + b' ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+
+def verify_blob(name, data, metadata):
+    relative(name)
+    if len(data) != metadata['size'] or object_id('blob', data) != metadata['oid']:
+        raise ValueError('Local baseline is not the pinned Git source: ' + name)
+
+
+def read_archive(path, files):
+    checked(path)
+    if not path.is_file():
+        raise ValueError('Baseline archive is not a regular file')
+    result = {}
+    with tarfile.open(path, 'r:gz') as archive:
+        for member in archive:
+            parts = PurePosixPath(member.name).parts
+            if (not parts or parts[0] not in ('pclin1212-AgentENV-ae9c626', 'agentenv-ae9c626')
+                    or PurePosixPath(member.name).is_absolute() or '..' in parts):
+                raise ValueError('Unexpected baseline archive root/path')
+            if member.isdir():
+                continue
+            name = '/'.join(parts[1:])
+            relative(name)
+            if name not in files or name in result:
+                raise ValueError('Unexpected/duplicate baseline source member: ' + name)
+            metadata = files[name]
+            if metadata['mode'] == '120000':
+                if not member.issym() or name != 'AGENTS.md' or member.linkname != 'CLAUDE.md':
+                    raise ValueError('Unexpected source symlink')
+                data = member.linkname.encode()
+            else:
+                if not member.isfile() or member.size != metadata['size']:
+                    raise ValueError('Unexpected source file type/size: ' + name)
+                with archive.extractfile(member) as stream:
+                    data = stream.read(metadata['size'] + 1)
+            verify_blob(name, data, metadata)
+            result[name] = data
+    if set(result) != set(files):
+        raise ValueError('Baseline archive is incomplete')
+    return result
+
+
+def read_tree(directory, files):
+    checked(directory)
+    result = {}
+    for name, metadata in files.items():
+        path = directory.joinpath(*relative(name).parts)
+        checked(path.parent)
+        if metadata['mode'] == '120000':
+            if name != 'AGENTS.md' or not path.is_symlink() or os.readlink(path) != 'CLAUDE.md':
+                raise ValueError('Unexpected local baseline symlink')
+            data = os.readlink(path).encode()
+        else:
+            checked(path)
+            file_meta = path.stat()
+            if not stat.S_ISREG(file_meta.st_mode) or file_meta.st_size != metadata['size']:
+                raise ValueError('Unexpected local baseline file type/size: ' + name)
+            data = path.read_bytes()
+        verify_blob(name, data, metadata)
+        result[name] = data
+    return result
+
+
+def baseline(files):
+    errors = []
+    archive = ROOT / 'AgentENV-ae9c626.tar.gz'
+    if archive.exists() or archive.is_symlink():
+        try:
+            return read_archive(archive, files), str(archive)
+        except Exception as error:
+            errors.append(str(error))
+    source_parent = checked(ROOT / 'src')
+    candidates = [source_parent / 'agentenv-ae9c626-swk3vd']
+    candidates.extend(sorted(source_parent.glob('agentenv-ae9c626-*'))[:32])
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen or not candidate.exists():
+            continue
+        seen.add(candidate)
+        try:
+            return read_tree(candidate, files), str(candidate)
+        except Exception as error:
+            errors.append(str(candidate) + ': ' + str(error))
+    raise ValueError('No exact local ae9c626 baseline source/archive. No download attempted. '
+                     + '; '.join(errors[:6]))
+
+
+def desired_tree(data, files, updates):
+    data, files = dict(data), {k: dict(v) for k, v in files.items()}
+    for name, update in updates.items():
+        relative(name)
+        if update is None:
+            data.pop(name)
+            files.pop(name)
+            continue
+        content = update['text'].encode('utf-8')
+        verify_blob(name, content, update)
+        if update['mode'] not in ('100644', '100755'):
+            raise ValueError('Unsupported changed-source mode')
+        data[name] = content
+        files[name] = {key: update[key] for key in ('mode', 'oid', 'size')}
+    return data, files
+
+
+def object_write(git_dir, kind, data):
+    oid = object_id(kind, data)
+    path = git_dir / 'objects' / oid[:2] / oid[2:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        with path.open('xb') as stream:
+            stream.write(zlib.compress(kind.encode() + b' ' + str(len(data)).encode() + b'\0' + data))
+    return oid
+
+
+def git_tree(git_dir, data, files):
+    root = {}
+    for name, metadata in files.items():
+        directory = root
+        parts = relative(name).parts
+        for part in parts[:-1]:
+            directory = directory.setdefault(part, {})
+        oid = object_write(git_dir, 'blob', data[name])
+        if oid != metadata['oid']:
+            raise ValueError('Unexpected written Git blob')
+        directory[parts[-1]] = metadata['mode'], oid
+
+    def write(directory):
+        entries = []
+        for name, value in directory.items():
+            encoded = name.encode('utf-8')
+            if isinstance(value, dict):
+                entries.append((encoded + b'/', b'40000 ' + encoded + b'\0' + bytes.fromhex(write(value))))
+            else:
+                mode, oid = value
+                entries.append((encoded, mode.encode() + b' ' + encoded + b'\0' + bytes.fromhex(oid)))
+        return object_write(git_dir, 'tree', b''.join(raw for _, raw in sorted(entries)))
+
+    return write(root)
+
+
+def private_git_environment():
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+    return env
+
+
+def prepare_source(payload):
+    parent = checked(ROOT / 'src')
+    private_mkdir(parent, exist_ok=True)
+    destination = checked(parent / ('agentenv-ub-' + payload['source_commit'][:12]))
+    if destination.exists():
+        record = json.loads((destination / '.ub-source.json').read_text())
+        if record.get('source_commit') != payload['source_commit'] or record.get('revision') != REVISION:
+            raise ValueError('Existing independent source is unrecognized; preserve it')
+        files = {name: metadata for name, metadata in payload['files'].items()}
+        for name, update in payload['updates'].items():
+            if update is None:
+                files.pop(name)
+            else:
+                files[name] = {key: update[key] for key in ('mode', 'oid', 'size')}
+        read_tree(destination, files)
+        actual = subprocess.check_output(['git', '-C', str(destination), 'rev-parse', 'HEAD'],
+                                         env=private_git_environment(), timeout=15).decode().strip()
+        if actual != payload['source_commit']:
+            raise ValueError('Existing independent source Git identity differs; preserve it')
+        return destination, record['baseline_origin'], True
+    data, origin = baseline(payload['files'])
+    data, files = desired_tree(data, payload['files'], payload['updates'])
+    private_mkdir(destination)
+    for name, metadata in files.items():
+        path = destination.joinpath(*relative(name).parts)
+        private_mkdir(path.parent, parents=True, exist_ok=True)
+        if metadata['mode'] == '120000':
+            if name != 'AGENTS.md' or data[name] != b'CLAUDE.md':
+                raise ValueError('Unexpected target symlink')
+            path.symlink_to('CLAUDE.md')
+        else:
+            with path.open('xb') as stream:
+                stream.write(data[name])
+            path.chmod(0o700 if metadata['mode'] == '100755' else 0o600)
+    git_dir = destination / '.git'
+    private_mkdir(git_dir)
+    actual_tree = git_tree(git_dir, data, files)
+    if actual_tree != payload['source_tree']:
+        raise ValueError('Prepared source tree differs from the actual feature commit')
+    raw_commit = payload['commit_raw'].encode('utf-8')
+    if raw_commit.splitlines()[0] != ('tree ' + actual_tree).encode():
+        raise ValueError('Feature commit tree differs')
+    if object_write(git_dir, 'commit', raw_commit) != payload['source_commit']:
+        raise ValueError('Feature commit object differs; do not invent Git history')
+    branch = 'feat/ub-shared-snapshot-layers'
+    ref = git_dir / 'refs/heads' / branch
+    ref.parent.mkdir(parents=True)
+    ref.write_text(payload['source_commit'] + '\n')
+    (git_dir / 'HEAD').write_text('ref: refs/heads/' + branch + '\n')
+    (git_dir / 'shallow').write_text(payload['source_commit'] + '\n')
+    (git_dir / 'config').write_text('[core]\nrepositoryformatversion = 0\nbare = false\nfilemode = true\n')
+    subprocess.run(['git', '-C', str(destination), 'read-tree', 'HEAD'], check=True,
+                   env=private_git_environment(), timeout=30, capture_output=True)
+    (destination / '.ub-source.json').write_text(json.dumps({
+        'revision': REVISION, 'source_commit': payload['source_commit'], 'base': payload['base_commit'],
+        'source_tree': actual_tree, 'baseline_origin': origin,
+        'history': 'exact actual tip commit/tree; parents intentionally shallow, no fabricated commits'}, indent=2))
+    return destination, origin, False
+
+
+def preflight():
+    if (sys.platform != 'linux' or socket.gethostname() != 'server1' or os.getuid() != 1204
+            or os.geteuid() != 1204 or os.getgid() != 1205 or os.getegid() != 1205):
+        raise ValueError('Run only on original server1 as ordinary jwk UID1204/GID1205')
+    if os.uname().machine != 'aarch64':
+        raise ValueError('Expected the original ARM64 node; no cross-target or install fallback')
+    caps = [line.split(':')[1].strip() for line in Path('/proc/self/status').read_text().splitlines()
+            if line.startswith(('CapInh:', 'CapPrm:', 'CapEff:', 'CapAmb:'))]
+    if len(caps) != 4 or any(int(value, 16) for value in caps):
+        raise ValueError('Private source preparation/build requires zero capabilities')
+    if checked(Path(__file__).absolute()).parent != ROOT:
+        raise ValueError('Place build_modified_a.py directly in /home/jwk/agent')
+    checked(ROOT / 'relay/reports')
+    if shutil.which('git') is None:
+        raise ValueError('Existing git executable required; no installation attempted')
+    if shutil.disk_usage(ROOT).free < 16 * 1024**3:
+        raise ValueError('Independent full build requires at least 16GiB free; no cleanup attempted')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prepare-only', action='store_true', help='prepare exact source without invoking Cargo')
+    args = parser.parse_args()
+    preflight()
+    import fcntl
+    os.umask(0o077)
+    sys.dont_write_bytecode = True
+    lock_path = checked(ROOT / 'relay' / ('ub-build-' + PAYLOAD['source_commit'][:12] + '.lock'))
+    lock = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        metadata = os.fstat(lock)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 1204 or metadata.st_nlink != 1:
+            raise ValueError('Unexpected source/build lock identity')
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print('PHASE=prepare_exact_modified_source', flush=True)
+        source, origin, reused = prepare_source(PAYLOAD)
+        print('SOURCE_BASE=' + PAYLOAD['base_commit'], flush=True)
+        print('SOURCE_COMMIT=' + PAYLOAD['source_commit'], flush=True)
+        print('SOURCE_DIRECTORY=' + str(source), flush=True)
+        print('BASELINE_READONLY_INPUT=' + origin, flush=True)
+        if args.prepare_only:
+            print('BEGIN_RETURN_REPORT')
+            print(json.dumps({'status': 'MODIFIED_SOURCE_PREPARED_NO_BUILD_OR_SERVICE', 'source': str(source),
+                              'source_commit': PAYLOAD['source_commit'], 'reused': reused}, indent=2))
+            print('END_RETURN_REPORT')
+            return 0
+        entry = source / 'tools/ub-snapshot/build_offline.py'
+        spec = importlib.util.spec_from_file_location('aenv_private_offline_builder', entry)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.main()
+    finally:
+        os.close(lock)
+
+
+if __name__ == '__main__':
+    try:
+        result = main()
+    except KeyboardInterrupt:
+        print('BUILD_INTERRUPTED_PRESERVE_PRIVATE_SOURCE_AND_LOGS')
+        result = 1
+    except (Exception, SystemExit) as error:
+        if isinstance(error, SystemExit) and error.code == 0:
+            raise
+        print('BEGIN_RETURN_REPORT')
+        print(json.dumps({'status': 'STOPPED_MODIFIED_BUILD_ENTRY', 'error': type(error).__name__ + ': ' + str(error),
+                          'source_commit': PAYLOAD['source_commit'], 'service_changed': False,
+                          'SDK_called': False, 'next_action': 'Return the complete output; do not install or escalate'}, indent=2))
+        print('END_RETURN_REPORT')
+        result = 1
+    raise SystemExit(result)
