@@ -146,6 +146,9 @@ pub struct FirecrackerCommonConfig {
     pub mmds_metadata: Option<MmdsMetadata>,
     /// OverlayBD config for the sandbox user rootfs drive.
     pub rootfs_image_config: Option<OverlaybdConfig>,
+    /// Experimental cold-boot pmem/DAX layout; not yet a durable snapshot format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_rootfs: Option<super::direct_backing::RootfsBinding>,
     /// Virtual size of the sandbox user rootfs block device in bytes.
     pub rootfs_virtual_size: Option<u64>,
     #[serde(default)]
@@ -187,6 +190,7 @@ impl FirecrackerCommonConfig {
     ) -> Self {
         Self {
             firecracker_binary,
+            direct_rootfs: None,
             tools_drive_version,
             firecracker_work_base_dir: None,
             serial_output_base_dir: None,
@@ -382,6 +386,24 @@ impl FirecrackerSandboxConfig {
 
         let mut common = FirecrackerCommonConfig::from_app_config(config)?;
         common.rootfs_image_config = Some(user_image_config.clone());
+        if let Some(path) = std::env::var_os("AENV_DIRECT_ROOTFS_BINDING") {
+            anyhow::ensure!(
+                std::env::var_os("AENV_UB_ROOTFS_REPLICAS").is_none(),
+                "choose native rootfs backing or stored-layer UB replicas, not both"
+            );
+            let binding: super::direct_backing::RootfsBinding =
+                super::direct_backing::read_binding(Path::new(&path))?;
+            binding.validate()?;
+            anyhow::ensure!(
+                binding.source_image
+                    == super::direct_backing::memory_identity(
+                        &fs::read(&user_image_config.image_config_path)?,
+                        0
+                    )?,
+                "pmem rootfs binding belongs to another requested image"
+            );
+            common.direct_rootfs = Some(binding);
+        }
         common.ublk_config = Some(UblkConfig::overlaybd_with_runtime_upper_mode(
             user_image_config.image_config_path.clone(),
             user_image_config.read_only,

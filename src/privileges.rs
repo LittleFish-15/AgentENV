@@ -115,6 +115,8 @@ pub struct ScopedSpawnSpec {
     /// the target unless it is a same-number no-op, so the source must differ
     /// from the target.
     pub fd_handoff: Option<(RawFd, RawFd)>,
+    /// Additional immutable backing FDs. Sources must not overlap child targets.
+    pub backing_handoffs: Vec<(RawFd, RawFd)>,
     /// Capabilities the launcher thread keeps while spawning; the child
     /// inherits exactly this ambient set. An empty slice drops every
     /// capability before the child is created.
@@ -305,6 +307,15 @@ fn posix_spawn_exec(spec: &ScopedSpawnSpec) -> io::Result<ScopedChild> {
         None => actions.add_open_devnull(libc::STDERR_FILENO)?,
     }
     if let Some((source, target)) = spec.fd_handoff {
+        actions.add_dup2(source, target)?;
+    }
+    let mut targets = std::collections::HashSet::new();
+    for &(source, target) in &spec.backing_handoffs {
+        if source < 256 || !(10..26).contains(&target) || !targets.insert(target) {
+            return Err(io::Error::other(
+                "invalid or overlapping native backing FD handoff",
+            ));
+        }
         actions.add_dup2(source, target)?;
     }
     if let Some(cwd) = &spec.cwd {
@@ -536,6 +547,7 @@ mod tests {
             process_group: false,
             netns: None,
             fd_handoff: None,
+            backing_handoffs: Vec::new(),
             capabilities: &[],
         }
     }
@@ -566,6 +578,46 @@ mod tests {
         let sets = linux_cap::CapabilitySets::from_proc_status(status).unwrap();
         assert!(sets.is_delegable(CAP_NET_ADMIN).unwrap());
         assert!(sets.is_delegable(CAP_SYS_ADMIN).unwrap());
+    }
+
+    #[tokio::test]
+    async fn scoped_spawn_hands_multiple_native_backings_to_only_the_child() -> Result<()> {
+        use std::os::fd::FromRawFd;
+        let temp = tempdir()?;
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        fs::write(&a, b"first")?;
+        fs::write(&b, b"second")?;
+        let file_a = fs::File::open(a)?;
+        let file_b = fs::File::open(b)?;
+        let duplicate = |file: &fs::File| -> Result<OwnedFd> {
+            let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 256) };
+            anyhow::ensure!(fd >= 0, "duplicate source FD");
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        };
+        let source_a = duplicate(&file_a)?;
+        let source_b = duplicate(&file_b)?;
+        let (status, output) = sh_with_spec("cat /proc/self/fd/10 /proc/self/fd/11", |spec| {
+            spec.backing_handoffs = vec![(source_a.as_raw_fd(), 10), (source_b.as_raw_fd(), 11)]
+        })
+        .await?;
+        assert!(status.success());
+        assert_eq!(output, "firstsecond");
+        assert_ne!(
+            unsafe { libc::fcntl(source_a.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scoped_spawn_rejects_backing_target_aliases_before_exec() -> Result<()> {
+        let error = sh_with_spec("exit 0", |spec| {
+            spec.backing_handoffs = vec![(256, 10), (257, 10)]
+        })
+        .await;
+        assert!(error.is_err());
+        Ok(())
     }
 
     #[test]

@@ -279,3 +279,10 @@ the deployment result before an E5 run; no Guest result is inferred here.
 Normal retirement: stop only experimental VMs/readers, retire B/importers and
 wait for complete process exits, then retire owners. Stop on SDK busy or unknown
 ownership; preserve receipts. There is no TTL-driven, forced or global cleanup.
+
+## Native backing path
+
+The separate [native FD and pmem/DAX consumer](../native-backing/README.md)
+targets shared physical backing and is disabled by default. It does not change
+this layer-reading broker into Guest direct mapping. See its
+[implementation status](../native-backing/STATUS.md) before enabling it.

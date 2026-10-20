@@ -367,6 +367,7 @@ impl SandboxBackend for FirecrackerSandbox {
         &mut self,
         artifact_root: Option<&Path>,
     ) -> SandboxCaptureResult<Arc<dyn PausedSandboxState>> {
+        self.ensure_capture_supported()?;
         let pause_result = match artifact_root {
             Some(artifact_root) => FirecrackerSandbox::pause_to_dir(self, artifact_root)
                 .await
@@ -381,6 +382,7 @@ impl SandboxBackend for FirecrackerSandbox {
     }
 
     async fn snapshot(&mut self) -> SandboxCaptureResult<CapturedSandboxSnapshot> {
+        self.ensure_capture_supported()?;
         let live_snapshot_root = self
             .live_snapshot_root()
             .await
@@ -412,6 +414,7 @@ impl SandboxBackend for FirecrackerSandbox {
         SandboxSnapshotManifest,
         Option<Box<dyn std::any::Any + Send>>,
     )> {
+        self.ensure_capture_supported()?;
         match self.pause_to_dir(at).await {
             Ok((snapshot_config, manifest)) => Ok((manifest, Some(Box::new(snapshot_config)))),
             Err(error) => self.recover_capture_failure("capture", error).await,
@@ -449,6 +452,7 @@ impl SandboxBackend for FirecrackerSandbox {
         &mut self,
         spec: &[SandboxForkSpec],
     ) -> SandboxCaptureResult<Vec<SandboxForkResult>> {
+        self.ensure_capture_supported()?;
         let snapshot_config = match FirecrackerSandbox::pause(self).await {
             Ok(snapshot_config) => snapshot_config,
             Err(error) => return self.recover_capture_failure("fork snapshot", error).await,
@@ -657,6 +661,15 @@ impl FirecrackerSandbox {
             )));
         }
         Err(capture_error)
+    }
+
+    fn ensure_capture_supported(&self) -> SandboxCaptureResult<()> {
+        if self.launch.common().direct_rootfs.is_some() {
+            return Err(SandboxCaptureError::recoverable(anyhow::anyhow!(
+                "pmem rootfs capture/fork requires durable pmem identities and restore support"
+            )));
+        }
+        Ok(())
     }
 
     fn snapshot_rootfs_virtual_size(&self) -> Result<u64> {
@@ -901,6 +914,19 @@ impl FirecrackerSandbox {
                 self.runtime_policy.envd_poll_interval,
             )
             .await?;
+        if self.launch.common().direct_rootfs.is_some() {
+            let output = Self::run_guest_command(
+                envd_instance.clone(),
+                "/agentenv/dax-check".to_string(),
+                vec!["/.aenv-dax-probe".to_string()],
+            )
+            .await?;
+            anyhow::ensure!(
+                output.exit_code == 0 && output.stdout.starts_with("DAX_ACTIVE "),
+                "experimental pmem rootfs did not prove DAX after pivot: {}",
+                output.stderr
+            );
+        }
         if let Some(tools) = &self.tools_ublk_device {
             let _ = UblkDeviceManager::global()
                 .notify_sandbox_ready(tools.image_config_path())
@@ -1159,6 +1185,8 @@ impl FirecrackerSandbox {
         &mut self,
         snapshot_dir: &Path,
     ) -> Result<(FirecrackerSnapshotConfig, SandboxSnapshotManifest)> {
+        anyhow::ensure!(self.launch.common().direct_rootfs.is_none(),
+            "pmem rootfs capture/fork requires durable pmem identities and restore support; refusing before pause");
         debug!(snapshot_dir = %snapshot_dir.display(), "pausing sandbox");
         if self.has_writable_persistent_volumes() {
             let envd = self
@@ -1780,6 +1808,18 @@ impl FirecrackerSandbox {
 
     #[tracing::instrument(skip(self, config))]
     async fn start_fresh(&mut self, config: FirecrackerSandboxConfig) -> Result<()> {
+        if let Some(binding) = &config.common.direct_rootfs {
+            binding.validate()?;
+            for (index, layer) in binding.layers.iter().enumerate() {
+                self.fc_instance
+                    .acquire_backing(
+                        layer.clone(),
+                        super::direct_backing::FIRST_BACKING_FD + index as i32,
+                        false,
+                    )
+                    .await?;
+            }
+        }
         let work_dir = self.work_dir.path();
         debug!(work_dir = %work_dir.display(), "starting fresh sandbox");
 
@@ -1842,6 +1882,18 @@ impl FirecrackerSandbox {
 
         // ── Boot args: init=/init (tools drive has init baked in) ──
         let mut boot_args = config.boot_args.clone();
+        if let Some(binding) = &config.common.direct_rootfs {
+            let argument = binding.boot_arg()?;
+            anyhow::ensure!(
+                !boot_args
+                    .as_deref()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .any(|arg| arg.starts_with("aenv_pmem_rootfs=")),
+                "duplicate pmem rootfs boot argument"
+            );
+            boot_args = Some(format!("{} {argument}", boot_args.unwrap_or_default()));
+        }
         // Tools drive contains /init; ensure boot args include init=/init.
         let missing_explicit_init_arg = match boot_args.as_deref() {
             Some(args) => !args.split_whitespace().any(|arg| arg.starts_with("init=")),
@@ -1970,6 +2022,37 @@ impl FirecrackerSandbox {
 
     #[tracing::instrument(skip(self, config))]
     async fn start_resume(&mut self, config: FirecrackerSnapshotConfig) -> Result<()> {
+        anyhow::ensure!(
+            config.common.direct_rootfs.is_none(),
+            "pmem rootfs snapshot restoration is not supported by this experimental format"
+        );
+        let direct_memory_path = if let Some(path) = std::env::var_os("AENV_DIRECT_MEMORY_BINDING")
+        {
+            anyhow::ensure!(
+                std::env::var_os("AENV_UB_MEMORY_REPLICAS").is_none(),
+                "choose native RAM backing or stored-layer UB replicas, not both"
+            );
+            anyhow::ensure!(
+                !config.pack_recording,
+                "native RAM cannot record a ublk startup pack"
+            );
+            let binding: super::direct_backing::MemoryBinding =
+                super::direct_backing::read_binding(Path::new(&path))?;
+            let image = tokio::fs::read(&config.mem_overlaybd_config.image_config_path).await?;
+            binding.validate(&image, config.mem_virtual_size)?;
+            Some(
+                self.fc_instance
+                    .acquire_backing(
+                        binding.backing,
+                        super::direct_backing::FIRST_BACKING_FD
+                            + super::direct_backing::MAX_PMEM_LAYERS as i32,
+                        true,
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
         // NOTE: The virtio-balloon device is NOT configured here. Balloon state
         // is part of vm_state.bin and is restored automatically by Firecracker.
         // Snapshots taken before balloon support was added will simply not have
@@ -1998,7 +2081,10 @@ impl FirecrackerSandbox {
         self.current_rootfs_virtual_size = Some(rootfs_virtual_size);
 
         let capture_output = logging_enabled(config.common.firecracker_log_level.as_deref());
-        if config.common.stdout_path.is_none() && config.common.stderr_path.is_none() {
+        if direct_memory_path.is_none()
+            && config.common.stdout_path.is_none()
+            && config.common.stderr_path.is_none()
+        {
             if let Some(warm) =
                 FirecrackerPool::global().and_then(|pool| pool.try_acquire(capture_output))
             {
@@ -2195,7 +2281,11 @@ impl FirecrackerSandbox {
             .memory_snapshot
             .overlaybd_global_config_path
             .clone();
-        let mem_device_path = if config.pack_recording {
+        let mem_device_path = if let Some(path) = direct_memory_path {
+            self.mem_snapshot_image_config_path =
+                Some(config.mem_overlaybd_config.image_config_path.clone());
+            path
+        } else if config.pack_recording {
             // Pack-recording VMs get a dedicated, non-shared memory device:
             // sharing one (or the block-device page cache behind it) would
             // hide first-touch reads from the recorder.
@@ -2455,6 +2545,18 @@ impl FirecrackerSandbox {
         self.fc_instance
             .set_boot_source(&kernel_image, None, boot_args)
             .await?;
+
+        if let Some(binding) = &config.common.direct_rootfs {
+            for index in 0..binding.layers.len() {
+                let path = PathBuf::from(format!(
+                    "/proc/self/fd/{}",
+                    super::direct_backing::FIRST_BACKING_FD + index as i32
+                ));
+                self.fc_instance
+                    .add_readonly_pmem(&format!("aenv-ro-{index}"), &path)
+                    .await?;
+            }
+        }
 
         // Drive 0 (/dev/vda): tools drive as root device, always read-only.
         self.fc_instance

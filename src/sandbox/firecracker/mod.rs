@@ -6,6 +6,7 @@
 
 mod config;
 mod connector;
+mod direct_backing;
 mod factory;
 mod instance;
 mod mmds;
