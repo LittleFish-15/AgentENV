@@ -266,7 +266,7 @@ def parent_layer_inventory(snapshot_id):
               'scope': 'stored_layer_metadata_only_no_shared_page_claim',
               'snapshot_id': snapshot_id, 'content_hashes_verified': False}
     try:
-        repo = BASE / 'state/snapshot-store'
+        repo = BASE / 'state/snapshot-store/repository'
         record = json.loads(read(repo / 'catalog/records' / (snapshot_id + '.json')))
         need(record.get('id') == snapshot_id and isinstance(record.get('committed'), dict), 'Committed snapshot record mismatch')
         committed = record['committed']
