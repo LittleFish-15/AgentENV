@@ -255,6 +255,29 @@ unit改变及全局安装dump不放宽。此为本地模拟启动路径验证，
 审查其余写点：proxy api.sock已有受限归档；host-proxy.json已有历史备份/临时替换路径，活代理保持复用；
 server/proxy日志追加；ublk客户端已有socket占用检查/旧socket处理。本次不改这些已有路径。
 
+## 真实最大层的单对象发布预验
+
+cow_ub_inventory的实际回执：2个memory层共112.328125MiB、14个rootfs层1343.435546875MiB，
+总payload1455.763671875MiB；4096字节头+4MiB对齐后逻辑申请1504MiB，最大单层540MiB。
+在整批发布和Guest启用之前，ub_real_layer_canary.py对已核验最大真实rootfs存储层
+sha256:c161b9691ab6551a7b10cba283c2e525003378be3fc9193a12cac85c783d47d2
+执行一次规模预验。默认仅plan，不调用SDK；显式 --run-reviewed --logical-budget-mib 540
+--max-backing-coverage-mib 1024才申请，最多一次allocate，没有自动重试。
+
+1024MiB是创建/映射返回之后的覆盖检查阈值，不是申请前物理硬配额。实际UB池余量、backing物理增量
+及放置节点未验证，不把此前4MiB对象返回128MiB覆盖外推为这批物理保证。完整16层/Guest/跨节点验收不降级。
+
+以A普通jwk运行，复用现有源码中的固定SHA broker/bridge/smoke；仅在自己的报告目录编译小C++ SDK桥接，
+不重编译AgentENV。核已完成对照和同catalog，取最大层真实文件，通过SDK复制/只读映射校验，再经本地broker
+流式读取整个payload并验SHA；不导出服务索引、不改Runtime、不创建Guest或Rust格式探针、不显式操作B。
+共享SDK实验flock和独立pending防重复；写入和读取每64MiB打印进度。600秒为软传输截止，不能强制中断阻塞SDK调用；
+截止后尝试清理，不强杀。已确认读者退出后才unmap/deallocate/finalize；未知创建或读者未退则保留回执，不冒称释放。
+同一对象两次map的backing覆盖不能相加为物理占用。
+
+成功ONE_REAL_LARGE_LAYER_PUBLISHED_READ_VERIFIED_AND_RELEASED只证明最大真实层SDK/本地字节传输和清理，
+不是实际OverlayBD块解析、Guest或跨节点通过。失败STOPPED即回传，不删pending或换新对象名重试。
+test_ub_real_layer_canary.py验证故障路径和读者先退再释放顺序；本地替身不会实际申请540MiB。
+
 ## A修改版独立共存部署
 
 A已回传上述raw/tar/zfile实际运行全部成功，SDK正常清理。下一阶段使用`deploy_a_ub.py`；B仍暂停，最终跨节点/Guest验收仍未完成。
