@@ -377,8 +377,57 @@ def rootfs_fd_flags(pid,device):
     return matches
 
 
+def marker_ranges(binding,target,page):
+    """Translate only the declared arena GPAs through the authoritative FC API."""
+    require(page==4096 and target.get('guest_page_bytes')==page,'Marker page size differs')
+    gpas=target.get('gpas')
+    require(isinstance(gpas,list) and len(gpas)==4096
+            and all(type(g) is int and g>0 and g%page==0 for g in gpas)
+            and len(set(gpas))==len(gpas),'Marker GPA list incomplete/aliased')
+    regions=binding['guest_regions'];addresses=[]
+    for gpa in gpas:
+        matches=[]
+        for r in regions:
+            base=r.get('guest_phys_addr');size=r.get('size');host=r.get('base_host_virt_addr')
+            require(all(type(x) is int and x>=0 for x in (base,size,host)),'Invalid FC GPA region')
+            if base<=gpa and gpa+page<=base+size:matches.append(host+gpa-base)
+        require(len(matches)==1,'Marker GPA not in exactly one Guest region')
+        address=matches[0]
+        require(address%page==0 and sum(m['start']<=address and address+page<=m['end'] for m in binding['maps'])==1,
+                'Marker HVA outside selected Guest RAM')
+        addresses.append(address)
+    require(len(set(addresses))==len(addresses),'Marker HVA aliases')
+    result=[]
+    for index in range(4):
+        ranges=[]
+        for address in addresses[index*1024:(index+1)*1024]:
+            if ranges and ranges[-1]['end']==address:ranges[-1]['end']+=page
+            else:ranges.append({'start':address,'end':address+page})
+        result.append(ranges)
+    return result
+
+
+def marker_sample(bound,targets,page):
+    require(isinstance(targets,dict) and set(targets)=={b['sandbox_id'] for b in bound},'Marker sandbox scope differs')
+    ranges=[marker_ranges(b,targets[b['sandbox_id']],page) for b in bound]
+    result=[]
+    for segment in range(4):
+        readings=[pagemap(b['pid'],r[segment],page) for b,r in zip(bound,ranges)]
+        require(all(r[2]['present_pte_pages']==r[2]['unique_pfn_pages']==1024
+                    and r[2]['swapped_pte_pages']==0 for r in readings),'Marker pages not fully resident/unaliased')
+        flags=page_flags(set().union(*(r[0] for r in readings)))
+        again=[pagemap(b['pid'],r[segment],page) for b,r in zip(bound,ranges)]
+        result.append({'segment':segment,'bytes_per_sandbox':4*1024**2,
+            'stable':all(a[2]['identity_hash']==b[2]['identity_hash'] for a,b in zip(readings,again)),
+            'physical':sharing([r[0] for r in readings],flags,page,[r[1] for r in readings]),
+            'guests':[{'sandbox_id':b['sandbox_id'],'pagemap':r[2],
+                      'segment_gpa_sha256':hashlib.sha256(json.dumps(targets[b['sandbox_id']]['gpas'][segment*1024:(segment+1)*1024]).encode()).hexdigest()}
+                     for b,r in zip(bound,readings)]})
+    return result
+
+
 def collect_scope(scope):
-    report={'revision':'cow-ram-scoped-readonly-v4','scope':scope,'samples':[],
+    report={'revision':'cow-ram-scoped-readonly-v5','scope':{k:v for k,v in scope.items() if k!='marker_targets'},'samples':[],
             'system_changes':False,'process_memory_contents_read':False,'SDK_called':False}
     try:
         require(os.geteuid()==0 and os.uname().nodename=='server1','A existing root terminal only')
@@ -420,6 +469,8 @@ def collect_scope(scope):
             row={'started_unix':before,'page_bytes':page,'pagemap_stable_during_flags':stable,
                  'physical_page_observation':sharing([r[0] for r in readings],flags,page,[r[1] for r in readings]),
                  'guests':[],'memory_device_cache':{},'rootfs':[],'stored_layer_cache':[]}
+            if 'marker_targets' in scope:
+                row['marker_segments']=marker_sample(bound,scope['marker_targets'],page)
             for b,r in zip(bound,readings):
                 require(identity(b['pid'])[1]==b['start_ticks'],'Child changed during sample')
                 row['guests'].append({'sandbox_id':b['sandbox_id'],'pid':b['pid'],'memory_device':b['memory_device'],
@@ -472,3 +523,4 @@ def collect_scope(scope):
     finally:
         if hasattr(signal,'SIGALRM'):signal.alarm(0)
     print('BEGIN_RETURN_REPORT');print(json.dumps(report,indent=2));print('END_RETURN_REPORT')
+    return report

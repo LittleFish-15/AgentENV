@@ -150,6 +150,40 @@ python3 -I -B dev-relay/test_a_local_runner.py
 
 测试使用真实Publisher和内存SDK double，broker/probe调用替身用于故障注入；检查顺序生命周期、探针失败清理、读者未退出、申请未知、删除失败、原guard兼容、源码身份验证。通过这些测试不代表目标SDK、真实Rust格式或Guest已验证。Windows测试使用继承ACL/短路径，Linux生产目录仍使用私有权限。
 
+## A 原版受控写入、缓存计量与后代恢复
+
+`cow_controlled_once.py` 复用 `cow_marker_prepare_e5b9050.py` 已建立并实际验证的测量快照。
+与 `cow_ram_readonly.py` v5 配套，依赖均固定 SHA256；不重复建父样本、不下载镜像、不编译运行时。
+这是带 16 MiB RAM 标记和 4 MiB rootfs 标记的 PyPika 派生模板，不是原先无标记基线，也不是完整 agent_replay。
+
+普通 A/jwk 启动后最多同时恢复两个 512 MiB Guest。打印完整、可审查的 root 只读 Python 块，须在 240 秒内
+直接粘贴到 A 已有 root 终端；不要 root 执行任何 jwk 可写脚本文件。块只读取固定 PID/start_ticks、固定快照
+及其 lower/upper/cache/Guest 页元数据，通过一次性 0600 Unix socket 返回采样结果。socket 双方检查 SO_PEERCRED，
+root 额外绑定普通控制器 PID/start_ticks、socket dev/inode；固定四阶段，不接受任意代码、路径或新 PID。
+普通控制器负责 Guest 写操作和报告落盘；root 不执行 Guest 命令、不读 Guest 内存内容、不修改系统配置。
+
+四阶段为 baseline、a_first（沙箱 A 第一段 RAM 与自身文件各写 4 MiB）、a_repeat（相同内容重复写）、
+b_disjoint（沙箱 B 第二段 RAM 4 MiB 与自身文件写入不同内容）。每阶段两侧校验全部标记内容，三次 root 采样；
+Guest GPA 数组采样前后必须相同，Host pagemap 在读取 flags 前后检查稳定性。GPA 经实际 Firecracker 内存区域 API
+转换到 Host VMA，仅统计指定 4096 个标记页，排除 zero/KSM/compound/未知页后才比较预期。
+初始四段应各有 4 MiB 共享页；A 首写后为 [0,4,4,4] MiB，B 写另一段后为 [0,0,4,4] MiB。
+重复写比较所观测 PFN/GPA 身份；这不是每次分配事件跟踪，不能据此宣称系统从未发生任何瞬时分配。
+
+同时保留同事口径整进程 VmRSS、smaps_rollup PSS、每轮 Σ(RSS−PSS)/(n−1) 的 min/max；与 Guest RAM PFN 统计分列。
+rootfs lower 按 dev/inode 去重，upper 分实例计 data/index 文件长度、分配量及驻留页；memory lower、memory ublk
+和 rootfs ublk page cache 单列，不能直接相加为 Host 总内存。mincore 不读文件内容或触发预热；Guest 标记校验
+自身会读取标记，场景明确为预热受控实验，不称冷缓存。完整原始采样写入每阶段 `*-root.json`，返回汇总包含三次
+缓存/文件统计和整进程 min/max，缺项保留 null/错误。相同 inode/page cache 不证明两个消费者访问集合完全重合。
+
+root 返回完成消息后，普通控制器最多捕获一次 A 写后快照，删除 A、验证 B 不受影响后删除 B；顺序各恢复一个写后
+后代和原测量模板，验证写入继承和 Base 标记未改。合计最多 4 次恢复、1 次捕获，同时最多 2 Guest。
+保留原快照、测量快照和写后快照用于审查；仅按本 run metadata 删除已知自己创建的 Guest，并逐个 GET 404。
+恢复/捕获结果不明、采样失败或超时不重试，保留 pending/日志。不能手工删除 pending 再跑。
+
+成功结束标记 `CONTROLLED_OBSERVATIONS_AND_GENERATION_CHECKS_COMPLETED_REVIEW_MEASUREMENTS` 只表示流程完成；
+物理预期是否符合、重复写观察、缓存可测性与最终验收分别报告。UB、修改版、B 和跨节点均未由本脚本验证。
+本地检查：`test_cow_controlled.py`、`test_cow_ram_measurement.py`、`test_cow_marker.py`；模拟检查不代替目标运行。
+
 ## A修改版独立共存部署
 
 A已回传上述raw/tar/zfile实际运行全部成功，SDK正常清理。下一阶段使用`deploy_a_ub.py`；B仍暂停，最终跨节点/Guest验收仍未完成。
