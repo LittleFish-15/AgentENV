@@ -1,0 +1,332 @@
+"""Reviewed inline collector: scoped proc metadata, read-only mincore, stdout only.
+
+Never run a jwk-writable file as root. The ordinary launcher prints this exact
+SHA-checked source plus literal scope for direct paste into the root terminal.
+No process memory, commands, environments, credentials, or raw PFNs are output.
+"""
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import struct
+import subprocess
+import time
+
+ROOT=Path('/home/jwk/agent')
+BASE=ROOT/'deployments/agentenv-ae9c626-baseline'
+UNIT='jwk-aenv-ae9c626-node-a.service'
+SHORT=ROOT/'r/fc-a-base'
+
+
+def require(ok,message):
+    if not ok: raise RuntimeError(message)
+
+
+def identity(pid):
+    s=(Path('/proc')/str(pid)/'stat').read_text().rsplit(')',1)[1].split()
+    return int(s[1]),s[19]
+
+
+def find_firecrackers(main_pid,proc_root=Path('/proc')):
+    queue=[main_pid];seen=set();found=[]
+    while queue:
+        pid=queue.pop()
+        if pid in seen:continue
+        seen.add(pid);require(len(seen)<=128,'Process tree exceeds bound')
+        proc=proc_root/str(pid)
+        try:
+            ticks=(proc/'stat').read_text().rsplit(')',1)[1].split()[19]
+            if (proc/'comm').read_text().strip()=='firecracker':found.append(pid)
+            tasks=list((proc/'task').iterdir());require(len(tasks)<=512,'Thread count exceeds bound')
+            for task in tasks:
+                try:children=(task/'children').read_text().split()
+                except FileNotFoundError:continue
+                require(len(children)<=128,'Child count exceeds bound')
+                for child in children:
+                    require(child.isdecimal(),'Invalid child PID')
+                    try:parent=(proc_root/child/'stat').read_text().rsplit(')',1)[1].split()[1]
+                    except FileNotFoundError:continue
+                    if int(parent)==pid:queue.append(int(child))
+            require((proc/'stat').read_text().rsplit(')',1)[1].split()[19]==ticks,'Tree PID changed')
+        except FileNotFoundError:continue
+    return sorted(found)
+
+
+def owned(path,limit=1024**2):
+    require(path.is_relative_to(ROOT) and path.resolve(strict=True)==path,'Redirected/outside input')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as f:
+        m=os.fstat(f.fileno())
+        require(stat.S_ISREG(m.st_mode) and m.st_uid==1204 and m.st_size<=limit,'Input metadata differs')
+        data=f.read(limit+1);require(len(data)<=limit,'Input grew');return data
+
+
+def memory_backend(text):
+    matches=[]
+    for line in text.splitlines():
+        if 'Put request on "/snapshot/load"' not in line: continue
+        match=re.search(r'with body (".*")\.$',line)
+        require(match is not None,'Unrecognized snapshot-load log syntax')
+        body=json.loads(json.loads(match[1]))
+        backend=body.get('mem_backend',{})
+        require(backend.get('backend_type')=='File','Memory backend is not File')
+        path=backend.get('backend_path','')
+        require(re.fullmatch(r'/dev/ublkb[0-9]+',path),'Unexpected memory device')
+        matches.append(path)
+    require(len(matches)==1,'Expected exactly one snapshot load')
+    return matches[0]
+
+
+def parse_guest_smaps(text,device,expected_bytes):
+    maps=[];current=None
+    for line in text.splitlines():
+        match=re.match(r'^([0-9a-f]+)-([0-9a-f]+)\s+(\S+)\s+([0-9a-f]+)\s+\S+\s+\d+\s*(.*)$',line)
+        if match:
+            current=None
+            if match[5]==device:
+                require(match[3].endswith('p'),'Guest memory mapping is not private')
+                current={'start':int(match[1],16),'end':int(match[2],16),
+                         'offset':int(match[4],16),'permissions':match[3],'bytes':{}}
+                maps.append(current)
+        elif current is not None:
+            field=re.fullmatch(r'(\w+):\s+(\d+) kB',line)
+            if field: current['bytes'][field[1]]=int(field[2])*1024
+    require(maps and sum(m['end']-m['start'] for m in maps)==expected_bytes,
+            'Guest memory VMA coverage differs from snapshot RAM; no size-only guess')
+    return maps
+
+
+def pagemap(pid,maps,page):
+    result=set();file_backed=set();present=swapped=masked=0;digest=hashlib.sha256()
+    fd=os.open('/proc/'+str(pid)+'/pagemap',os.O_RDONLY)
+    try:
+        for m in maps:
+            require(m['start']%page==m['end']%page==0,'Unaligned VMA')
+            count=(m['end']-m['start'])//page
+            data=os.pread(fd,count*8,(m['start']//page)*8)
+            require(len(data)==count*8,'Short pagemap read')
+            # Compare stable PFN/present/swap/file identity, not soft-dirty bits.
+            for (entry,) in struct.iter_unpack('=Q',data):
+                digest.update(struct.pack('=Q',entry & (((1<<55)-1)|(7<<61))))
+                if entry & (1<<62): swapped+=1
+                if not entry & (1<<63): continue
+                present+=1;pfn=entry & ((1<<55)-1)
+                if pfn==0: masked+=1;continue
+                result.add(pfn)
+                if entry & (1<<61):file_backed.add(pfn)
+    finally:os.close(fd)
+    require(masked==0,'Present PFNs are zero/hidden; no physical-sharing claim')
+    require(present>0,'No resident Guest pages observed; no sharing ratio')
+    return result,file_backed,{'present_pte_pages':present,'swapped_pte_pages':swapped,
+                              'unique_pfn_pages':len(result),'file_flag_unique_pages':len(file_backed),
+                              'identity_hash':digest.hexdigest()}
+
+
+def page_flags(pfns):
+    flags={};buckets={}
+    for pfn in pfns:buckets.setdefault(pfn//512,[]).append(pfn)
+    fd=os.open('/proc/kpageflags',os.O_RDONLY)
+    try:
+        for bucket,values in buckets.items():
+            lo=min(values);hi=max(values)
+            data=os.pread(fd,(hi-lo+1)*8,lo*8)
+            require(len(data)==(hi-lo+1)*8,'Short kpageflags read')
+            for pfn in values:flags[pfn]=struct.unpack_from('=Q',data,(pfn-lo)*8)[0]
+    finally:os.close(fd)
+    return flags
+
+
+def sharing(sets,flags,page,file_sets):
+    union=set().union(*sets);shared=sets[0]&sets[1]
+    def metric(pool):
+        consumers=sum(len(s&pool) for s in sets);common=shared&pool
+        return {'unique_bytes':len(pool)*page,'shared_unique_bytes':len(common)*page,
+                'shared_participating_bytes':len(common)*2*page,
+                'avoided_duplicate_bytes':len(common)*page,'consumer_bytes':consumers*page,
+                'sharing_participation_ratio':2*len(common)/consumers if consumers else None,
+                'duplicate_avoidance_ratio':len(common)/consumers if consumers else None}
+    groups={'zero':set(),'ksm':set(),'compound_or_huge':set(),'ordinary_file':set(),
+            'ordinary_anon':set(),'unclassified_nonanon':set()}
+    for pfn in union:
+        f=flags[pfn]
+        require(not f & ((1<<19)|(1<<20)|(1<<23)),'Unavailable/error/offline PFN encountered')
+        file_consistent=all(pfn not in s or pfn in fs for s,fs in zip(sets,file_sets))
+        kind=('zero' if f&(1<<24) else 'compound_or_huge' if f&((1<<15)|(1<<16)|(1<<17)|(1<<22))
+              else 'ksm' if f&(1<<21) else 'ordinary_anon' if f&(1<<12)
+              else 'ordinary_file' if file_consistent else 'unclassified_nonanon')
+        groups[kind].add(pfn)
+    return {'all_selected_guest_ram':metric(union),
+            'categories':{k:metric(v) for k,v in groups.items()},
+            'snapshot_file_shared_bytes_excluding_special_pages':len(shared&groups['ordinary_file'])*page,
+            'compound_attribution_complete':not groups['compound_or_huge'],
+            'raw_pfns_output':False,'cross_node_comparison':False}
+
+
+def resident(path,max_bytes,block=False):
+    fd=None
+    try:
+        if block:require(re.fullmatch(r'/dev/ublkb[0-9]+',str(path)),'Unexpected block device')
+        else:
+            require((path.is_relative_to(SHORT) or path.is_relative_to(BASE/'state'))
+                    and path.resolve(strict=True)==path,'Unexpected file cache path')
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK);m=os.fstat(fd)
+        if block:
+            require(stat.S_ISBLK(m.st_mode),'Expected block device')
+            size=int((Path('/sys/class/block')/path.name/'size').read_text())*512
+        else:
+            require(stat.S_ISREG(m.st_mode) and m.st_uid==1204,'Expected owned upper file');size=m.st_size
+        require(0<=size<=max_bytes,'Cache sampling capacity exceeds bound')
+        page=os.sysconf('SC_PAGESIZE');libc=ctypes.CDLL(None,use_errno=True)
+        libc.mmap.restype=ctypes.c_void_p
+        libc.mmap.argtypes=[ctypes.c_void_p,ctypes.c_size_t,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_long]
+        libc.mincore.argtypes=[ctypes.c_void_p,ctypes.c_size_t,ctypes.c_void_p]
+        libc.munmap.argtypes=[ctypes.c_void_p,ctypes.c_size_t]
+        cached=0
+        for offset in range(0,size,256*1024**2):
+            length=min(256*1024**2,size-offset);address=libc.mmap(None,length,1,1,fd,offset)
+            require(address not in (None,ctypes.c_void_p(-1).value),'Cache mmap unsupported')
+            try:
+                bits=(ctypes.c_ubyte*((length+page-1)//page))()
+                require(libc.mincore(address,length,bits)==0,'Device/file mincore unsupported')
+                cached+=sum(bool(x&1) for x in bits)
+            finally:require(libc.munmap(address,length)==0,'Cache munmap failed')
+        return {'available':True,'path':str(path),'logical_file_or_device_bytes':size,
+                'resident_page_bytes':cached*page,'page_bytes':page,'dev':m.st_dev,'inode':m.st_ino,
+                'rdev':m.st_rdev,'allocated_file_bytes':None if block else m.st_blocks*512,
+                'data_read_or_faulted':False,'atomic_snapshot':False}
+    except Exception as e:
+        return {'available':False,'path':str(path),'error_type':type(e).__name__,
+                'reason':str(e) if type(e) is RuntimeError else 'Read-only measurement unavailable'}
+    finally:
+        if fd is not None:os.close(fd)
+
+
+def bind(scope,child):
+    pid=child['pid'];proc=Path('/proc')/str(pid)
+    require(identity(pid)[1]==child['start_ticks'],'Child identity changed')
+    require((proc/'comm').read_text().strip()=='firecracker','Not a Firecracker process')
+    uids=re.search(r'^Uid:\s+(.+)$',(proc/'status').read_text(),re.M)
+    require(uids and list(map(int,uids[1].split()))==[1204]*4,'Child UID differs')
+    parent=pid
+    for _ in range(16):
+        parent=identity(parent)[0]
+        if parent==scope['main_pid']:break
+        require(parent>1,'Child is outside the approved Runtime tree')
+    require(parent==scope['main_pid'],'Runtime ancestor not found')
+    stderr=Path(os.readlink(proc/'fd/2'))
+    require(stderr.parent.parent==BASE/'logs/firecracker' and stderr.name=='firecracker-stderr.log'
+            and stderr.parent.name in scope['sandbox_ids'],'Child log does not belong to selected sandbox')
+    cwd=Path(os.readlink(proc/'cwd'))
+    require(cwd.parent==SHORT and re.fullmatch(r'agentenv-fc-[A-Za-z0-9]+',cwd.name),'Unexpected child work directory')
+    backend=memory_backend(owned(stderr.parent/'firecracker.log').decode())
+    raw=(proc/'smaps').read_text();require(len(raw)<=4*1024**2,'smaps too large')
+    maps=parse_guest_smaps(raw,backend,scope['memory_bytes'])
+    return {'pid':pid,'start_ticks':child['start_ticks'],'sandbox_id':stderr.parent.name,
+            'memory_device':backend,'cwd':cwd,'maps':maps}
+
+
+def rootfs_fd_flags(pid,device):
+    matches=[];fdroot=Path('/proc')/str(pid)/'fd'
+    entries=list(fdroot.iterdir());require(len(entries)<=512,'FD count exceeds bound')
+    for fd in entries:
+        try:
+            if os.readlink(fd)!=str(device):continue
+            info=(fdroot.parent/'fdinfo'/fd.name).read_text()
+            value=re.search(r'^flags:\s+([0-7]+)$',info,re.M)
+            require(value is not None,'FD flags missing')
+            flags=int(value[1],8)
+            matches.append({'fd':int(fd.name),'flags_octal':value[1],
+                            'O_DIRECT':bool(flags&os.O_DIRECT)})
+        except FileNotFoundError:continue
+    require(matches,'Rootfs device not found among this Guest open FDs')
+    return matches
+
+
+def collect_scope(scope):
+    report={'revision':'cow-ram-scoped-readonly-v1','scope':scope,'samples':[],
+            'system_changes':False,'process_memory_contents_read':False,'SDK_called':False}
+    try:
+        require(os.geteuid()==0 and os.uname().nodename=='server1','A existing root terminal only')
+        require(scope['memory_bytes']==512*1024**2 and len(scope['children'])==len(scope['sandbox_ids'])==2,'Unexpected sample budget')
+        require(len(set(scope['sandbox_ids']))==2 and all(re.fullmatch(r'[0-9a-f-]{36}',x) for x in scope['sandbox_ids']),'Invalid sandbox scope')
+        require(re.fullmatch(r'[0-9a-f-]{36}',scope['snapshot_id']),'Invalid snapshot scope')
+        require(len({c['pid'] for c in scope['children']})==2,'Duplicate child PIDs')
+        require(type(scope['main_pid']) is int and scope['main_pid']>1
+                and all(type(c['pid']) is int and c['pid']>1 and re.fullmatch(r'[0-9]+',c['start_ticks']) for c in scope['children']),
+                'Invalid process identities')
+        require(Path('/proc/sys/kernel/random/boot_id').read_text().strip()==scope['boot_id'],'Boot changed')
+        signal.signal(signal.SIGALRM,lambda *_: (_ for _ in ()).throw(RuntimeError('Sampling deadline reached')))
+        signal.alarm(120)
+        repo=BASE/'state/snapshot-store/repository'
+        raw=owned(repo/'catalog/records'/(scope['snapshot_id']+'.json'))
+        require(hashlib.sha256(raw).hexdigest()==scope['catalog_sha256'],'Snapshot catalog changed')
+        record=json.loads(raw);layer_paths={}
+        require(record.get('id')==scope['snapshot_id'],'Snapshot catalog identity differs')
+        for kind in ('memory','rootfs'):
+            for entry in record['committed'][kind+'_layers']:
+                layer=entry if kind=='memory' else entry.get('Managed')
+                require(isinstance(layer,dict) and re.fullmatch(r'sha256:[0-9a-f]{64}',layer['digest']),'Unresolved external layer')
+                path=repo/'managed-layers'/(layer['digest'].replace(':','_')+'.overlaybd.commit')
+                layer_paths.setdefault(str(path),[]).append(kind)
+        require(len(layer_paths)<=64,'Layer count exceeds bound')
+        for _ in range(3):
+            before=time.time()
+            props=subprocess.run(['/usr/bin/systemctl','show',UNIT,'--property=MainPID,User,Group'],capture_output=True,text=True,timeout=10,check=True)
+            fields=dict(x.split('=',1) for x in props.stdout.splitlines() if '=' in x)
+            require(fields.get('MainPID')==str(scope['main_pid']) and fields.get('User')==fields.get('Group')=='jwk','Runtime unit changed')
+            require(identity(scope['main_pid'])[1]==scope['main_start_ticks'],'Runtime identity changed')
+            bound=[bind(scope,c) for c in scope['children']]
+            require({b['sandbox_id'] for b in bound}==set(scope['sandbox_ids']),'Sandbox/process binding is not one-to-one')
+            page=os.sysconf('SC_PAGESIZE')
+            readings=[pagemap(b['pid'],b['maps'],page) for b in bound]
+            flags=page_flags(set().union(*(r[0] for r in readings)))
+            again=[pagemap(b['pid'],b['maps'],page) for b in bound]
+            stable=all(a[2]['identity_hash']==b[2]['identity_hash'] for a,b in zip(readings,again))
+            row={'started_unix':before,'page_bytes':page,'pagemap_stable_during_flags':stable,
+                 'physical_page_observation':sharing([r[0] for r in readings],flags,page,[r[1] for r in readings]),
+                 'guests':[],'memory_device_cache':{},'rootfs':[],'stored_layer_cache':[]}
+            for b,r in zip(bound,readings):
+                require(identity(b['pid'])[1]==b['start_ticks'],'Child changed during sample')
+                row['guests'].append({'sandbox_id':b['sandbox_id'],'pid':b['pid'],'memory_device':b['memory_device'],
+                                      'vmas':b['maps'],'pagemap':r[2]})
+                if b['memory_device'] not in row['memory_device_cache']:
+                    row['memory_device_cache'][b['memory_device']]=resident(Path(b['memory_device']),scope['memory_bytes'],True)
+                rootdev=(b['cwd']/'user-rootfs').resolve(strict=True)
+                fd_flags=rootfs_fd_flags(b['pid'],rootdev)
+                upper={}
+                cfg=json.loads(owned(b['cwd']/'overlaybd/image.json'))
+                lowers=[]
+                require(isinstance(cfg.get('lowers'),list) and len(cfg['lowers'])<=64,'Unexpected runtime lower list')
+                for lower in cfg['lowers']:
+                    value=lower.get('file')
+                    item={'digest':lower.get('digest') if re.fullmatch(r'sha256:[0-9a-f]{64}',str(lower.get('digest',''))) else None}
+                    if value:
+                        path=Path(value);path=path if path.is_absolute() else b['cwd']/'overlaybd'/path
+                        item['local_file']=resident(path,2*1024**3)
+                    else:item['local_file']={'available':False,'reason':'NO_LOCAL_FILE_REFERENCE'}
+                    lowers.append(item)
+                for name in ('data','index'):
+                    value=cfg.get('upper',{}).get(name)
+                    if value:
+                        path=Path(value);path=path if path.is_absolute() else b['cwd']/'overlaybd'/path
+                        require(path.parent==b['cwd']/'overlaybd','Upper is outside this Guest runtime')
+                        upper[name]=resident(path,64*1024**3)
+                row['rootfs'].append({'sandbox_id':b['sandbox_id'],'fd_flags':fd_flags,
+                                      'device_cache':resident(rootdev,64*1024**3,True),'upper_files':upper,
+                                      'runtime_lowers':lowers})
+            for path,kinds in layer_paths.items():
+                row['stored_layer_cache'].append(dict(resident(Path(path),2*1024**3),kinds=kinds))
+            row['finished_unix']=time.time();report['samples'].append(row);time.sleep(1)
+        report['status']='SCOPED_RAM_PAGE_AND_CACHE_OBSERVATIONS_COMPLETED'
+        report['stable_pagemap_samples']=sum(s['pagemap_stable_during_flags'] for s in report['samples'])
+        report['acceptance_note']='Non-atomic observations; discard unstable samples. Compound/zero/KSM categories are separate. Do not sum Guest RAM and memory-device cache without overlap correction.'
+    except Exception as e:
+        report.update(status='STOPPED_SCOPED_READONLY_MEASUREMENT',error_type=type(e).__name__,
+                      reason=str(e) if type(e) is RuntimeError else 'Bounded read failed; no system changes')
+    finally:
+        if hasattr(signal,'SIGALRM'):signal.alarm(0)
+    print('BEGIN_RETURN_REPORT');print(json.dumps(report,indent=2));print('END_RETURN_REPORT')

@@ -108,15 +108,49 @@ def layer_inventory(snapshot):
             'content_hashes_verified':False}
 
 
+def descendant_firecrackers(main_pid, proc_root=Path('/proc')):
+    """Walk this service's process tree; no assumption about cgroup v1/v2 mounts."""
+    queue=[main_pid];seen=set();found=[]
+    while queue:
+        pid=queue.pop()
+        if pid in seen: continue
+        seen.add(pid)
+        H.need(len(seen)<=128,'Service process tree exceeds bound')
+        proc=proc_root/str(pid)
+        try:
+            fields=(proc/'stat').read_text().rsplit(')',1)[1].split()
+            ticks=fields[19]
+            status=(proc/'status').read_text()
+            uids=re.search(r'^Uid:\s+(.+)$',status,re.M)
+            H.need(uids and list(map(int,uids[1].split()))==[1204]*4,'Unexpected descendant UID')
+            if (proc/'comm').read_text().strip()=='firecracker': found.append(pid)
+            tasks=list((proc/'task').iterdir())
+            H.need(len(tasks)<=512,'Thread enumeration exceeds bound')
+            for task in tasks:
+                try: children=(task/'children').read_text().split()
+                except FileNotFoundError: continue
+                H.need(len(children)<=128,'Child enumeration exceeds bound')
+                for child in children:
+                    H.need(child.isdecimal(),'Invalid child PID')
+                    try:
+                        parent=(proc_root/child/'stat').read_text().rsplit(')',1)[1].split()[1]
+                    except FileNotFoundError: continue
+                    if int(parent)==pid: queue.append(int(child))
+            H.need((proc/'stat').read_text().rsplit(')',1)[1].split()[19]==ticks,'Process changed during tree walk')
+        except FileNotFoundError:
+            continue
+    return sorted(found)
+
+
 def process_observations():
     """Only the approved original unit; no cmdline, environment or memory reads."""
     result = {'scope':'original_unit_firecracker_processes', 'processes':[]}
     try:
-        path = Path('/sys/fs/cgroup/system.slice')/H.UNIT/'cgroup.procs'
-        pids = path.read_text().split()
-        H.need(len(pids)<=128, 'Unexpected unit process count')
-        for value in pids:
-            H.need(value.isdecimal(), 'Unexpected cgroup PID')
+        identity=H.runtime_pid()
+        pids = descendant_firecrackers(identity[0])
+        result['discovery']='bounded_service_descendant_tree_no_cgroup_mount_assumption'
+        for pid in pids:
+            value=str(pid)
             proc = Path('/proc')/value
             try:
                 if proc.joinpath('comm').read_text().strip() != 'firecracker':
@@ -141,6 +175,7 @@ def process_observations():
             except FileNotFoundError:
                 result.setdefault('exited_during_sample',[]).append(int(value))
         result['available'] = True
+        H.need(H.runtime_pid()==identity,'Service changed during process observation')
     except Exception as e:
         result.update(unavailable(e))
     return result
