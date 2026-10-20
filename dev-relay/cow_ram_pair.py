@@ -1,5 +1,6 @@
 """Ordinary A launcher: two bounded live restores, reviewed inline read-only probe, cleanup."""
 import hashlib
+import argparse
 import http.client
 import importlib.util
 import json
@@ -15,7 +16,7 @@ import uuid
 ROOT=Path('/home/jwk/agent')
 BASE=ROOT/'deployments/agentenv-ae9c626-baseline'
 PENDING=ROOT/'relay/cow-ram-node-a.pending.json'
-COLLECTOR_SHA='5025edf22b2828aa8178a25fbbbea73bc373a7ab372cb557c69c47a9adbc0c94'
+COLLECTOR_SHA='90d33a22cb83054f7157c82a6914ecb17c634e4814ee3040c79819a576663d8f'
 
 
 def load(path,digest,name):
@@ -61,7 +62,31 @@ def root_command(source,scope):
     return "/usr/bin/python3 -I -B - <<'COW_SCOPED_READONLY'\n"+source+"\ncollect_scope("+repr(scope)+")\nCOW_SCOPED_READONLY"
 
 
-def lifecycle(api,R,source,work,report):
+def reconcile_released(api,prior,expected_run,snapshot,work):
+    H.need(isinstance(expected_run,str) and re.fullmatch(r'[0-9a-f]{32}',expected_run)
+           and prior.get('run_id')==expected_run,'Previous run selector differs')
+    H.need(prior.get('status')=='RAM_PAIR_RELEASED_RETURN_ROOT_MEASUREMENT_REPORT'
+           and prior.get('create_outcome_uncertain') is False and prior.get('create_calls')==2
+           and prior.get('snapshot_id')==snapshot,'Previous run not fully released for this snapshot')
+    children=prior.get('children',[])
+    H.need(len(children)==2 and len(set(children))==2 and set(children)==set(prior.get('released_children',[])),
+           'Previous child cleanup incomplete')
+    directory=Path(prior['report_directory'])
+    H.need(directory.parent==ROOT/'relay/reports' and directory.name.startswith('node-a-cow-ram-'),
+           'Unexpected previous report directory')
+    H.need(json.loads(H.read(directory/'return.json'))==prior,'Previous pending differs from completed report')
+    for sid in children:
+        H.need(isinstance(sid,str) and H.ID.fullmatch(sid),'Invalid prior sandbox ID')
+        H.need(api.call('GET','/sandboxes/'+sid)[0]==404,'Previous sandbox still visible; no new restore')
+    empty(api)
+    H.save(work/'previous-pending.json',prior)
+    return {'prior_run_id':expected_run,'prior_report_directory':str(directory),
+            'prior_children_http404':True,'old_report_preserved':True,
+            'classification':'EXPLICIT_NEW_MEASUREMENT_AFTER_CONFIRMED_RELEASE',
+            'root_measurement_success_not_inferred':True}
+
+
+def lifecycle(api,R,source,work,report,prior=None):
     env={'HOME':'/home/jwk','USER':'jwk','LOGNAME':'jwk','LANG':'C.UTF-8',
          'PATH':str(BASE/'native/bin')+':/usr/bin:/bin',
          'LD_LIBRARY_PATH':str(BASE/'native/lib')+':'+str(BASE/'native/fallback/lib'),
@@ -72,6 +97,8 @@ def lifecycle(api,R,source,work,report):
         credential.write_text('url = "http://127.0.0.1:18080"\napi_key = '+json.dumps(api.key)+'\n')
         empty(api)
         H.need(R.find_firecrackers(api.identity[0])==[],'Existing Firecracker descendants; no live experiment')
+        H.need(json.loads(H.read(PENDING))==prior if prior is not None else not PENDING.exists(),
+               'Pending receipt changed before the new attempt')
         for number in (1,2):
             print('PHASE=restore_measurement_child_'+str(number),flush=True)
             report['create_calls']+=1;report['create_outcome_uncertain']=True;H.save(PENDING,report)
@@ -121,6 +148,9 @@ def lifecycle(api,R,source,work,report):
 
 def main():
     global H
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--after-released-run')
+    args=parser.parse_args()
     if not(socket.gethostname()=='server1' and os.getuid()==os.geteuid()==1204 and os.getgid()==os.getegid()==1205):
         raise RuntimeError('A ordinary jwk only')
     caps=re.findall(r'^Cap(?:Inh|Prm|Eff|Amb):\s*(\w+)$',Path('/proc/self/status').read_text(),re.M)
@@ -131,7 +161,9 @@ def main():
     import fcntl
     with open(H.safe(ROOT/'relay/cow-ram-node-a.lock'),'a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        H.need(not PENDING.exists(),'RAM experiment receipt exists; preserve it, no repeat')
+        previous=json.loads(H.read(PENDING)) if PENDING.exists() else None
+        H.need(not previous or args.after_released_run,'RAM receipt exists; explicit released-run selector required')
+        H.need(previous is not None or not args.after_released_run,'Selected prior receipt is missing')
         prior=json.loads(H.read(H.PENDING))
         H.need(prior.get('status')=='ORIGINAL_PARENT_SNAPSHOT_READY_PARENT_RELEASED' and prior.get('parent_deleted'), 'Parent not ready')
         snapshot=prior.get('snapshot_id');H.need(isinstance(snapshot,str) and H.ID.fullmatch(snapshot),'Invalid snapshot')
@@ -140,14 +172,16 @@ def main():
         H.need(record.get('id')==snapshot and record.get('resources',{}).get('memory_mib')==512
                and record['resources'].get('cpu_count')==1,'Parent resource budget differs')
         work=Path(tempfile.mkdtemp(prefix='node-a-cow-ram-',dir=H.safe(ROOT/'relay/reports')))
-        report={'revision':'cow-ram-live-pair-v1','report_directory':str(work),'run_id':uuid.uuid4().hex,
+        report={'revision':'cow-ram-live-pair-v2','report_directory':str(work),'run_id':uuid.uuid4().hex,
                 'snapshot_id':snapshot,'catalog_sha256':hashlib.sha256(raw).hexdigest(),'children':[],
                 'released_children':[],'create_calls':0,'create_calls_limit':2,'create_outcome_uncertain':False,
                 'SDK_called':False,'services_modified':False,'B_accessed':False,
                 'root_measurement_success':'NOT_INFERRED_FROM_DONE_RETURN_ROOT_REPORT'}
         try:
             api=H.Api();H.need(api.call('GET','/health')[0]==204,'Original API unhealthy')
-            lifecycle(api,R,source,work,report)
+            if previous:
+                report['previous_attempt_resolution']=reconcile_released(api,previous,args.after_released_run,snapshot,work)
+            lifecycle(api,R,source,work,report,previous)
             H.need(len(report['released_children'])==2,'Child cleanup incomplete')
             report['status']='RAM_PAIR_RELEASED_RETURN_ROOT_MEASUREMENT_REPORT'
         except (Exception,KeyboardInterrupt) as e:

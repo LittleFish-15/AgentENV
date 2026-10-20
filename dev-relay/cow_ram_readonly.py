@@ -6,11 +6,13 @@ No process memory, commands, environments, credentials, or raw PFNs are output.
 """
 import ctypes
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -81,23 +83,93 @@ def memory_backend(text):
     return matches[0]
 
 
-def parse_guest_smaps(text,device,expected_bytes):
+class BindingError(RuntimeError):
+    def __init__(self,message,diagnostics):
+        super().__init__(message);self.diagnostics=diagnostics
+
+
+def guest_regions(cwd,pid):
+    path=cwd/'firecracker.socket'
+    require(path.resolve(strict=True)==path,'Redirected Firecracker socket')
+    meta=path.stat()
+    require(stat.S_ISSOCK(meta.st_mode) and meta.st_uid==1204,'Unexpected Firecracker socket metadata')
+    client=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+    connection=http.client.HTTPConnection('localhost',timeout=10)
+    try:
+        client.settimeout(10);client.connect(str(path))
+        peer_pid,peer_uid,_=struct.unpack('3i',client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+        require(peer_pid==pid and peer_uid==1204,'Firecracker API socket peer identity differs')
+        connection.sock=client
+        connection.request('GET','/vm/guest-memory-regions')
+        response=connection.getresponse();raw=response.read(1024**2+1)
+        if response.status!=200:
+            raise BindingError('Guest memory region API unavailable; no guessed anonymous ranges',
+                               {'pid':pid,'guest_region_api_status':response.status})
+        require(len(raw)<=1024**2,'Guest region API response too large')
+        return json.loads(raw)
+    finally:
+        connection.close();client.close()
+
+
+def parse_guest_smaps(text,device,expected_bytes,regions=None):
     maps=[];current=None
     for line in text.splitlines():
         match=re.match(r'^([0-9a-f]+)-([0-9a-f]+)\s+(\S+)\s+([0-9a-f]+)\s+\S+\s+\d+\s*(.*)$',line)
         if match:
             current=None
-            if match[5]==device:
-                require(match[3].endswith('p'),'Guest memory mapping is not private')
-                current={'start':int(match[1],16),'end':int(match[2],16),
-                         'offset':int(match[4],16),'permissions':match[3],'bytes':{}}
-                maps.append(current)
+            current={'start':int(match[1],16),'end':int(match[2],16),
+                     'offset':int(match[4],16),'permissions':match[3],'path':match[5],'bytes':{}}
+            maps.append(current)
         elif current is not None:
             field=re.fullmatch(r'(\w+):\s+(\d+) kB',line)
             if field: current['bytes'][field[1]]=int(field[2])*1024
-    require(maps and sum(m['end']-m['start'] for m in maps)==expected_bytes,
-            'Guest memory VMA coverage differs from snapshot RAM; no size-only guess')
-    return maps
+    exact=[m for m in maps if m['path']==device]
+    diagnostic={'memory_device':device,'expected_guest_bytes':expected_bytes,
+                'device_named_vma_bytes':sum(m['end']-m['start'] for m in exact),
+                'device_named_vma_count':len(exact),
+                'device_named_vmas_preview':[{k:v for k,v in m.items() if k!='bytes'} for m in exact[:16]],
+                'all_vma_count':len(maps)}
+    if regions is None:
+        if not exact or diagnostic['device_named_vma_bytes']!=expected_bytes:
+            raise BindingError('Guest memory VMA coverage differs from snapshot RAM; no size-only guess',diagnostic)
+        require(all(m['permissions'].endswith('p') for m in exact),'Guest memory mapping is not private')
+        return exact
+    require(isinstance(regions,list) and 0<len(regions)<=32,'Unexpected Guest region API shape')
+    intervals=[];page=os.sysconf('SC_PAGESIZE')
+    for region in regions:
+        start,size,offset=[region.get(k) for k in ('base_host_virt_addr','size','offset')]
+        require(all(type(x) is int for x in (start,size,offset)) and start>0 and size>0 and offset>=0
+                and start%page==size%page==offset%page==0,'Invalid Guest region addresses')
+        intervals.append((start,start+size,offset))
+    intervals.sort()
+    require(all(a[1]<=b[0] for a,b in zip(intervals,intervals[1:])),'Overlapping Guest address regions')
+    file_intervals=sorted((o,o+e-s) for s,e,o in intervals)
+    require(file_intervals[0][0]==0 and file_intervals[-1][1]==expected_bytes
+            and all(a[1]==b[0] for a,b in zip(file_intervals,file_intervals[1:])),
+            'Guest API snapshot offsets do not cover expected RAM exactly')
+    selected=[]
+    for start,end,offset in intervals:
+        cursor=start
+        for m in maps:
+            low=max(start,m['start']);high=min(end,m['end'])
+            if low>=high:continue
+            if low!=cursor:
+                raise BindingError('Guest API region has unmapped/overlapping smaps coverage',diagnostic)
+            require(m['permissions'].endswith('p'),'Guest API interval is not privately mapped')
+            file_named=m['path']==device
+            anonymous=m['path']=='' or m['path'].startswith('[anon:')
+            if not(file_named or anonymous):
+                raise BindingError('Unexpected file mapping inside authoritative Guest RAM interval',diagnostic)
+            if file_named:
+                require(m['offset']+low-m['start']==offset+low-start,'Memory backing file offset differs from Guest API')
+            clipped=low!=m['start'] or high!=m['end']
+            selected.append({'start':low,'end':high,'offset':m['offset']+low-m['start'],
+                             'permissions':m['permissions'],'mapping_kind':'snapshot_file_vma' if file_named else 'anonymous_inside_guest_region',
+                             'bytes':{} if clipped else m['bytes'],'smaps_metrics_omitted_due_to_clipping':clipped})
+            cursor=high
+        if cursor!=end:raise BindingError('Guest API region not fully covered by smaps',diagnostic)
+    require(sum(m['end']-m['start'] for m in selected)==expected_bytes,'Guest range accounting differs')
+    return selected
 
 
 def pagemap(pid,maps,page):
@@ -224,9 +296,12 @@ def bind(scope,child):
     require(cwd.parent==SHORT and re.fullmatch(r'agentenv-fc-[A-Za-z0-9]+',cwd.name),'Unexpected child work directory')
     backend=memory_backend(owned(stderr.parent/'firecracker.log').decode())
     raw=(proc/'smaps').read_text();require(len(raw)<=4*1024**2,'smaps too large')
-    maps=parse_guest_smaps(raw,backend,scope['memory_bytes'])
+    regions=guest_regions(cwd,pid)
+    maps=parse_guest_smaps(raw,backend,scope['memory_bytes'],regions)
+    require(identity(pid)[1]==child['start_ticks'],'Child changed during Guest region binding')
     return {'pid':pid,'start_ticks':child['start_ticks'],'sandbox_id':stderr.parent.name,
-            'memory_device':backend,'cwd':cwd,'maps':maps}
+            'memory_device':backend,'cwd':cwd,'maps':maps,'guest_regions':regions,
+            'binding_method':'PEERCRED_VERIFIED_FC_GET_GUEST_MEMORY_REGIONS_INTERSECT_SMAPS'}
 
 
 def rootfs_fd_flags(pid,device):
@@ -247,7 +322,7 @@ def rootfs_fd_flags(pid,device):
 
 
 def collect_scope(scope):
-    report={'revision':'cow-ram-scoped-readonly-v1','scope':scope,'samples':[],
+    report={'revision':'cow-ram-scoped-readonly-v2','scope':scope,'samples':[],
             'system_changes':False,'process_memory_contents_read':False,'SDK_called':False}
     try:
         require(os.geteuid()==0 and os.uname().nodename=='server1','A existing root terminal only')
@@ -292,7 +367,11 @@ def collect_scope(scope):
             for b,r in zip(bound,readings):
                 require(identity(b['pid'])[1]==b['start_ticks'],'Child changed during sample')
                 row['guests'].append({'sandbox_id':b['sandbox_id'],'pid':b['pid'],'memory_device':b['memory_device'],
-                                      'vmas':b['maps'],'pagemap':r[2]})
+                                      'vma_count':len(b['maps']),'vmas_preview':b['maps'][:8],
+                                      'virtual_bytes_by_mapping_kind':{kind:sum(m['end']-m['start'] for m in b['maps'] if m.get('mapping_kind')==kind)
+                                                                     for kind in ('snapshot_file_vma','anonymous_inside_guest_region')},
+                                      'pagemap':r[2],
+                                      'binding_method':b.get('binding_method'),'guest_regions':b.get('guest_regions')})
                 if b['memory_device'] not in row['memory_device_cache']:
                     row['memory_device_cache'][b['memory_device']]=resident(Path(b['memory_device']),scope['memory_bytes'],True)
                 try:
@@ -331,7 +410,8 @@ def collect_scope(scope):
         report['acceptance_note']='Non-atomic observations; discard unstable samples. Compound/zero/KSM categories are separate. Do not sum Guest RAM and memory-device cache without overlap correction.'
     except Exception as e:
         report.update(status='STOPPED_SCOPED_READONLY_MEASUREMENT',error_type=type(e).__name__,
-                      reason=str(e) if type(e) is RuntimeError else 'Bounded read failed; no system changes')
+                      reason=str(e) if isinstance(e,RuntimeError) else 'Bounded read failed; no system changes')
+        if isinstance(e,BindingError):report['binding_diagnostics']=e.diagnostics
     finally:
         if hasattr(signal,'SIGALRM'):signal.alarm(0)
     print('BEGIN_RETURN_REPORT');print(json.dumps(report,indent=2));print('END_RETURN_REPORT')

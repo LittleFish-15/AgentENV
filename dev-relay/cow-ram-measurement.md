@@ -31,6 +31,10 @@ After that command exits, return to the jwk terminal and type `done`. The
 launcher deletes only children with this run's ownership metadata, verifies 404,
 and removes temporary CLI credentials. Its wait is bounded at 600 seconds.
 Unknown create outcomes are retained, not retried or arbitrarily deleted.
+For the explicitly reviewed, fully released previous run, v2 accepts
+`--after-released-run <exact-run-id>`. It requires pending == completed return,
+both prior IDs returning 404, the same snapshot and empty inventory; it preserves
+the prior report and saves a pending backup before the new bounded attempt.
 Return **both** the root measurement report and the jwk cleanup report. `done`
 does not prove measurement success; only the root report provides that evidence.
 
@@ -40,6 +44,8 @@ does not prove measurement success; only the root report provides that evidence.
 - current boot ID and the selected Runtime/child proc identity metadata;
 - for two selected Firecracker PIDs: status, stat, cwd/FD links, relevant FD
   flags, smaps, and pagemap only over the validated Guest RAM mappings;
+- fixed read-only `GET /vm/guest-memory-regions` through each selected Guest's
+  existing Firecracker Unix socket, with SO_PEERCRED PID/UID verification;
 - `/proc/kpageflags` only at page-frame offsets obtained from those mappings
   (bounded nearby slots are read in small batches, only requested flags used);
 - selected sandbox Firecracker log for its File memory backend, plus the
@@ -51,7 +57,7 @@ does not prove measurement success; only the root report provides that evidence.
 
 No API key, /proc/pid/mem, command line, environment, Guest memory contents or
 raw PFNs are output. No device data is read/faulted by the collector. It performs
-no service management, writes, permission changes, cache eviction, mounting,
+no service management, file/device writes, permission changes, cache eviction, mounting,
 process signals to Guests or SDK calls. It only prints results to stdout. A
 120-second self-deadline ends sampling; it does not kill any other process.
 
@@ -59,11 +65,29 @@ process signals to Guests or SDK calls. It only prints results to stdout. A
 
 The collector requires one-to-one child PID ↔ own stderr log sandbox ID binding
 and ancestry under the same original Runtime. It extracts the actual File
-backend from that sandbox's snapshot-load log, selects private VMAs matching the
-device path and requires total VMA coverage to equal 512 MiB. It does not choose
-an arbitrary anonymous mapping merely because its size resembles Guest RAM.
-Wrong format, missing identity, hidden PFNs and incomplete coverage stop the RAM
-claim. CoW anonymous pages inside these file VMAs remain in Guest RAM accounting.
+backend from that sandbox's snapshot-load log. Version 1 then required device-
+named VMAs to total 512 MiB; the target stopped at this guard with no samples.
+That assumption missed an implemented mechanism: Firecracker discard_range for
+private snapshot files can MAP_FIXED anonymous ranges over parts of Guest RAM.
+The supplied report did not include VMA totals, so this mechanism is a source-
+supported explanation, not a proven target diagnosis yet.
+
+Version 2 queries the existing read-only Guest-region API, intersects its host
+address intervals with smaps, checks exact 512-MiB coverage and contiguous
+snapshot offsets, and includes anonymous mappings only inside those authoritative
+intervals. Matching file segments must have consistent snapshot offsets. Merged
+anonymous VMAs are clipped; their whole-VMA smaps numbers are not attributed to
+the clipped Guest subsection. There is no size-based anonymous-range fallback.
+Unsupported API, wrong identity, mapping holes or wrong offsets stop with bounded
+binding diagnostics; they never become zero sharing or guessed RAM.
+
+Source audit (captured Firecracker 1.15.1-patch-v3 source, target API still to be
+verified): `src/vmm/src/vstate/memory.rs:468` discard_range and `:486` MAP_FIXED;
+`src/firecracker/src/api_server/parsed_request.rs:92` GET route;
+`src/vmm/src/rpc_interface.rs:963` getter with no memory mutation;
+`src/vmm/src/persist.rs:555` host address/size/snapshot-offset mapping builder.
+AgentENV also carries the matching generated model in
+`thirdparty/firecracker-client/src/models/guest_region_uffd_mapping.rs:15`.
 
 For two selected consumers, each process first deduplicates aliases by PFN:
 

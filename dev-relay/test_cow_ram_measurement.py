@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -13,6 +14,7 @@ import types
 import unittest
 import uuid
 from unittest.mock import patch
+from unittest.mock import MagicMock
 
 HERE=Path(__file__).resolve().parent
 def module(name,file):
@@ -21,6 +23,49 @@ R=module('ram_reader','cow_ram_readonly.py');L=module('ram_launcher','cow_ram_pa
 
 
 class Arithmetic(unittest.TestCase):
+    def test_region_query_is_fixed_get_and_checks_socket_peer_before_request(self):
+        for peer,status in ((101,200),(999,200),(101,404)):
+            client=MagicMock();client.getsockopt.return_value=struct.pack('3i',peer,1204,1205)
+            connection=MagicMock();response=connection.getresponse.return_value
+            response.status=status;response.read.return_value=b'[]'
+            with patch.object(Path,'resolve',lambda path,**kw:path), \
+                 patch.object(Path,'stat',return_value=types.SimpleNamespace(st_mode=0o140600,st_uid=1204)), \
+                 patch.object(R.socket,'socket',return_value=client), \
+                 patch.object(R.socket,'AF_UNIX',1,create=True), \
+                 patch.object(R.socket,'SO_PEERCRED',17,create=True), \
+                 patch.object(R.http.client,'HTTPConnection',return_value=connection):
+                if peer==101 and status==200:self.assertEqual(R.guest_regions(Path('/fixture'),101),[])
+                else:
+                    with self.assertRaises(RuntimeError):R.guest_regions(Path('/fixture'),101)
+            if peer==101:connection.request.assert_called_once_with('GET','/vm/guest-memory-regions')
+            else:connection.request.assert_not_called()
+            client.close.assert_called_once()
+
+    def test_api_guest_ranges_include_anonymous_discard_segments(self):
+        raw='1000-2000 rw-p 0000 00:06 1 /dev/ublkb7\nRss: 4 kB\n2000-4000 rw-p 0000 00:00 0\nRss: 4 kB\n4000-5000 rw-p 3000 00:06 1 /dev/ublkb7\nRss: 4 kB\n'
+        with self.assertRaises(R.BindingError) as old:R.parse_guest_smaps(raw,'/dev/ublkb7',16384)
+        self.assertEqual(old.exception.diagnostics['device_named_vma_bytes'],8192)
+        with patch.object(R.os,'sysconf',return_value=4096,create=True):
+            result=R.parse_guest_smaps(raw,'/dev/ublkb7',16384,[{'base_host_virt_addr':4096,'size':16384,'offset':0}])
+        self.assertEqual(sum(x['end']-x['start'] for x in result),16384)
+        self.assertEqual(result[1]['mapping_kind'],'anonymous_inside_guest_region')
+
+    def test_api_range_clips_merged_anonymous_vma_without_claiming_full_smaps(self):
+        raw='0000-3000 rw-p 0000 00:00 0\nRss: 12 kB\n3000-5000 rw-p 2000 00:06 1 /dev/ublkb7\nRss: 8 kB\n'
+        with patch.object(R.os,'sysconf',return_value=4096,create=True):
+            result=R.parse_guest_smaps(raw,'/dev/ublkb7',16384,[{'base_host_virt_addr':4096,'size':16384,'offset':0}])
+        self.assertEqual(result[0]['start'],4096)
+        self.assertTrue(result[0]['smaps_metrics_omitted_due_to_clipping'])
+        self.assertEqual(result[0]['bytes'],{})
+
+    def test_authoritative_range_still_rejects_holes_and_wrong_backing_offsets(self):
+        region=[{'base_host_virt_addr':4096,'size':8192,'offset':0}]
+        with patch.object(R.os,'sysconf',return_value=4096,create=True):
+            with self.assertRaises(R.BindingError):
+                R.parse_guest_smaps('1000-2000 rw-p 0000 00:00 0\n','/dev/ublkb7',8192,region)
+            with self.assertRaisesRegex(RuntimeError,'offset differs'):
+                R.parse_guest_smaps('1000-3000 rw-p 1000 00:06 1 /dev/ublkb7\n','/dev/ublkb7',8192,region)
+
     def test_two_consumer_union_shared_and_avoided_bytes(self):
         r=R.sharing([{1,2,3},{2,3,4}],{x:0 for x in (1,2,3,4)},4096,[{1,2,3},{2,3,4}])['all_selected_guest_ram']
         self.assertEqual(r['unique_bytes'],4*4096)
@@ -113,7 +158,7 @@ class Lifecycle(unittest.TestCase):
             if not ok:raise RuntimeError(why)
         def child(cmd,env,log,timeout):log.write_bytes(b'COW_RAM_READY')
         self.helper=types.SimpleNamespace(need=need,save=lambda p,r:p.write_text(json.dumps(r)),
-                                         checked_process=child,read=lambda p:p.read_bytes())
+                                         checked_process=child,read=lambda p:p.read_bytes(),ID=re.compile(r'[A-Za-z0-9_-]+'))
         self.report={'run_id':'a'*32,'snapshot_id':'snapshot','catalog_sha256':'b'*64,
                      'children':[],'released_children':[],'create_calls':0}
 
@@ -178,6 +223,33 @@ class Lifecycle(unittest.TestCase):
         add(50,1,'server',{50:'',51:'101 102'})
         add(101,50,'firecracker',{101:''});add(102,50,'firecracker',{102:''})
         self.assertEqual(R.find_firecrackers(50,proc),[101,102])
+
+    def released_receipt(self):
+        directory=self.root/'relay/reports/node-a-cow-ram-old';directory.mkdir(parents=True)
+        prior={'run_id':'c'*32,'status':'RAM_PAIR_RELEASED_RETURN_ROOT_MEASUREMENT_REPORT',
+               'create_outcome_uncertain':False,'create_calls':2,'snapshot_id':'snapshot',
+               'children':['old1','old2'],'released_children':['old2','old1'],
+               'report_directory':str(directory)}
+        (directory/'return.json').write_text(json.dumps(prior));return prior
+
+    def test_explicit_released_run_is_backed_up_after_both_404_checks(self):
+        prior=self.released_receipt();calls=[]
+        def call(method,path):calls.append((method,path));return 404,None
+        with patch.object(L,'H',self.helper,create=True),patch.object(L,'ROOT',self.root),patch.object(L,'empty'):
+            result=L.reconcile_released(types.SimpleNamespace(call=call),prior,'c'*32,'snapshot',self.work)
+        self.assertEqual(len(calls),2)
+        self.assertEqual(json.loads((self.work/'previous-pending.json').read_text()),prior)
+        self.assertTrue(result['root_measurement_success_not_inferred'])
+
+    def test_release_reconciliation_refuses_uncertain_or_visible_prior_objects(self):
+        prior=self.released_receipt()
+        with patch.object(L,'H',self.helper,create=True),patch.object(L,'ROOT',self.root),patch.object(L,'empty'):
+            api=types.SimpleNamespace(call=lambda *a:(200,{}))
+            with self.assertRaisesRegex(RuntimeError,'still visible'):
+                L.reconcile_released(api,prior,'c'*32,'snapshot',self.work)
+            prior['create_outcome_uncertain']=True
+            with self.assertRaisesRegex(RuntimeError,'not fully released'):
+                L.reconcile_released(api,prior,'c'*32,'snapshot',self.work)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
