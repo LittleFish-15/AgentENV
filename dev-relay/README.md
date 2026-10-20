@@ -278,6 +278,41 @@ sha256:c161b9691ab6551a7b10cba283c2e525003378be3fc9193a12cac85c783d47d2
 不是实际OverlayBD块解析、Guest或跨节点通过。失败STOPPED即回传，不删pending或换新对象名重试。
 test_ub_real_layer_canary.py验证故障路径和读者先退再释放顺序；本地替身不会实际申请540MiB。
 
+## A全部16层UB接入真实Guest
+
+ub_guest_once.py / ub_guest_root.py在大对象canary已经确认释放后使用同模板，复用已核SHA的桥接库，
+不重新编译AgentENV或SDK桥接。普通A/jwk一次发布16层，逻辑总预算1504MiB，单对象映射后覆盖检查1024MiB，
+唯一对象覆盖合计检查4096MiB，并在下一次allocate前保留1024MiB检查余量。这些都是实验检查，
+不是平台物理硬配额/物理增量计量；一对象的两次map不重复加总。
+
+显式 --run-reviewed --logical-budget-mib 1504 --max-total-coverage-mib 4096 才进行申请。
+两Runtime开始必须空闲；SDK实验锁和修改版实验锁同时持有，独立ub-guest pending存在则停止。
+全部内容发布校验完成才写ready index，所有replica禁止repository fallback。逐对象的broker读取计数
+只包住broker所用mapping，publisher自身的全量SHA读取不计作Guest流量。
+
+普通owner临时给修改版已安装启动器environment增加两个精确index路径，并同步installation launcher摘要，
+完整备份原字节，不改runtime.toml、原版服务或B。打印一块带固定scope/hash的完整root supervisor，
+操作者在240秒内直接粘贴到A已有root终端，不root运行下载文件。其允许动作仅：
+
+1. 检查配置/launcher/receipt/hash、socket SO_PEERCRED、原版PID和修改版空库存，restart修改版一次启用UB。
+2. 接收受限的两Guest范围，核modified unit实际PID、snapshot/catalog/boot；沿用只读PFN/缓存采样四阶段。
+   额外核两Guest实际rootfs runtime config全部14个lower的UB引用与本次index逐项相同，fallback必须false。
+3. 普通owner删除本批Guest并恢复原launcher/receipt字节后，root再次检查空库存和hash，再restart同一修改版unit回UB关闭。
+
+整个root块无SDK调用/Guest命令/Host文件写入；root只读检查及两次上述精确service restart。
+未知单元/进程变更或非空库存拒绝restart。采样scope只能落在该单元的Guest后代进程，不能指定任意Host进程。
+root返回安全退出后owner等所有broker读者释放，再逐层复验UB内容、retire index、unmap/deallocate/finalize。
+未确认服务回到UB关闭或读者未退出时不假称资源已释放，保留owner/Guest/root回执，不自动换名申请。
+
+本批最多3次恢复、同时2个512MiB Guest：同模板双Guest四阶段、删除一侧后另一侧验证、重新恢复Base标记验证。
+不创建写后新快照，因为新增immutable层尚未发布到本次index；UB新代层发布/借用及跨节点仍是后续验收项，
+不能默许本地fallback把它们记成通过。完整SDK后验SHA失败仍尝试释放已确认无人读取的自有对象，并报告失败。
+
+成功A_UB_ALL_LAYERS_GUEST_CONTROLLED_COMPLETED要求标记预期/重复目标页身份、实际rootfs UB绑定、
+全部16层都有Guest工作流引起的broker读取、Base复验、SDK释放、修改版恢复UB关闭健康和原版PID不变。
+不代表Guest物理RAM跨节点唯一、不代表UB物理净收益；保留各节点cache和broker/IPC拷贝开销。
+test_ub_guest.py的14项本地控制/路由/故障检查没有真实SDK或root service操作；目标仍待执行。
+
 ## A修改版独立共存部署
 
 A已回传上述raw/tar/zfile实际运行全部成功，SDK正常清理。下一阶段使用`deploy_a_ub.py`；B仍暂停，最终跨节点/Guest验收仍未完成。
