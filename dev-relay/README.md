@@ -214,6 +214,28 @@ UB索引没有注入；已核对固定启动器构造的新环境，不继承宿
 新配置，后续健康入口使用已同步的部署启动器；不重新安装覆盖本次配置。新增本地测试test_cow_modified.py
 覆盖配置/启动器一致性、完整依赖选择、摘要/冲突/跨部署硬链接拒绝及修改版路由，Linux目标行为仍待回传。
 
+## A修改版内部代理旧socket恢复
+
+已收到A实际失败日志：内部代理报 New API socket already exists; preserved，启动器随后退出，
+原版主进程保持运行，修改版临时unit已not-found。不是Guest/UB错误，不能把不存在单元的Result=success当成功启动。
+
+deploy_a_ub.py现在在内部代理自己的排他flock下检查api.sock：仅jwk自有socket、路径未重定向、连接明确
+ECONNREFUSED、前后dev/inode/mode/uid/mtime一致才原子改名为同运行目录的api-stale-随机值.sock。
+不删除旧文件；活监听者、未知错误、锁占用、普通文件/符号链接/身份变化都保留并停止。新启动仍以jwk执行，
+该检查在capability已清除的内部代理子进程内完成；不改变systemd权限或namespace。
+
+recover_a_modified_proxy.py是针对本次已确认失败的交付入口。默认仅核对/备份候选；
+--apply-reviewed才在修改版unit缺失、原版PID不变、三个准备摘要正确、boot及namespace一致、二进制校验通过、
+尚无实验pending时归档拒绝连接的旧socket，并只给已安装修改版启动器加入相同guard。
+同时更新installation launcher摘要和比较准备回执的两个摘要，保留原始备份，不重拷模板、不动配置/二进制。
+它打印固定root块，由操作者直接粘贴，按原批准User=jwk/能力/私有namespace参数重建同名临时单元；
+不是root运行jwk可写脚本，也不启停原版或B。已有任何unit则停止，不以restart覆盖它。
+
+修复准备成功A_MODIFIED_PROXY_REPAIRED_UNIT_NOT_STARTED后执行打印块，再直接运行原有
+cow_modified_d2285fe.py run，继续四阶段实验和只读root采样。不要重跑模板prepare或旧restart块。
+修复准备/提交单元均不等于目标健康；最终以run的实际检查和测量回执为准。test_modified_proxy_recovery.py
+验证拒绝连接/活监听/错误/身份竞态/排他锁/精确旧源码变换以及root参数边界，Linux服务恢复仍需回传。
+
 ## A修改版独立共存部署
 
 A已回传上述raw/tar/zfile实际运行全部成功，SDK正常清理。下一阶段使用`deploy_a_ub.py`；B仍暂停，最终跨节点/Guest验收仍未完成。

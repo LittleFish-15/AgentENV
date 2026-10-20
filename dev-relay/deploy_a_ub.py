@@ -408,6 +408,44 @@ def installed():
     return receipt
 
 
+def prepare_inside_socket(unix, lock, archive=True):
+    """Archive only our refused socket while holding the exact inside-proxy lock."""
+    import errno
+    import fcntl
+    require(os.getuid() == os.geteuid() == 1204, 'Ordinary proxy owner required')
+    require(unix == RUNTIME / 'api.sock', 'Unexpected proxy endpoint')
+    lock_path = safe(RUNTIME / 'proxy-inside.lock', True)
+    lm = os.fstat(lock)
+    require(stat.S_ISREG(lm.st_mode) and lm.st_uid == 1204
+            and (lm.st_dev, lm.st_ino) == (lock_path.stat().st_dev, lock_path.stat().st_ino),
+            'Inside proxy lock identity differs')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    safe(unix)
+    if not unix.exists():
+        return None
+    before = unix.lstat()
+    require(stat.S_ISSOCK(before.st_mode) and before.st_uid == 1204, 'Unknown endpoint preserved')
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(1)
+        try:
+            client.connect(str(unix))
+        except OSError as error:
+            require(error.errno == errno.ECONNREFUSED, 'Socket status uncertain; preserved')
+        else:
+            raise RuntimeError('Live API socket preserved')
+    after = unix.lstat()
+    require((before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_mtime_ns)
+            == (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_mtime_ns),
+            'API socket changed; preserved')
+    if not archive:
+        return 'REFUSED_SOCKET_VERIFIED'
+    backup = safe(RUNTIME / ('api-stale-' + secrets.token_hex(12) + '.sock'))
+    require(not backup.exists(), 'Socket archive collision')
+    os.rename(unix, backup)
+    print('STALE_API_SOCKET_ARCHIVED=' + str(backup), flush=True)
+    return str(backup)
+
+
 async def proxy(side):
     import fcntl
     no_caps()
@@ -426,7 +464,7 @@ async def proxy(side):
         except Exception:
             writer.close()
     if side == 'inside':
-        require(not unix.exists() and not unix.is_symlink(), 'New API socket already exists; preserved')
+        prepare_inside_socket(unix, lock)
         server = await asyncio.start_unix_server(accept, str(unix))
         os.chmod(unix, 0o600)
     else:
