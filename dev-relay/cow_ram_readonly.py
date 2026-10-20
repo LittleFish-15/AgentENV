@@ -295,29 +295,34 @@ def collect_scope(scope):
                                       'vmas':b['maps'],'pagemap':r[2]})
                 if b['memory_device'] not in row['memory_device_cache']:
                     row['memory_device_cache'][b['memory_device']]=resident(Path(b['memory_device']),scope['memory_bytes'],True)
-                rootdev=(b['cwd']/'user-rootfs').resolve(strict=True)
-                fd_flags=rootfs_fd_flags(b['pid'],rootdev)
-                upper={}
-                cfg=json.loads(owned(b['cwd']/'overlaybd/image.json'))
-                lowers=[]
-                require(isinstance(cfg.get('lowers'),list) and len(cfg['lowers'])<=64,'Unexpected runtime lower list')
-                for lower in cfg['lowers']:
-                    value=lower.get('file')
-                    item={'digest':lower.get('digest') if re.fullmatch(r'sha256:[0-9a-f]{64}',str(lower.get('digest',''))) else None}
-                    if value:
-                        path=Path(value);path=path if path.is_absolute() else b['cwd']/'overlaybd'/path
-                        item['local_file']=resident(path,2*1024**3)
-                    else:item['local_file']={'available':False,'reason':'NO_LOCAL_FILE_REFERENCE'}
-                    lowers.append(item)
-                for name in ('data','index'):
-                    value=cfg.get('upper',{}).get(name)
-                    if value:
-                        path=Path(value);path=path if path.is_absolute() else b['cwd']/'overlaybd'/path
-                        require(path.parent==b['cwd']/'overlaybd','Upper is outside this Guest runtime')
-                        upper[name]=resident(path,64*1024**3)
-                row['rootfs'].append({'sandbox_id':b['sandbox_id'],'fd_flags':fd_flags,
-                                      'device_cache':resident(rootdev,64*1024**3,True),'upper_files':upper,
-                                      'runtime_lowers':lowers})
+                try:
+                    rootdev=(b['cwd']/'user-rootfs').resolve(strict=True)
+                    fd_flags=rootfs_fd_flags(b['pid'],rootdev)
+                    upper={}
+                    cfg=json.loads(owned(b['cwd']/'overlaybd/image.json'))
+                    lowers=[]
+                    require(isinstance(cfg.get('lowers'),list) and len(cfg['lowers'])<=64,'Unexpected runtime lower list')
+                    for lower in cfg['lowers']:
+                        value=lower.get('file')
+                        item={'digest':lower.get('digest') if re.fullmatch(r'sha256:[0-9a-f]{64}',str(lower.get('digest',''))) else None}
+                        if value:
+                            path=Path(value);path=path if path.is_absolute() else b['cwd']/'overlaybd'/path
+                            item['local_file']=resident(path,2*1024**3)
+                        else:item['local_file']={'available':False,'reason':'NO_LOCAL_FILE_REFERENCE'}
+                        lowers.append(item)
+                    for name in ('data','index'):
+                        value=cfg.get('upper',{}).get(name)
+                        if value:
+                            path=Path(value);path=path if path.is_absolute() else b['cwd']/'overlaybd'/path
+                            require(path.parent==b['cwd']/'overlaybd','Upper is outside this Guest runtime')
+                            upper[name]=resident(path,64*1024**3)
+                    row['rootfs'].append({'sandbox_id':b['sandbox_id'],'fd_flags':fd_flags,
+                                          'device_cache':resident(rootdev,64*1024**3,True),'upper_files':upper,
+                                          'runtime_lowers':lowers})
+                except Exception as e:
+                    row['rootfs'].append({'sandbox_id':b['sandbox_id'],'available':False,
+                                          'error_type':type(e).__name__,
+                                          'reason':str(e) if type(e) is RuntimeError else 'Scoped rootfs observation unavailable'})
             for path,kinds in layer_paths.items():
                 row['stored_layer_cache'].append(dict(resident(Path(path),2*1024**3),kinds=kinds))
             row['finished_unix']=time.time();report['samples'].append(row);time.sleep(1)

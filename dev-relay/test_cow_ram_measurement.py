@@ -1,5 +1,6 @@
 """Synthetic control/arithmetic tests; target PFN/mincore validation remains pending."""
 import ast
+import hashlib
 import contextlib
 import importlib.util
 import io
@@ -69,6 +70,38 @@ class Arithmetic(unittest.TestCase):
         self.assertIn("'show',UNIT",source)
         text=L.root_command(source,{'main_pid':1})
         ast.parse(text.split('\n',1)[1].rsplit('\n',1)[0])
+
+    def test_rootfs_metadata_failure_preserves_valid_ram_observations(self):
+        ids=['11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222']
+        record={'id':ids[0],'committed':{'memory_layers':[{'digest':'sha256:'+'a'*64}],
+                                       'rootfs_layers':[{'Managed':{'digest':'sha256:'+'b'*64}}]}}
+        raw=json.dumps(record).encode()
+        scope={'main_pid':50,'main_start_ticks':'123','boot_id':'boot','snapshot_id':ids[0],
+               'catalog_sha256':hashlib.sha256(raw).hexdigest(),'memory_bytes':512*1024**2,
+               'sandbox_ids':ids,'children':[{'pid':101,'start_ticks':'123'},{'pid':102,'start_ticks':'123'}]}
+        def bind(scope,child):
+            return dict(child,sandbox_id=ids[child['pid']-101],memory_device='/dev/ublkb7',
+                        cwd=HERE/'nonexistent-fixture-dir',maps=[])
+        with contextlib.ExitStack() as st:
+            for name,value in [('owned',lambda p:raw),('bind',bind),('identity',lambda p:(50,'123')),
+                               ('pagemap',lambda *a:({1,2},{1,2},{'identity_hash':'stable'})),
+                               ('page_flags',lambda p:{x:0 for x in p}),('resident',lambda *a:{'available':False})]:
+                st.enter_context(patch.object(R,name,value))
+            st.enter_context(patch.object(R.os,'geteuid',return_value=0,create=True))
+            st.enter_context(patch.object(R.os,'uname',return_value=types.SimpleNamespace(nodename='server1'),create=True))
+            st.enter_context(patch.object(R.os,'sysconf',return_value=4096,create=True))
+            st.enter_context(patch.object(Path,'read_text',return_value='boot'))
+            st.enter_context(patch.object(R.signal,'SIGALRM',14,create=True))
+            st.enter_context(patch.object(R.signal,'signal'))
+            st.enter_context(patch.object(R.signal,'alarm',create=True))
+            st.enter_context(patch.object(R.time,'sleep'))
+            st.enter_context(patch.object(R.subprocess,'run',return_value=types.SimpleNamespace(stdout='MainPID=50\nUser=jwk\nGroup=jwk\n')))
+            with contextlib.redirect_stdout(io.StringIO()) as output:R.collect_scope(scope)
+        r=json.loads(output.getvalue().split('BEGIN_RETURN_REPORT')[1].split('END_RETURN_REPORT')[0])
+        self.assertEqual(r['status'],'SCOPED_RAM_PAGE_AND_CACHE_OBSERVATIONS_COMPLETED')
+        self.assertEqual(len(r['samples']),3)
+        self.assertFalse(r['samples'][0]['rootfs'][0]['available'])
+        self.assertEqual(r['samples'][0]['physical_page_observation']['all_selected_guest_ram']['shared_unique_bytes'],8192)
 
 
 class Lifecycle(unittest.TestCase):

@@ -15,7 +15,7 @@ import uuid
 ROOT=Path('/home/jwk/agent')
 BASE=ROOT/'deployments/agentenv-ae9c626-baseline'
 PENDING=ROOT/'relay/cow-ram-node-a.pending.json'
-COLLECTOR_SHA='cf2f2f33eb4ad2fa5850ef8c299d27b746b8fe7a9e287b5257e092217ad10862'
+COLLECTOR_SHA='5025edf22b2828aa8178a25fbbbea73bc373a7ab372cb557c69c47a9adbc0c94'
 
 
 def load(path,digest,name):
