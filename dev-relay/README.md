@@ -184,6 +184,36 @@ root 返回完成消息后，普通控制器最多捕获一次 A 写后快照，
 物理预期是否符合、重复写观察、缓存可测性与最终验收分别报告。UB、修改版、B 和跨节点均未由本脚本验证。
 本地检查：`test_cow_controlled.py`、`test_cow_ram_measurement.py`、`test_cow_marker.py`；模拟检查不代替目标运行。
 
+## A修改版 UB 关闭的同模板对照
+
+cow_modified_once.py 复用已通过原版受控验证的同一测量模板，不冷创建新父样本、不重编译、不下载镜像。
+默认 prepare 仅检查/生成报告；显式 prepare --apply-reviewed 表示操作者审查并接受以下有限范围：
+
+- 仅A修改版 /home/jwk/agent/deployments/agentenv-ub-b019f27，确认两Runtime库存为空、主进程稳定。
+- 复制选定模板的2个memory层、14个rootfs层、vm_state.bin、firecracker-manifest.json；独立目标inode，
+  内容摘要检查，最多2GiB输入，不硬链接原版文件，不覆盖任何冲突文件，不导入其它模板/别名/凭据。
+  数据完成后写commit，再最后写原样catalog record；直接snapshot UUID解析无需别名。
+- 仅增加Firecracker work_dir=/home/jwk/agent/r/fc-a-ub、serial_dir=修改版logs/firecracker、log_level=Info。
+  同步修改该部署启动器config_text中的相同三个值及installation.json的launcher_sha256，保留严格匹配校验。
+  原配置必须精确符合已部署版本，不接受未知自定义。配置、启动器、安装回执全部备份到本次报告目录。
+- 准备自身不重启服务。它打印完整root块；操作者直接粘贴到A已有root终端，只重启
+  jwk-aenv-ub-b019f27-node-a.service一次。root先验证配置/启动器/回执摘要、两主进程身份与修改版空库存，
+  重启后检查原版PID未变；不得root运行jwk可写脚本文件。再次粘贴会因旧PID不匹配停止。
+- 原版文件、原版服务、B、设备权限、系统网络及开机启动策略均不改。
+
+重启块返回成功后，以普通jwk执行同一脚本 run。它检查新PID/健康/准备回执，使用共享受控实验引擎，
+明确指定18081与修改版短目录/单元/报告pending。四阶段、三样本、两实例写隔离、后代/Base检查与清理预算
+和原版一致（最多4恢复、1捕获、同时2个512MiB Guest）。root采样块只读，无需done；原版进程前后核对。
+UB索引没有注入；已核对固定启动器构造的新环境，不继承宿主随意环境。此批不是UB开启或跨节点验证。
+
+复制和摘要检查发生在正式采样之前，会预热相关文件缓存，不清除缓存。必须把该准备差异写进对照报告；
+不可将修改版导入后可能更大的lower page cache解释为UB开销，也不可假称与旧原版初始缓存状态严格一致。
+此批先验证同模板的功能/页分离/upper变化，完整同条件缓存和净收益验收保持待验证。
+
+失败保留prepare/pending/原始日志，不盲目重跑、删目录或恢复旧部署。安装器旧源码中的config_text不再匹配
+新配置，后续健康入口使用已同步的部署启动器；不重新安装覆盖本次配置。新增本地测试test_cow_modified.py
+覆盖配置/启动器一致性、完整依赖选择、摘要/冲突/跨部署硬链接拒绝及修改版路由，Linux目标行为仍待回传。
+
 ## A修改版独立共存部署
 
 A已回传上述raw/tar/zfile实际运行全部成功，SDK正常清理。下一阶段使用`deploy_a_ub.py`；B仍暂停，最终跨节点/Guest验收仍未完成。

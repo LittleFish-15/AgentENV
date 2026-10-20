@@ -18,6 +18,7 @@ import uuid
 
 ROOT=Path('/home/jwk/agent')
 BASE=ROOT/'deployments/agentenv-ae9c626-baseline'
+PORT=18080
 PENDING=ROOT/'relay/cow-controlled-node-a.pending.json'
 COLLECTOR_SHA='3ccf6de2e9bcafcff7d00cff62a5c82e3ae1d48804c41fbf881be626d9d6fdf5'
 PREPARE_SHA='6569c107c75e833bdb12a54c0f368ba252fff9d6a8eb4bd07f4802a6cc002984'
@@ -297,7 +298,7 @@ class Experiment:
     def run(self,source):
         (self.work/'tmp').mkdir();(self.work/'config/aenv').mkdir(parents=True)
         try:
-            self.credential.write_text('url = "http://127.0.0.1:18080"\napi_key = '+json.dumps(self.api.key)+'\n')
+            self.credential.write_text('url = "http://127.0.0.1:'+str(PORT)+'"\napi_key = '+json.dumps(self.api.key)+'\n')
             P.inventory_empty(self.api);H.need(R.find_firecrackers(self.api.identity[0])==[],'Existing Guest processes')
             H.need(not PENDING.exists(),'Existing controlled receipt; no repeat')
             pair=[self.make(self.report['snapshot_id'],role) for role in ('pair-a','pair-b')]
