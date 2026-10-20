@@ -2,7 +2,13 @@
 
 This is a separate, **disabled-by-default** path toward shared physical RAM and
 shared read-only file data. It does not turn the existing UB layer broker into a
-native FD provider. It does not claim UB/KVM/DAX hardware validation or memory savings.
+native FD provider. It does not claim end-to-end KVM/Guest DAX validation or memory savings.
+
+The owned target probe has since confirmed NC readonly device mmap, failed
+seek/pread and failed the tested private writable map; path reopen lost O_SYNC.
+The existing consumer below remains incompatible with that mmap-only device.
+See the separate [experimental FC device-FD patch](firecracker/README.md), its
+validation limits, and the updated [status](STATUS.md).
 
 ## Implemented
 

@@ -2,8 +2,29 @@
 
 Date: 2026-10-20. **Experimental consumer implementation; final memory-density
 objective is not achieved or validated.** The existing layer-sharing mode remains
-the default. No deployed service, device permission, SDK, BIOS or live experiment
-was changed for this work.
+the default. No deployed service, device permission, SDK or BIOS was changed.
+An owned disposable target probe, described below, has now completed.
+
+## Actual target FD result and FC follow-up
+
+The target opened one NC readonly OBMM device through the public SDK lookup ID.
+Readonly shared mmap and two marker reads succeeded; seek failed with ESPIPE,
+pread and the tested private writable mmap failed with EINVAL. Path reopen lost
+O_SYNC. Child exits and SDK unmap/delete/finalize were confirmed. The object used
+4MiB logical capacity and reported 128MiB backing coverage, not a measured physical
+increment. KVM, Guest, DAX, RAM CoW and cross-node native acceptance remain untested.
+EINVAL does not identify the failing kernel branch or rule out all alternative
+platform/FC CoW designs.
+
+The existing native consumer therefore **does not support this target device**.
+The new [FC patch](firecracker/README.md) implements an explicitly sized readonly
+inherited-FD backend that preserves O_SYNC and bypasses path reopen/read/seek.
+It refuses native snapshot save/restore instead of persisting temporary FD numbers.
+It is not yet connected to a device-aware aenv provider/consumer and is not deployed.
+Four new portable contract tests passed and the mapping code/tests type-checked
+for Linux ARM64. Full patched FC check was attempted, but the locked micro-http
+Git dependency fetch failed with a connection reset; no lockfile workaround was
+applied. Full FC integration compilation has therefore not passed.
 
 | Work | Result | Acceptance still required |
 | --- | --- | --- |
@@ -72,10 +93,11 @@ identities would hide a correctness gap rather than complete the objective.
 
 ## Next handoff
 
-Run the single ordinary-user `preflight.py` on the two intended nodes and return
-its JSON. It performs no SDK operation/allocation/service change. The next native
-probe must use a disposable owned object with a concrete budget, retain the
-original lifecycle guards, and stop on unsupported mappings or unclear cleanup.
+The prerequisite and owned-FD probes have completed; do not rerun their creation
+steps or remove their receipts. Next implement a device-aware provider/consumer
+and independent safe content verification, complete a matching FC build, and
+validate KVM readonly device mapping before actual Guest DAX. The ordinary SSH
+account's KVM access result is not the configured Runtime's permission result.
 
 After the FD contract is established: implement the real provider, complete
 durable pmem references/restore, build new EROFS/tools inputs, run native RAM and
