@@ -286,6 +286,52 @@ def resident(path,max_bytes,block=False):
         if fd is not None:os.close(fd)
 
 
+def whole_process_metrics(pid,ticks):
+    """Match colleague RSS=status.VmRSS, PSS=smaps_rollup.Pss; never fill missing with zero."""
+    result={'scope':'whole_firecracker_process','available':False,
+            'rss_source':'/proc/PID/status:VmRSS','pss_source':'/proc/PID/smaps_rollup:Pss',
+            'atomic_snapshot':False}
+    try:
+        require(identity(pid)[1]==ticks,'Process changed before process-metric read')
+        def bounded(name):
+            with (Path('/proc')/str(pid)/name).open() as stream:data=stream.read(65537)
+            require(len(data)<=65536,'Process metric input too large');return data
+        status=bounded('status');rollup=bounded('smaps_rollup')
+        def kb(text,key):
+            match=re.search(r'^'+key+r':\s+(\d+) kB$',text,re.M)
+            require(match is not None,'Missing process metric: '+key);return int(match[1])*1024
+        rss=kb(status,'VmRSS');pss=kb(rollup,'Pss')
+        require(identity(pid)[1]==ticks,'Process changed during process-metric read')
+        result.update(available=True,rss_bytes=rss,pss_bytes=pss,rss_minus_pss_bytes=rss-pss,
+                      smaps_rollup_rss_bytes=kb(rollup,'Rss'))
+    except Exception as e:
+        result.update(error_type=type(e).__name__,reason=str(e) if isinstance(e,RuntimeError) else 'Process metric unavailable')
+    return result
+
+
+def process_comparison(scope,samples):
+    template_values=[];rows=[]
+    for sample in samples:
+        metrics=[g.get('whole_process',{}) for g in sample['guests']]
+        if len(metrics)>=2 and len(metrics)==len(scope['sandbox_ids']) and all(m.get('available') for m in metrics):
+            value=sum(m['rss_minus_pss_bytes'] for m in metrics)/(len(metrics)-1)
+            if value>=0:template_values.append(value)
+    for sid in scope['sandbox_ids']:
+        values=[g['whole_process'] for s in samples for g in s['guests']
+                if g['sandbox_id']==sid and g.get('whole_process',{}).get('available')]
+        row={'template_id':scope['snapshot_id'],'sandbox_id':sid,'scope':'whole_firecracker_process',
+             'valid_samples':len(values),'template_valid_samples':len(template_values),
+             'template_shared_method':'CONDITIONAL_SUM_PROCESS_RSS_MINUS_PSS_DIV_N_MINUS_1_NOT_PFN',
+             'template_min_shared_bytes':min(template_values) if template_values else None,
+             'template_max_shared_bytes':max(template_values) if template_values else None}
+        for metric in ('rss','pss','rss_minus_pss'):
+            numbers=[m[metric+'_bytes'] for m in values]
+            row['sandbox_min_'+metric+'_bytes']=min(numbers) if numbers else None
+            row['sandbox_max_'+metric+'_bytes']=max(numbers) if numbers else None
+        rows.append(row)
+    return rows
+
+
 def bind(scope,child):
     pid=child['pid'];proc=Path('/proc')/str(pid)
     require(identity(pid)[1]==child['start_ticks'],'Child identity changed')
@@ -310,6 +356,7 @@ def bind(scope,child):
     require(identity(pid)[1]==child['start_ticks'],'Child changed during Guest region binding')
     return {'pid':pid,'start_ticks':child['start_ticks'],'sandbox_id':stderr.parent.name,
             'memory_device':backend,'cwd':cwd,'maps':maps,'guest_regions':regions,
+            'whole_process':whole_process_metrics(pid,child['start_ticks']),
             'binding_method':'PEERCRED_VERIFIED_FC_GET_GUEST_MEMORY_REGIONS_INTERSECT_SMAPS'}
 
 
@@ -331,7 +378,7 @@ def rootfs_fd_flags(pid,device):
 
 
 def collect_scope(scope):
-    report={'revision':'cow-ram-scoped-readonly-v3','scope':scope,'samples':[],
+    report={'revision':'cow-ram-scoped-readonly-v4','scope':scope,'samples':[],
             'system_changes':False,'process_memory_contents_read':False,'SDK_called':False}
     try:
         require(os.geteuid()==0 and os.uname().nodename=='server1','A existing root terminal only')
@@ -379,7 +426,7 @@ def collect_scope(scope):
                                       'vma_count':len(b['maps']),'vmas_preview':b['maps'][:8],
                                       'virtual_bytes_by_mapping_kind':{kind:sum(m['end']-m['start'] for m in b['maps'] if m.get('mapping_kind')==kind)
                                                                      for kind in ('snapshot_file_vma','anonymous_inside_guest_region')},
-                                      'pagemap':r[2],
+                                      'pagemap':r[2],'whole_process':b.get('whole_process',{'available':False}),
                                       'binding_method':b.get('binding_method'),'guest_regions':b.get('guest_regions')})
                 if b['memory_device'] not in row['memory_device_cache']:
                     row['memory_device_cache'][b['memory_device']]=resident(Path(b['memory_device']),scope['memory_bytes'],True)
@@ -416,6 +463,7 @@ def collect_scope(scope):
             row['finished_unix']=time.time();report['samples'].append(row);time.sleep(1)
         report['status']='SCOPED_RAM_PAGE_AND_CACHE_OBSERVATIONS_COMPLETED'
         report['stable_pagemap_samples']=sum(s['pagemap_stable_during_flags'] for s in report['samples'])
+        report['whole_process_comparison']=process_comparison(scope,report['samples'])
         report['acceptance_note']='Non-atomic observations; discard unstable samples. Compound/zero/KSM categories are separate. Do not sum Guest RAM and memory-device cache without overlap correction.'
     except Exception as e:
         report.update(status='STOPPED_SCOPED_READONLY_MEASUREMENT',error_type=type(e).__name__,

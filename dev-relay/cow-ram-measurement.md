@@ -125,6 +125,16 @@ containment and equality with the real resolved target. Escapes and redirects
 remain rejected. This collector-only correction does not invalidate the v2 RAM
 results and does not require rerunning the successful baseline by itself.
 
+Version 4 additionally retains whole-Firecracker RSS from status.VmRSS and PSS
+from smaps_rollup.Pss, matching the colleague monitor's counter sources. It also
+records rollup.Rss, the same-observation RSS-PSS difference, per-sandbox min/max
+and valid sample count, template ID and sandbox IDs. Missing counters remain NA.
+The optional template estimate is explicitly labelled
+sum(process RSS-PSS)/(n-1), not PFN sharing; the colleague's exact template-column
+formula must be confirmed before claiming that column is directly comparable.
+Previously returned Guest-only VMA metrics cannot reconstruct whole-process
+values after those processes have exited. This addition is not retroactive.
+
 Local tests: `python3 -I -B dev-relay/test_cow_ram_measurement.py` and
 `python3 -I -B dev-relay/test_cow_pair_once.py`. Synthetic identities, PFNs and API
 responses do not validate target kernel behavior or actual memory savings.

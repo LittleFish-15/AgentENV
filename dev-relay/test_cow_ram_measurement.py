@@ -23,6 +23,45 @@ R=module('ram_reader','cow_ram_readonly.py');L=module('ram_launcher','cow_ram_pa
 
 
 class Arithmetic(unittest.TestCase):
+    def test_whole_process_rss_uses_status_and_pss_uses_rollup(self):
+        def opened(path,*a,**kw):
+            return io.StringIO('VmRSS:\t1000 kB\n' if path.name=='status' else 'Rss: 1100 kB\nPss: 800 kB\n')
+        with patch.object(R,'identity',return_value=(1,'ticks')),patch.object(Path,'open',opened):
+            result=R.whole_process_metrics(10,'ticks')
+        self.assertTrue(result['available'])
+        self.assertEqual(result['rss_bytes'],1000*1024)
+        self.assertEqual(result['pss_bytes'],800*1024)
+        self.assertEqual(result['rss_minus_pss_bytes'],200*1024)
+        self.assertEqual(result['smaps_rollup_rss_bytes'],1100*1024)
+
+    def test_whole_process_permission_error_preserves_unknown(self):
+        with patch.object(R,'identity',return_value=(1,'ticks')),patch.object(Path,'open',side_effect=PermissionError):
+            result=R.whole_process_metrics(10,'ticks')
+        self.assertFalse(result['available']);self.assertNotIn('rss_bytes',result)
+
+    def test_process_summary_keeps_scope_and_uses_same_sample_deltas(self):
+        scope={'snapshot_id':'template','sandbox_ids':['a','b']}
+        samples=[]
+        for pairs in (((100,70),(110,80)),((120,100),(115,95))):
+            samples.append({'guests':[{'sandbox_id':sid,'whole_process':{'available':True,
+                'rss_bytes':rss,'pss_bytes':pss,'rss_minus_pss_bytes':rss-pss}}
+                for sid,(rss,pss) in zip(scope['sandbox_ids'],pairs)]})
+        rows=R.process_comparison(scope,samples)
+        self.assertEqual(rows[0]['template_min_shared_bytes'],40)
+        self.assertEqual(rows[0]['template_max_shared_bytes'],60)
+        self.assertEqual(rows[0]['sandbox_min_rss_minus_pss_bytes'],20)
+        self.assertEqual(rows[0]['sandbox_max_rss_minus_pss_bytes'],30)
+        self.assertEqual(rows[0]['sandbox_min_rss_bytes'],100)
+        self.assertEqual(rows[0]['valid_samples'],2)
+        self.assertEqual(rows[0]['scope'],'whole_firecracker_process')
+
+    def test_missing_process_metrics_are_na_not_zero(self):
+        rows=R.process_comparison({'snapshot_id':'t','sandbox_ids':['a','b']},
+                                 [{'guests':[{'sandbox_id':'a','whole_process':{'available':False}}]}])
+        self.assertEqual(rows[0]['valid_samples'],0)
+        self.assertIsNone(rows[0]['sandbox_min_rss_bytes'])
+        self.assertIsNone(rows[0]['template_min_shared_bytes'])
+
     def test_region_query_is_fixed_get_and_checks_socket_peer_before_request(self):
         for peer,status in ((101,200),(999,200),(101,404)):
             client=MagicMock();client.getsockopt.return_value=struct.pack('3i',peer,1204,1205)
