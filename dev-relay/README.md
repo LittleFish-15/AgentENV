@@ -2,6 +2,37 @@
 
 此目录集中存放本轮个人实验环境使用的协调入口和控制测试，方便从功能分支获取。允许含实验节点、账号、路径及已验证产物身份等环境绑定信息；不存凭据、二进制、完整日志或实验数据。
 
+## 2026-10-20 当前步骤：跨节点固定模板元数据准备
+
+A 全16层真实 Guest UB 批次已经完成；下文旧安装/恢复段作为历史操作保留，
+不要重新安装或重跑已经完成的 SDK 批次。跨节点本批先用一个标准库脚本
+`ub_cross_prepare.py`，不调用 SDK、不创建 Guest、不改配置/服务/设备/权限。
+
+- A 普通用户运行 `python3 -I -B ub_cross_prepare.py export-a`，必须确认上一轮
+  UB/Guest 已释放。导出 `/home/jwk/agent/ub_cross_template.json`：精确模板的
+  catalog、vm_state、Firecracker manifest、commit 标记及16层描述和 native
+  依赖指纹。只复制至多32MiB元数据，JSON上限48MiB；不搬运1.46GiB lower，
+  不包含宿主API key，不上传 GitHub。只在准备期读取 native 工具计算指纹。
+- 通过现有 SCP/SFTP 将该 JSON 原样传到 B 同一路径，保持原有 SSH 主机验证。
+  它是数据文件；脚本不执行其中的内容。没有 ZIP、包安装或新的网络服务。
+- B 运行 `python3 -I -B ub_cross_prepare.py stage-b`。核对固定 catalog SHA、
+  每个文件摘要/大小和路径白名单、A/B native依赖一致，暂存至自己的
+  `relay/ub-cross-input/<snapshot>/`。暂不注册到活动仓库，避免 UB 尚未启用时
+  暴露一个缺少本地层的不可恢复模板。已有相同文件可复用，冲突保留并停止。
+- B 同一步返回两服务真实健康/进程身份、修改版二进制/启动器摘要、FC短路径、
+  两项重启兼容修复是否存在、SDK源文件和已有回执概况。报告不自动恢复服务；
+  `B_CROSS_METADATA_STAGED_REVIEW_RUNTIME_PREREQUISITES` 只表示已暂存，不是
+  B Guest、UB或跨节点验收通过。下一批根据报告准备精确修改版兼容修复及运行。
+
+源码依据：`src/snapshot/repository/backends/posixfs/runtime.rs` 的
+`resolve_local_managed_layer` 在文件缺失时仅允许匹配的严格UB引用；之后仍需
+实际跨节点验证。正式目标保持：A唯一发布、B只映射同对象并提供B本地broker，
+两节点各1再各2Guest的写隔离/独立计量，随后新代层发布/祖先复用/生命周期。
+逻辑对象唯一、SDK覆盖和全局物理RAM唯一分别报告。
+
+本地检查：`python3 -B -m unittest discover -s dev-relay -p test_ub_cross_prepare.py`。
+测试不调用目标SDK或服务，不作为远端成功证据。
+
 ## 当前优先：B恢复后启动两套服务
 
 用户已明确B恢复并要求先启动原版/修改版检查健康，不再单独做环境调查。仅普通jwk执行以下prepare/install/health，root只在最后直接粘贴打印的审查块。B不用编译或下载依赖，A已有服务与安装文件不改。
