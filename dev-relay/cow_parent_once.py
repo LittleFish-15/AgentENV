@@ -191,6 +191,75 @@ def reconcile_size_rejection(api, prior, args, work):
         'prior_runtime_directory_removed': False, 'new_attempt_limit': 1}
 
 
+def known_fc_path_failure(prior, args):
+    error = prior.get('create_error') or {}
+    match = re.match(r'sandbox ([0-9a-f-]{36}) operation Start failed: firecracker exited before its API socket appeared at '
+                     + re.escape(str(BASE / 'state/firecracker-work'))
+                     + r'/agentenv-fc-[A-Za-z0-9]+/firecracker\.socket \(status: exit status: 1\); stderr: not captured',
+                     str(error.get('message', '')))
+    return bool(prior.get('revision') == 'cow-parent-once-v3' and prior.get('node') == 'node-a'
+                and prior.get('create_http_status') == error.get('code') == 500
+                and prior.get('create_calls') == 1 and prior.get('parent_id') is None
+                and prior.get('snapshot_id') is None and prior.get('create_outcome_uncertain') is True
+                and prior.get('image') == args.image and prior.get('Guest_workdir') == args.workdir
+                and prior.get('warm_module') == args.warm_module
+                and re.fullmatch(r'[0-9a-f]{32}', str(prior.get('run_id', ''))) and match)
+
+
+def reconcile_fc_path_failure(api, prior, args, work):
+    need(known_fc_path_failure(prior, args), 'Not the reviewed v3 Firecracker path failure')
+    old = safe(Path(prior['report_directory']))
+    need(old.parent == ROOT/'relay/reports' and old.name.startswith('node-a-cow-parent-'), 'Unexpected previous report path')
+    need(json.loads(read(old/'return.json')) == prior, 'Pending and completed report differ; preserved')
+    fix = json.loads(read(ROOT/'relay/a-original-fc-path-fix.json'))
+    need(fix.get('status') == 'A_ORIGINAL_FC_PATH_CONFIG_APPLIED_RESTART_REQUIRED'
+         and fix.get('unit') == UNIT, 'Approved path repair receipt missing')
+    need(fix.get('settings') == {'work_dir':str(ROOT/'r/fc-a-base'),
+         'serial_dir':str(BASE/'logs/firecracker'), 'log_level':'Info'}, 'Unexpected repair settings')
+    config = read(BASE/'config/runtime.toml')
+    need(hashlib.sha256(config).hexdigest() == fix.get('new_config_sha256'), 'Repaired configuration changed')
+    before = fix['original_process_before']
+    need(api.identity != (int(before['MainPID']), before['start_ticks']), 'Original runtime has not restarted')
+    query = '/v2/sandboxes?' + urlencode({'metadata':'cow_parent_run='+prior['run_id'], 'limit':2})
+    status, rows = api.call('GET', query)
+    need(status == 200 and isinstance(rows, list) and not rows, 'Previous run still visible or inventory uncertain; no create')
+    failed_id = re.match(r'sandbox ([0-9a-f-]{36}) ', prior['create_error']['message'])[1]
+    need(api.call('GET', '/sandboxes/'+failed_id)[0] == 404, 'Failed sandbox ID not confirmed absent; no create')
+    image = safe(Path(prior['local_oci_directory']))
+    need(image.name == 'image' and image.parent.parent == ROOT/'relay/reports'
+         and image.parent.name.startswith('node-a-cow-parent-') and image.is_dir(), 'Unexpected prior OCI directory')
+    verification = verify_layout(image, args.image.split('@')[1])
+    save(work/'previous-pending.json', prior)
+    save(work/'approved-path-fix.json', fix)
+    return image, verification, {
+        'classification':'REPAIRED_FC_PATH_NO_VISIBLE_PRIOR_SANDBOX', 'prior_http_status':500,
+        'prior_run_id':prior['run_id'], 'failed_sandbox_id':failed_id, 'failed_sandbox_http_status':404,
+        'matching_sandboxes':0, 'query_includes_all_states':True,
+        'prior_pending_backup':str(work/'previous-pending.json'), 'prior_report_preserved':True,
+        'prior_runtime_directory_removed':False, 'global_device_absence_verified':False,
+        'runtime_identity_after_repair':list(api.identity), 'new_attempt_limit':1}
+
+
+def collect_fc_logs(sid, env, key):
+    """Only this attempt's identified sandbox, bounded tails; never scan other Guests."""
+    need(ID.fullmatch(sid) is not None, 'Invalid diagnostic sandbox identity')
+    result = {'sandbox_id':sid, 'scope':'own_sandbox_log_tails', 'files':{}}
+    for name in ('firecracker-stderr.log', 'firecracker-stdout.log', 'firecracker.log'):
+        try:
+            path = safe(BASE/'logs/firecracker'/sid/name)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, 'rb') as f:
+                meta = os.fstat(f.fileno())
+                need(stat.S_ISREG(meta.st_mode) and meta.st_uid == 1204, 'Unexpected log metadata')
+                f.seek(max(0, meta.st_size-8192))
+                tail = f.read(8192).decode(errors='replace').replace(key, '[REDACTED]')
+            result['files'][name] = {'available':True, 'file_bytes':meta.st_size,
+                                    'tail':redact_child_output(tail, env)}
+        except Exception as e:
+            result['files'][name] = {'available':False, 'error_type':type(e).__name__}
+    return result
+
+
 def parent_layer_inventory(snapshot_id):
     """Capture stored/allocated bytes, not Guest physical sharing or cache sizes."""
     result = {'phase': 'after_parent_capture_before_replay',
@@ -314,13 +383,13 @@ def main():
     with open(safe(ROOT / 'relay/cow-parent-node-a.lock'), 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         prior = json.loads(read(PENDING)) if PENDING.exists() else None
-        if prior and not known_size_rejection(prior, args):
+        if prior and not (known_size_rejection(prior, args) or known_fc_path_failure(prior, args)):
             print('BEGIN_RETURN_REPORT')
             print(json.dumps({'status': 'PARENT_RECEIPT_EXISTS_NO_NEW_CREATE', 'prior': prior}, indent=2))
             print('END_RETURN_REPORT')
             return 1
         work = Path(tempfile.mkdtemp(prefix='node-a-cow-parent-', dir=safe(ROOT / 'relay/reports')))
-        report = {'revision': 'cow-parent-once-v3', 'node': 'node-a', 'report_directory': str(work),
+        report = {'revision': 'cow-parent-once-v4', 'node': 'node-a', 'report_directory': str(work),
                   'image': args.image, 'Guest_workdir': args.workdir, 'warm_module': args.warm_module,
                   'run_id': uuid.uuid4().hex, 'SDK_called': False, 'services_modified': False,
                   'cow_validation_executed': False, 'cpu_count': 1, 'memory_mib': 512,
@@ -338,8 +407,9 @@ def main():
             need(api.call('GET', '/health')[0] == 204, 'Original health failed')
             reused_image = None
             if prior:
-                print('PHASE=reconcile_previous_size_rejection', flush=True)
-                reused_image, report['image_verification'], report['previous_attempt_resolution'] = reconcile_size_rejection(api, prior, args, work)
+                reconcile = reconcile_size_rejection if known_size_rejection(prior, args) else reconcile_fc_path_failure
+                print('PHASE=' + reconcile.__name__, flush=True)
+                reused_image, report['image_verification'], report['previous_attempt_resolution'] = reconcile(api, prior, args, work)
             regctl = safe(BASE / 'deps/regctl/v0.11.5/regctl')
             need(regctl.is_file(), 'Existing regctl missing; no installation attempted')
             for name in ('tmp', 'cache', 'docker', 'cli-config/aenv'):
@@ -392,6 +462,9 @@ def main():
             report['create_http_status'] = status
             if status != 201:
                 report['create_error'] = error_summary(body, api.key)
+                match = re.match(r'sandbox ([0-9a-f-]{36}) operation ', report['create_error']['message'])
+                if match:
+                    report['firecracker_logs'] = collect_fc_logs(match[1], env, api.key)
             need(status == 201 and isinstance(body, dict), 'Cold create did not return 201; outcome retained for reconciliation')
             sid = body.get('sandboxID')
             need(isinstance(sid, str) and ID.fullmatch(sid), 'Invalid created sandbox identity')
@@ -429,6 +502,7 @@ def main():
         finally:
             sid = report['parent_id']
             if sid and api:
+                report['firecracker_logs'] = collect_fc_logs(sid, env, api.key)
                 try:
                     status, detail = api.call('GET', '/sandboxes/' + sid)
                     if status == 404:

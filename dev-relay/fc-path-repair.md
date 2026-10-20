@@ -51,6 +51,22 @@ not establish that a Guest starts or CoW works. The previous HTTP500 create
 requires reconciliation before a new attempt. Config backups are retained;
 rollback is not performed automatically because it would require another restart.
 
+After successful repair verification, `cow_parent_once.py` v4 can reconcile the
+specific v3 HTTP500 early Firecracker exit. It requires the original pending and
+completed report to agree, the approved configuration hash to remain unchanged,
+and the Runtime process to have restarted. Both the prior run's all-state metadata
+query and the failed sandbox's exact ID must confirm absence. This is API-level
+absence, not a global ublk-device inventory or a deletion of old directories.
+It rehashes and reuses the prior local OCI input and backs up the old receipt
+before allowing one new create. A v4 failure cannot automatically re-enter this
+recovery path. B, services, permissions and the UB SDK are untouched.
+
+This attempt returns bounded, sanitized tails of only its identified sandbox's
+Firecracker logs. Successful parent capture records memory/rootfs layer file
+metadata before releasing its own parent. Sharing, page cache and private-write
+measurements belong to the subsequent child experiment; they are not implied by
+successful parent preparation.
+
 Local control tests (no target hardware/service verification):
 
 ```bash

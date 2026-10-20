@@ -35,6 +35,8 @@ class Tests(unittest.TestCase):
         self.fail_warmup = False
         self.bad_owner = False
         self.visible_matches = []
+        self.failed_id_status = 404
+        self.runtime_identity = (22, '222')
         self.child_calls = []
         self.manifest = b'{"layers":[{"size":1}],"config":{"size":1}}'
 
@@ -58,6 +60,7 @@ class Tests(unittest.TestCase):
             self.marker = data['metadata']['cow_parent_run']
             return self.create_status, {'sandboxID':'owned-parent','diskSizeMB':65536}
         if path.endswith('/snapshots'): return 201, {'snapshotID':'owned-snapshot'}
+        if path == '/sandboxes/01a15451-200a-75c2-a356-c7bee6755614': return self.failed_id_status, None
         self.assertEqual(path, '/sandboxes/owned-parent')
         if method == 'DELETE': self.deleted = True; return 204, None
         if self.deleted: return 404, None
@@ -85,7 +88,7 @@ class Tests(unittest.TestCase):
               '--workdir','/repo','--warm-module','sample']
         with contextlib.ExitStack() as st:
             for name,value in [('ROOT',self.root),('BASE',self.base),('PENDING',self.root/'relay/cow-parent-node-a.pending.json'),
-                               ('safe',safe),('read',read),('Api',lambda: types.SimpleNamespace(key='e2b_fixture',call=self.api)),
+                               ('safe',safe),('read',read),('Api',lambda: types.SimpleNamespace(key='e2b_fixture',call=self.api,identity=self.runtime_identity)),
                                ('checked_process',child),('verify_layout',lambda *a:{'fixture':True})]:
                 st.enter_context(patch.object(p,name,value))
             st.enter_context(patch.object(p.tempfile,'mkdtemp',mkdtemp))
@@ -239,6 +242,95 @@ class Tests(unittest.TestCase):
         self.assertFalse(result['available'])
         self.assertNotIn('shared_bytes',result)
         self.assertEqual(result['scope'],'stored_layer_metadata_only_no_shared_page_claim')
+
+    def prior_fc_failure(self):
+        prior=self.prior_size_failure()
+        prior.update(revision='cow-parent-once-v3',create_http_status=500,create_outcome_uncertain=True,
+                     local_oci_directory=str(Path(prior['report_directory'])/'image'),
+                     create_error={'code':500,'message':
+                         'sandbox 01a15451-200a-75c2-a356-c7bee6755614 operation Start failed: '
+                         'firecracker exited before its API socket appeared at '+str(self.base/'state/firecracker-work')+
+                         '/agentenv-fc-wIpjK3/firecracker.socket (status: exit status: 1); stderr: not captured'})
+        (Path(prior['report_directory'])/'return.json').write_text(json.dumps(prior))
+        (self.root/'relay/cow-parent-node-a.pending.json').write_text(json.dumps(prior))
+        (self.base/'config').mkdir()
+        config=b'fixture reviewed configuration'
+        (self.base/'config/runtime.toml').write_bytes(config)
+        fix={'status':'A_ORIGINAL_FC_PATH_CONFIG_APPLIED_RESTART_REQUIRED','unit':p.UNIT,
+             'settings':{'work_dir':str(self.root/'r/fc-a-base'), 'serial_dir':str(self.base/'logs/firecracker'), 'log_level':'Info'},
+             'new_config_sha256':hashlib.sha256(config).hexdigest(),
+             'original_process_before':{'MainPID':'11','start_ticks':'111'}}
+        (self.root/'relay/a-original-fc-path-fix.json').write_text(json.dumps(fix))
+        return prior
+
+    def test_repaired_fc_failure_reuses_oci_and_checks_both_absence_routes(self):
+        prior=self.prior_fc_failure()
+        rc,r=self.run_fixture()
+        self.assertEqual(rc,0)
+        self.assertFalse(r['image_downloaded_this_run'])
+        self.assertIn(('GET','/sandboxes/01a15451-200a-75c2-a356-c7bee6755614'),self.calls)
+        self.assertEqual(self.calls.count(('POST','/sandboxes-cold')),1)
+        self.assertFalse(any('manifest' in c or 'copy' in c for c in self.child_calls))
+        self.assertFalse(r['previous_attempt_resolution']['global_device_absence_verified'])
+        self.assertEqual(json.loads(Path(r['previous_attempt_resolution']['prior_pending_backup']).read_text()),prior)
+
+    def test_fc_recovery_requires_completed_restart(self):
+        prior=self.prior_fc_failure();self.runtime_identity=(11,'111')
+        rc,r=self.run_fixture()
+        self.assertEqual(rc,1)
+        self.assertIn('has not restarted',r['error']['reason'])
+        self.assertFalse(any(m in ('POST','DELETE') for m,path in self.calls))
+        self.assertEqual(json.loads((self.root/'relay/cow-parent-node-a.pending.json').read_text()),prior)
+
+    def test_fc_recovery_refuses_changed_config(self):
+        self.prior_fc_failure()
+        (self.base/'config/runtime.toml').write_bytes(b'changed')
+        rc,r=self.run_fixture()
+        self.assertEqual(rc,1)
+        self.assertIn('configuration changed',r['error']['reason'])
+        self.assertFalse(any(m in ('POST','DELETE') for m,path in self.calls))
+
+    def test_fc_recovery_requires_failed_id_404(self):
+        self.prior_fc_failure();self.failed_id_status=200
+        rc,r=self.run_fixture()
+        self.assertEqual(rc,1)
+        self.assertFalse(any(m in ('POST','DELETE') for m,path in self.calls))
+
+    def test_fc_recovery_refuses_visible_prior_metadata(self):
+        self.prior_fc_failure();self.visible_matches=[{'sandboxID':'still-there'}]
+        rc,r=self.run_fixture()
+        self.assertEqual(rc,1)
+        self.assertFalse(any(m in ('POST','DELETE') for m,path in self.calls))
+
+    def test_new_failure_after_repair_does_not_allow_automatic_retry(self):
+        self.prior_fc_failure();self.create_status=500
+        rc,r=self.run_fixture()
+        self.assertEqual(rc,1)
+        self.assertEqual(r['revision'],'cow-parent-once-v4')
+        before=list(self.calls)
+        rc,r=self.run_fixture()
+        self.assertEqual(r['status'],'PARENT_RECEIPT_EXISTS_NO_NEW_CREATE')
+        self.assertEqual(self.calls,before)
+
+    def test_own_fc_log_tail_is_bounded_and_credentials_redacted(self):
+        directory=self.base/'logs/firecracker/own-id';directory.mkdir(parents=True)
+        (directory/'firecracker-stderr.log').write_bytes(
+            b'EARLY_NOT_RETURNED'+b'x'*10000+b'\nactual failure\ne2b_fixture\nAuthorization: Bearer hidden\n')
+        actual_fstat=os.fstat
+        def metadata(fd):
+            s=actual_fstat(fd)
+            return types.SimpleNamespace(st_mode=s.st_mode,st_uid=1204,st_size=s.st_size)
+        with patch.object(p,'BASE',self.base), patch.object(p,'safe',side_effect=lambda x:x), \
+             patch.object(p.os,'fstat',side_effect=metadata), \
+             patch.object(p.os,'O_NOFOLLOW',getattr(os,'O_NOFOLLOW',0),create=True), \
+             patch.object(p.os,'O_NONBLOCK',getattr(os,'O_NONBLOCK',0),create=True):
+            result=p.collect_fc_logs('own-id',{},'e2b_fixture')
+        tail=result['files']['firecracker-stderr.log']['tail']
+        self.assertIn('actual failure',tail)
+        self.assertNotIn('EARLY_NOT_RETURNED',tail)
+        self.assertNotIn('e2b_fixture',tail)
+        self.assertNotIn('hidden',tail)
+        self.assertFalse(result['files']['firecracker.log']['available'])
 
 
 if __name__=='__main__': unittest.main(verbosity=2)
