@@ -236,6 +236,25 @@ cow_modified_d2285fe.py run，继续四阶段实验和只读root采样。不要�
 修复准备/提交单元均不等于目标健康；最终以run的实际检查和测量回执为准。test_modified_proxy_recovery.py
 验证拒绝连接/活监听/错误/身份竞态/排他锁/精确旧源码变换以及root参数边界，Linux服务恢复仍需回传。
 
+### 运行自证记录的重启刷新
+
+A随后实际越过proxy检查，却在runtime-attestation.json处失败：inside原来调用安装用dump/put，
+新PID/start_ticks与旧内容不同就停止。现在仅该调用改为publish_runtime_attestation，put/dump对安装文件
+仍保持不可覆盖。新函数要求当前UID和unit MainPID绑定，旧记录revision/UID/intended_executable合法；
+旧PID消失或已被不同start_ticks复用时备份旧记录，再检查文件身份/内容与unit PID未变，原子刷新这个固定文件。
+旧进程仍活、未知记录、重定向或并发变化都保留停止，不杀进程、不扩大覆盖路径。
+
+recover_a_modified_runtime.py依赖上一轮已校验的recover_modified_proxy_ceb26a9.py及现有比较工具，
+只应用这一精确调用/函数修复，继续使用原socket检查/归档、备份与固定unit恢复块；有独立恢复回执，
+不重跑模板准备、不删除旧恢复记录。成功A_MODIFIED_RUNTIME_REPAIRED_UNIT_NOT_STARTED后执行打印root块，
+随后已部署health && cow_modified_d2285fe.py run。health失败时shell的&&不会进入Guest实验。
+
+test_runtime_attestation_recovery.py使用真实临时JSON文件，替代Linux进程/设备/namespace/代理子进程调用，
+执行完整inside路径两次并检查两次到达server exec入口；另覆盖活旧PID、PID复用、未知记录、当前记录幂等、
+unit改变及全局安装dump不放宽。此为本地模拟启动路径验证，不是目标Linux服务健康证明。
+审查其余写点：proxy api.sock已有受限归档；host-proxy.json已有历史备份/临时替换路径，活代理保持复用；
+server/proxy日志追加；ublk客户端已有socket占用检查/旧socket处理。本次不改这些已有路径。
+
 ## A修改版独立共存部署
 
 A已回传上述raw/tar/zfile实际运行全部成功，SDK正常清理。下一阶段使用`deploy_a_ub.py`；B仍暂停，最终跨节点/Guest验收仍未完成。

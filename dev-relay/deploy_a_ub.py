@@ -476,6 +476,48 @@ async def proxy(side):
         os.close(lock)
 
 
+def publish_runtime_attestation(value):
+    """Refresh only the current unit's process record; immutable install files stay immutable."""
+    require(os.getuid() == os.geteuid() == 1204, 'Expected runtime owner')
+    require(int(properties(UNIT).get('MainPID', 0)) == os.getpid(), 'Attestation writer is not unit main process')
+    require(value.get('pid') == os.getpid() and value.get('revision') == REVISION
+            and value.get('intended_executable') == str(D / 'bin/server')
+            and value.get('uid') == [1204] * 4, 'Unexpected new attestation identity')
+    path = safe(RUNTIME / 'runtime-attestation.json')
+    data = (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+    if not path.exists():
+        put(path, data)
+        return
+    before, metadata = stable_file(path, 65536)
+    old = json.loads(before)
+    require(old.get('revision') == REVISION and old.get('intended_executable') == str(D / 'bin/server')
+            and old.get('uid') == [1204] * 4 and type(old.get('pid')) is int and old['pid'] > 1
+            and isinstance(old.get('start_ticks'), str) and old['start_ticks'].isdigit(),
+            'Unknown existing runtime attestation preserved')
+    if old['pid'] == value['pid'] and old['start_ticks'] == value['start_ticks']:
+        require(before == data, 'Current-process attestation differs; preserved')
+        return
+    try:
+        ticks = Path('/proc/' + str(old['pid']) + '/stat').read_text().rsplit(')', 1)[1].split()[19]
+    except FileNotFoundError:
+        ticks = None
+    require(ticks != old['start_ticks'], 'Previous attested process is still alive; preserved')
+    backup = safe(RUNTIME / ('runtime-attestation-history-' + secrets.token_hex(12) + '.json'))
+    put(backup, before)
+    temporary = safe(RUNTIME / ('runtime-attestation-new-' + secrets.token_hex(12) + '.json'))
+    try:
+        put(temporary, data)
+        current, current_meta = stable_file(path, 65536)
+        require(current == before and (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns)
+                == (current_meta.st_dev, current_meta.st_ino, current_meta.st_mtime_ns),
+                'Runtime attestation changed concurrently; preserved')
+        require(int(properties(UNIT).get('MainPID', 0)) == os.getpid(), 'Unit changed before attestation publication')
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def inside():
     receipt = installed()
     require(int(properties(UNIT).get('MainPID', 0)) == os.getpid(), 'Only the exact reviewed new unit may launch this runtime')
@@ -500,7 +542,7 @@ def inside():
     # activation needs separately budgeted live replicas and snapshot metadata.
     attestation = process_identity(os.getpid())
     attestation.update(revision=REVISION, intended_executable=str(D / 'bin/server'))
-    dump(RUNTIME / 'runtime-attestation.json', attestation)
+    publish_runtime_attestation(attestation)
     fd = os.open(D / 'logs/server.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(fd, 1)
     os.dup2(fd, 2)
