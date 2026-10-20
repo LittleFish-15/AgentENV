@@ -224,6 +224,23 @@ class Lifecycle(unittest.TestCase):
         add(101,50,'firecracker',{101:''});add(102,50,'firecracker',{102:''})
         self.assertEqual(R.find_firecrackers(50,proc),[101,102])
 
+    def test_relative_runtime_lower_normalizes_to_allowed_repository_file(self):
+        base=self.root/'deployments/base';target=base/'state/repository/layer.commit'
+        target.parent.mkdir(parents=True);target.write_bytes(b'fixture')
+        short=self.root/'r/fc-a-base';cwd=short/'agentenv-fc-fixture/overlaybd';cwd.mkdir(parents=True)
+        original=cwd/'../../../../deployments/base/state/repository/layer.commit'
+        with patch.object(R,'BASE',base),patch.object(R,'SHORT',short):
+            self.assertEqual(R.scoped_file_path(original),target.resolve())
+
+    def test_normalization_does_not_allow_scope_escape_or_redirect(self):
+        base=self.root/'base';short=self.root/'r'
+        with patch.object(R,'BASE',base),patch.object(R,'SHORT',short):
+            with self.assertRaisesRegex(RuntimeError,'outside'):
+                R.scoped_file_path(base/'state/../../outside')
+            with patch.object(Path,'resolve',return_value=self.root/'outside'):
+                with self.assertRaisesRegex(RuntimeError,'Redirected'):
+                    R.scoped_file_path(base/'state/inside')
+
     def released_receipt(self):
         directory=self.root/'relay/reports/node-a-cow-ram-old';directory.mkdir(parents=True)
         prior={'run_id':'c'*32,'status':'RAM_PAIR_RELEASED_RETURN_ROOT_MEASUREMENT_REPORT',

@@ -116,6 +116,15 @@ This batch establishes live baseline observations. Controlled RAM first-write,
 repeat-write, multi-generation, colleague replay and modified/cross-node UB
 comparisons remain required; this script does not mark full CoW acceptance.
 
+The first v2 target run returned three stable PFN observations and valid catalog,
+memory-device, rootfs-device and upper-cache measurements. Runtime lower cache
+references contained legitimate `../../../../deployments/...` paths and were
+rejected by the lexical-path guard, although catalog paths remained measurable.
+Version 3 normalizes these references before checking both approved-root
+containment and equality with the real resolved target. Escapes and redirects
+remain rejected. This collector-only correction does not invalidate the v2 RAM
+results and does not require rerunning the successful baseline by itself.
+
 Local tests: `python3 -I -B dev-relay/test_cow_ram_measurement.py` and
 `python3 -I -B dev-relay/test_cow_pair_once.py`. Synthetic identities, PFNs and API
 responses do not validate target kernel behavior or actual memory savings.

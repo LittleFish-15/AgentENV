@@ -238,13 +238,22 @@ def sharing(sets,flags,page,file_sets):
             'raw_pfns_output':False,'cross_node_comparison':False}
 
 
+def scoped_file_path(path):
+    """Normalize legitimate relative-parent references, then enforce real scope."""
+    normalized=Path(os.path.abspath(path))
+    require(normalized.is_relative_to(SHORT) or normalized.is_relative_to(BASE/'state'),
+            'File cache target is outside the approved experiment roots')
+    require(path.resolve(strict=True)==normalized,'Redirected file cache target')
+    return normalized
+
+
 def resident(path,max_bytes,block=False):
     fd=None
+    configured_path=str(path)
     try:
         if block:require(re.fullmatch(r'/dev/ublkb[0-9]+',str(path)),'Unexpected block device')
         else:
-            require((path.is_relative_to(SHORT) or path.is_relative_to(BASE/'state'))
-                    and path.resolve(strict=True)==path,'Unexpected file cache path')
+            path=scoped_file_path(path)
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK);m=os.fstat(fd)
         if block:
             require(stat.S_ISBLK(m.st_mode),'Expected block device')
@@ -266,7 +275,7 @@ def resident(path,max_bytes,block=False):
                 require(libc.mincore(address,length,bits)==0,'Device/file mincore unsupported')
                 cached+=sum(bool(x&1) for x in bits)
             finally:require(libc.munmap(address,length)==0,'Cache munmap failed')
-        return {'available':True,'path':str(path),'logical_file_or_device_bytes':size,
+        return {'available':True,'path':str(path),'configured_path':configured_path,'logical_file_or_device_bytes':size,
                 'resident_page_bytes':cached*page,'page_bytes':page,'dev':m.st_dev,'inode':m.st_ino,
                 'rdev':m.st_rdev,'allocated_file_bytes':None if block else m.st_blocks*512,
                 'data_read_or_faulted':False,'atomic_snapshot':False}
@@ -322,7 +331,7 @@ def rootfs_fd_flags(pid,device):
 
 
 def collect_scope(scope):
-    report={'revision':'cow-ram-scoped-readonly-v2','scope':scope,'samples':[],
+    report={'revision':'cow-ram-scoped-readonly-v3','scope':scope,'samples':[],
             'system_changes':False,'process_memory_contents_read':False,'SDK_called':False}
     try:
         require(os.geteuid()==0 and os.uname().nodename=='server1','A existing root terminal only')
