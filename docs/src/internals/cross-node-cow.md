@@ -95,6 +95,16 @@ indexes are rejected; they are never rewritten or deleted automatically.
 
 ## Deliberate limitations
 
+The native FC patch includes a strict ARM64 GNU seccomp resource. The normal
+target build embeds it; the native mapping backend does not require disabling
+seccomp. This policy preserves the reviewed musl rules and adds only GNU VMM
+thread signalling and join operations with explicit signal/futex argument
+restrictions. Missing ARM64 GNU policy input fails the build instead of falling
+back to an empty policy. Updating a resource in a checkout does not update an
+already deployed executable: rebuild, record its digest, and verify that binary
+before changing a rootfs binding. See the native FC component README for the
+exact input hashes and policy scope.
+
 1. Native writable Guest RAM CoW remains unimplemented for the tested NC device.
    A platform-backed private mapping contract or a fully implemented FC/KVM
    write-privatization mechanism is required. No unvalidated signal handler or

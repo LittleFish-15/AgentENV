@@ -1,12 +1,15 @@
 {
   "format": 1,
-  "source_note": "Exact reviewed source capture; hashes are not an attestation of the deployed FC binary or an inferred upstream tag. No changes to PmemConfig or snapshot serialization schema.",
+  "source_note": "Exact reviewed source capture. Input hashes do not attest an installed binary. The native patch adds the ARM64 GNU seccomp resource; PmemConfig and snapshot serialization schema are unchanged.",
   "files": {
     "src/vmm/src/devices/virtio/pmem/mod.rs": "87f0d7926e0dd735ab011bf70a6cd7d3284e33d3488620e6421a08f5e48ea461",
     "src/vmm/src/devices/virtio/pmem/device.rs": "f54bfaeb32c52a16387223007f1420c5c0944417b0b8cca5218b1eb9ee13155d",
     "src/vmm/src/devices/virtio/pmem/persist.rs": "d37447b0896c8d018e4d48badfa30b7e1f3512030147bf850bc076192b9f05af",
-    "src/vmm/src/lib.rs": "52793bc23b8a79cc33e351cd5010f9b7ebb849bf2003283b059a7e22fa282121"
+    "src/vmm/src/lib.rs": "52793bc23b8a79cc33e351cd5010f9b7ebb849bf2003283b059a7e22fa282121",
+    "resources/seccomp/aarch64-unknown-linux-musl.json": "4569eb0a3bb7019977698df0fd0fb30c7029ceb6403139d2e2718b257b7828ad",
+    "src/firecracker/build.rs": "d7312497726509400d7a267bc87c0c03698fe76ea67ae09a32f46e352180efea"
   },
   "native_module_sha256": "6f6c579326692752b719e1097e2a1762a42ba067a8c8f652c3d17cd06fa9b831",
-  "patch": "native-pmem-fd-v2.patch"
+  "patch": "native-pmem-fd-v2.patch",
+  "gnu_seccomp_policy_sha256": "d5ad15cec885f4f8508095fa6a42c22d470943976e96a4e64e88b43e198f9f1a"
 }
