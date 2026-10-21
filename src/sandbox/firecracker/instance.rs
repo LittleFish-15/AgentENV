@@ -84,6 +84,7 @@ pub(crate) struct FirecrackerInstance {
     process: Option<ScopedChild>,
     // Declared after process: leases outlive the child, including on drop.
     backings: Vec<PinnedBacking>,
+    snapshot_pmem_paths: std::collections::BTreeMap<RawFd, PathBuf>,
 }
 
 impl FirecrackerInstance {
@@ -96,6 +97,7 @@ impl FirecrackerInstance {
             stderr_path: None,
             process: None,
             backings: Vec::new(),
+            snapshot_pmem_paths: Default::default(),
         }
     }
 
@@ -171,7 +173,62 @@ impl FirecrackerInstance {
             .iter()
             .find(|b| b.child_fd == child_fd)
             .context("pmem backing was not acquired and verified")?;
-        self.add_readonly_pmem(id, &backing.child_path()).await
+        let path = self
+            .snapshot_pmem_paths
+            .get(&child_fd)
+            .cloned()
+            .unwrap_or_else(|| backing.child_path());
+        self.add_readonly_pmem(id, &path).await
+    }
+
+    /// Publish fresh process-local descriptors only in this private launch
+    /// directory. FC saves content references, never this file or its FDs.
+    pub fn prepare_snapshot_pmem(
+        &mut self,
+        binding: &super::direct_backing::RootfsBinding,
+    ) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        anyhow::ensure!(
+            self.process.is_none(),
+            "prepare pmem rebindings before FC spawn"
+        );
+        binding.snapshot_identity()?;
+        let mut paths = std::collections::BTreeMap::new();
+        for (index, layer) in binding.layers.iter().enumerate() {
+            let slot = super::direct_backing::FIRST_BACKING_FD + index as i32;
+            let backing = self
+                .backings
+                .iter()
+                .find(|b| b.child_fd == slot)
+                .context("missing verified pmem lease")?;
+            let path = backing.child_path();
+            let value = path
+                .to_str()
+                .context("non-UTF8 pmem descriptor")?
+                .strip_prefix("aenv-pmem-fd:v2:")
+                .context("snapshot requires NC segmented descriptor")?;
+            let digest = layer
+                .sha256
+                .strip_prefix("sha256:")
+                .context("missing content hash")?;
+            paths.insert(
+                slot,
+                PathBuf::from(format!("aenv-pmem-fd:v3:{digest}:{value}")),
+            );
+        }
+        let value = serde_json::json!({"version":1,"paths":paths.values().collect::<Vec<_>>()});
+        let data = serde_json::to_vec(&value)?;
+        anyhow::ensure!(data.len() <= 65536, "pmem rebindings exceed metadata limit");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.work_dir.join("aenv-pmem-restore.json"))?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        self.snapshot_pmem_paths = paths;
+        Ok(())
     }
 
     pub async fn spawn_with_netns(
@@ -374,6 +431,18 @@ impl FirecrackerInstance {
             let _ = fs::remove_file(&self.socket_path);
         }
         self.backings.clear();
+        if !self.snapshot_pmem_paths.is_empty() {
+            let path = self.work_dir.join("aenv-pmem-restore.json");
+            match fs::remove_file(&path) {
+                Ok(()) => self.snapshot_pmem_paths.clear(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.snapshot_pmem_paths.clear()
+                }
+                Err(error) => {
+                    warn!(%error, "stopped FC rebinding file retained; next launch will refuse overwrite")
+                }
+            }
+        }
         debug!("firecracker process stopped");
         Ok(())
     }

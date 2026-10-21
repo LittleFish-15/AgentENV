@@ -146,7 +146,8 @@ pub struct FirecrackerCommonConfig {
     pub mmds_metadata: Option<MmdsMetadata>,
     /// OverlayBD config for the sandbox user rootfs drive.
     pub rootfs_image_config: Option<OverlaybdConfig>,
-    /// Experimental cold-boot pmem/DAX layout; not yet a durable snapshot format.
+    /// Opt-in pmem/DAX layout. Version 3 restores via portable content identities
+    /// and freshly verified local bindings; immutable bases must be retained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_rootfs: Option<super::direct_backing::RootfsBinding>,
     /// Virtual size of the sandbox user rootfs block device in bytes.
@@ -506,6 +507,11 @@ impl FirecrackerSnapshotConfig {
         let mut base_common =
             FirecrackerCommonConfig::from_global_config().context("load sandbox common config")?;
         let manifest = snapshot.manifest();
+        if let Some(native) = &manifest.native_rootfs {
+            base_common.direct_rootfs = Some(
+                super::direct_backing::RootfsBinding::restore_binding(native)?,
+            );
+        }
         if manifest.backend != FIRECRACKER_BACKEND {
             bail!(
                 "snapshot '{}' was captured by the {} backend, and a capture is restored by \

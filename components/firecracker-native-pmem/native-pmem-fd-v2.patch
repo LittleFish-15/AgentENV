@@ -1,3 +1,14 @@
+--- a/src/vmm/src/devices/virtio/pmem/mod.rs
++++ b/src/vmm/src/devices/virtio/pmem/mod.rs
+@@ -4,6 +4,8 @@
+ pub mod device;
+ pub mod event_handler;
+ pub mod metrics;
++pub mod native_fd;
++pub mod native_snapshot;
+ pub mod persist;
+
+ pub const PMEM_NUM_QUEUES: usize = 1;
 --- a/src/vmm/src/devices/virtio/pmem/device.rs
 +++ b/src/vmm/src/devices/virtio/pmem/device.rs
 @@ -39,6 +39,8 @@
@@ -25,7 +36,7 @@
 +                    .map_err(PmemError::NativeBacking)?,
 +                None => Self::mmap_backing_file(&config.path_on_host, config.read_only)?,
 +            };
- 
+
          Ok(Self {
              avail_features: 1u64 << VIRTIO_F_VERSION_1,
              acked_features: 0u64,
@@ -38,19 +49,9 @@
              config_space: ConfigSpace {
                  start: 0,
                  size: mmap_len,
---- a/src/vmm/src/devices/virtio/pmem/mod.rs
-+++ b/src/vmm/src/devices/virtio/pmem/mod.rs
-@@ -4,6 +4,7 @@
- pub mod device;
- pub mod event_handler;
- pub mod metrics;
-+pub mod native_fd;
- pub mod persist;
- 
- pub const PMEM_NUM_QUEUES: usize = 1;
 --- /dev/null
 +++ b/src/vmm/src/devices/virtio/pmem/native_fd.rs
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,320 @@
 +// SPDX-License-Identifier: Apache-2.0
 +//! Readonly inherited NC segments, mapped into one aligned pmem address range.
 +//! Shared with the isolated verifier; the FC patch embeds the same source.
@@ -66,6 +67,7 @@
 +pub struct NativePmemFd {
 +    segments: Vec<(i32, u64)>,
 +    bytes: u64,
++    content_sha256: Option<String>,
 +}
 +
 +pub fn is_native_pmem_path(path: &str) -> bool {
@@ -98,6 +100,22 @@
 +            return Err(invalid(
 +                "native descriptor exceeds bounded segment metadata",
 +            ));
++        }
++        if let Some(value) = value.strip_prefix("v3:") {
++            let (digest, rest) = value
++                .split_once(':')
++                .ok_or_else(|| invalid("missing v3 content identity"))?;
++            if digest.len() != 64
++                || !digest
++                    .bytes()
++                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++            {
++                return Err(invalid("invalid v3 content SHA256"));
++            }
++            let mut parsed = Self::parse(&format!("{PREFIX}v2:{rest}"))?
++                .ok_or_else(|| invalid("missing v3 segment descriptor"))?;
++            parsed.content_sha256 = Some(digest.to_owned());
++            return Ok(Some(parsed));
 +        }
 +        let parts: Vec<_> = value.split(':').collect();
 +        if parts.len() != 4 {
@@ -161,7 +179,18 @@
 +                "native segments do not cover the declared image exactly",
 +            ));
 +        }
-+        Ok(Some(Self { segments, bytes }))
++        Ok(Some(Self {
++            segments,
++            bytes,
++            content_sha256: None,
++        }))
++    }
++
++    /// Content reference only; process-local descriptors never enter snapshots.
++    pub fn snapshot_reference(&self) -> Option<String> {
++        self.content_sha256
++            .as_ref()
++            .map(|sha| format!("aenv-pmem-content:v1:{sha}:{}", self.bytes))
 +    }
 +
 +    pub fn bytes(&self) -> u64 {
@@ -343,35 +372,194 @@
 +        assert!(value.map(false).is_err());
 +    }
 +}
+--- /dev/null
++++ b/src/vmm/src/devices/virtio/pmem/native_snapshot.rs
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Portable pmem references and explicit, freshly verified FD rebindings.
++//! The orchestrator owns content verification and leases; saved FDs are rejected.
++use std::io;
++
++use serde::Deserialize;
++
++use super::native_fd::NativePmemFd;
++
++pub const RESTORE_FILE: &str = "aenv-pmem-restore.json";
++const PREFIX: &str = "aenv-pmem-content:";
++
++fn invalid(message: &str) -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, message)
++}
++
++pub fn saved_path(runtime: &str) -> io::Result<String> {
++    match NativePmemFd::parse(runtime)? {
++        Some(native) => native
++            .snapshot_reference()
++            .ok_or_else(|| invalid("native pmem snapshots require v3 content identity")),
++        None if runtime.starts_with(PREFIX) => {
++            Err(invalid("unresolved content reference is not a live device"))
++        }
++        None => Ok(runtime.to_owned()),
++    }
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Rebindings {
++    version: u32,
++    paths: Vec<String>,
++}
++
++/// Resolve from bounded metadata; content equality, complete length and unique
++/// matching are mandatory. Missing mappings never fall back to old descriptors.
++pub fn resolve(saved: &str, json: &[u8]) -> io::Result<String> {
++    if !saved.starts_with(PREFIX) || saved.len() > 128 || json.len() > 65536 {
++        return Err(invalid("invalid saved reference or oversized rebindings"));
++    }
++    let binding: Rebindings =
++        serde_json::from_slice(json).map_err(|_| invalid("invalid pmem rebindings"))?;
++    if binding.version != 1 || binding.paths.is_empty() || binding.paths.len() > 8 {
++        return Err(invalid("invalid pmem rebinding version/count"));
++    }
++    let mut seen = std::collections::HashSet::new();
++    let mut selected = None;
++    for path in binding.paths {
++        let native = NativePmemFd::parse(&path)?
++            .ok_or_else(|| invalid("rebinding must be an explicit native descriptor"))?;
++        let identity = native
++            .snapshot_reference()
++            .ok_or_else(|| invalid("rebinding lacks content identity"))?;
++        if !seen.insert(identity.clone()) {
++            return Err(invalid("duplicate pmem content rebinding"));
++        }
++        if identity == saved {
++            selected = Some(path);
++        }
++    }
++    selected.ok_or_else(|| invalid("no verified FD rebinding for saved pmem content"))
++}
++
++#[cfg(target_os = "linux")]
++pub fn restored_path(saved: &str) -> io::Result<String> {
++    use std::io::Read;
++    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
++    if super::native_fd::is_native_pmem_path(saved) {
++        return Err(invalid("process-local native FD in snapshot refused"));
++    }
++    if !saved.starts_with(PREFIX) {
++        return Ok(saved.to_owned());
++    }
++    let file = std::fs::OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(RESTORE_FILE)?;
++    let metadata = file.metadata()?;
++    let directory = std::fs::metadata(".")?;
++    if !metadata.is_file()
++        || metadata.len() > 65536
++        || metadata.nlink() != 1
++        || !directory.is_dir()
++        || directory.mode() & 0o077 != 0
++        || metadata.uid() != directory.uid()
++        || metadata.mode() & 0o077 != 0
++    {
++        return Err(invalid(
++            "pmem rebinding file must belong to the private launch directory owner",
++        ));
++    }
++    let mut bytes = Vec::new();
++    file.take(65537).read_to_end(&mut bytes)?;
++    resolve(saved, &bytes)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn path(sha: char, fd: u32) -> String {
++        format!(
++            "aenv-pmem-fd:v3:{}:2097152:nc:{fd}@2097152",
++            sha.to_string().repeat(64)
++        )
++    }
++    #[test]
++    fn saved_reference_omits_fd_and_restores_with_new_descriptor() {
++        let reference = saved_path(&path('a', 64)).unwrap();
++        assert_eq!(
++            reference,
++            format!("aenv-pmem-content:v1:{}:2097152", "a".repeat(64))
++        );
++        let new_path = path('a', 96);
++        let table = serde_json::json!({"version":1,"paths":[new_path]});
++        assert_eq!(
++            resolve(&reference, &serde_json::to_vec(&table).unwrap()).unwrap(),
++            new_path
++        );
++    }
++    #[test]
++    fn wrong_content_missing_duplicate_and_legacy_fds_are_rejected() {
++        let reference = saved_path(&path('a', 64)).unwrap();
++        for paths in [
++            vec![],
++            vec![path('b', 64)],
++            vec![path('a', 64), path('a', 96)],
++            vec!["aenv-pmem-fd:v2:2097152:nc:64@2097152".into()],
++        ] {
++            let table = serde_json::json!({"version":1,"paths":paths});
++            assert!(resolve(&reference, &serde_json::to_vec(&table).unwrap()).is_err());
++        }
++        assert!(saved_path("aenv-pmem-fd:v1:10:2097152:nc").is_err());
++        assert!(saved_path(&reference).is_err());
++    }
++    #[test]
++    fn ordinary_file_snapshot_path_is_unchanged() {
++        assert_eq!(saved_path("base.ext4").unwrap(), "base.ext4");
++    }
++}
 --- a/src/vmm/src/devices/virtio/pmem/persist.rs
 +++ b/src/vmm/src/devices/virtio/pmem/persist.rs
-@@ -54,6 +54,14 @@
-         constructor_args: Self::ConstructorArgs,
-         state: &Self::State,
-     ) -> Result<Self, Self::Error> {
-+        if super::native_fd::is_native_pmem_path(&state.config.path_on_host) {
-+            return Err(PmemPersistError::Pmem(PmemError::NativeBacking(
-+                std::io::Error::new(
-+                    std::io::ErrorKind::Unsupported,
-+                    "inherited native pmem needs durable backing reconstruction; raw FD restore refused",
-+                ),
-+            )));
+@@ -46,7 +46,14 @@
+         PmemState {
+             virtio_state: VirtioDeviceState::from_device(self),
+             config_space: self.config_space,
+-            config: self.config.clone(),
++            config: {
++                let mut config = self.config.clone();
++                // Vmm::save_state preflights this pure conversion. An invalid
++                // direct Persist call must still never serialize a live FD.
++                config.path_on_host = super::native_snapshot::saved_path(&config.path_on_host)
++                    .unwrap_or_else(|_| "aenv-pmem-content:invalid".into());
++                config
++            },
+         }
+     }
+
+@@ -61,7 +68,16 @@
+             PMEM_QUEUE_SIZE,
+         )?;
+
+-        let mut pmem = Pmem::new_with_queues(state.config.clone(), queues)?;
++        let mut config = state.config.clone();
++        config.path_on_host = super::native_snapshot::restored_path(&config.path_on_host)
++            .map_err(PmemError::NativeBacking)?;
++        let native = super::native_fd::is_native_pmem_path(&config.path_on_host);
++        let mut pmem = Pmem::new_with_queues(config, queues)?;
++        if native && pmem.config_space.size != state.config_space.size {
++            return Err(PmemError::NativeBacking(std::io::Error::new(
++                std::io::ErrorKind::InvalidData, "restored pmem length differs from saved device",
++            )).into());
 +        }
-         let queues = state.virtio_state.build_queues_checked(
-             constructor_args.mem,
-             VirtioDeviceType::Pmem,
+         pmem.config_space = state.config_space;
+         pmem.avail_features = state.virtio_state.avail_features;
+         pmem.acked_features = state.virtio_state.acked_features;
 --- a/src/vmm/src/lib.rs
 +++ b/src/vmm/src/lib.rs
-@@ -641,6 +641,13 @@
+@@ -641,6 +641,10 @@
      /// Saves the state of a paused Microvm.
      pub fn save_state(&mut self, vm_info: &VmInfo) -> Result<MicrovmState, MicrovmStateError> {
          use self::MicrovmStateError::SaveVmState;
-+        if self.full_config().pmem_devices.iter().any(|config| {
-+            crate::devices::virtio::pmem::native_fd::is_native_pmem_path(&config.path_on_host)
-+        }) {
-+            return Err(MicrovmStateError::NotAllowed(
-+                "inherited native pmem cannot be saved without durable backing references".into(),
-+            ));
++        for config in &self.full_config().pmem_devices {
++            crate::devices::virtio::pmem::native_snapshot::saved_path(&config.path_on_host)
++                .map_err(|e| MicrovmStateError::NotAllowed(e.to_string()))?;
 +        }
          // We need to save device state before saving KVM state.
          // Some devices, (at the time of writing this comment block device with async engine)

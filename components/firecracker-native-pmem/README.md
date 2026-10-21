@@ -43,10 +43,25 @@ refused by `git apply`; inspect the existing resource and use a fresh reviewed
 checkout. A previously built binary does not gain the embedded policy merely
 because the patch or resource file was updated.
 
-Snapshot save and restore reject native pmem before device-state mutation.
-Serializing an inherited FD would not make it durable. This patch requires the
-matching AgentENV consumer, provider, verifier and new Guest tools image. Its
-parser/unit checks do not establish KVM mapping, Guest DAX or cross-node sharing.
+Version-1/2 descriptors still reject snapshot save/restore. Version 3 is
+`aenv-pmem-fd:v3:SHA256_HEX:TOTAL:nc:FD@BYTES,...` and requires the matching
+AgentENV version-3 binding. Saving replaces the process-local path with
+`aenv-pmem-content:v1:SHA256_HEX:TOTAL`; no source FD or provider socket is saved.
+Restore reads a private `aenv-pmem-restore.json` in the new FC launch directory,
+with `{"version":1,"paths":["<fresh v3 descriptor>"]}`. The orchestrator must
+first acquire new leases and verify the complete contents using the pinned
+isolated verifier. Missing, duplicate, changed-content or changed-length
+rebindings fail; raw inherited FD paths in old snapshots remain rejected.
+The restored pmem mapping must also match the saved device address-range size.
+
+Immutable bases remain externally retained dependencies. Content metadata does
+not retain an SDK object after the publisher deletes it, reconstruct missing
+bytes, or add a repository-owned backup. Keep each base generation alive through
+all snapshots that reference it, or explicitly republish identical retained
+image bytes and bind the new generation. Private writable OverlayFS state uses
+the ordinary per-sandbox disk snapshot path. This is a coordinated Runtime/FC
+implementation requiring native capture/restore/Fork testing; compilation and
+protocol tests do not establish that hardware acceptance or memfile private CoW.
 
 `native_fd.rs` is the canonical source shared by the verifier. The patch embeds
 the same file for the separate FC checkout; its normalized SHA256 is pinned in

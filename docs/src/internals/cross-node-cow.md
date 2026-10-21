@@ -109,11 +109,16 @@ exact input hashes and policy scope.
    A platform-backed private mapping contract or a fully implemented FC/KVM
    write-privatization mechanism is required. No unvalidated signal handler or
    kernel patch is installed by this branch.
-2. Native pmem currently supports cold boot only. Capture, pause/Fork and restore
-   are refused before VM mutation because durable pmem reconstruction and
-   coordinated references across snapshot generations are not implemented.
-   Consequently native pmem cannot yet be combined with native RAM snapshot
-   restore to satisfy the full target.
+2. Version-3 native pmem bindings implement content-based snapshot capture and
+   restore/Fork rebinding. The snapshot manifest retains ordered hashes, lengths,
+   filesystem and source identity; each restore requires an explicitly supplied
+   local binding, newly acquired leases and full content verification. FC saves
+   content references instead of inherited FD numbers and restores the same
+   guest device address/length. Versions 1/2 remain cold-boot-only. This code
+   needs native lifecycle acceptance. Immutable image bytes and their UB bases
+   remain externally retained dependencies: repository-owned pmem backups and
+   automatic generation reference counting are not implemented. Missing bases
+   fail restoration. Native RAM CoW is a separate unresolved capability.
 3. Each native image may span up to 32 SDK backing units. Ordered FD/length
    metadata, complete SCM_RIGHTS delivery and exact coverage are checked. The
    verifier and FC share the same readonly segment mapper. Larger images fail;

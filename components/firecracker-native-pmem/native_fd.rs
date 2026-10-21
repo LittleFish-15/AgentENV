@@ -13,6 +13,7 @@ pub const MAX_LAYERS: i32 = 8;
 pub struct NativePmemFd {
     segments: Vec<(i32, u64)>,
     bytes: u64,
+    content_sha256: Option<String>,
 }
 
 pub fn is_native_pmem_path(path: &str) -> bool {
@@ -45,6 +46,22 @@ impl NativePmemFd {
             return Err(invalid(
                 "native descriptor exceeds bounded segment metadata",
             ));
+        }
+        if let Some(value) = value.strip_prefix("v3:") {
+            let (digest, rest) = value
+                .split_once(':')
+                .ok_or_else(|| invalid("missing v3 content identity"))?;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(invalid("invalid v3 content SHA256"));
+            }
+            let mut parsed = Self::parse(&format!("{PREFIX}v2:{rest}"))?
+                .ok_or_else(|| invalid("missing v3 segment descriptor"))?;
+            parsed.content_sha256 = Some(digest.to_owned());
+            return Ok(Some(parsed));
         }
         let parts: Vec<_> = value.split(':').collect();
         if parts.len() != 4 {
@@ -108,7 +125,18 @@ impl NativePmemFd {
                 "native segments do not cover the declared image exactly",
             ));
         }
-        Ok(Some(Self { segments, bytes }))
+        Ok(Some(Self {
+            segments,
+            bytes,
+            content_sha256: None,
+        }))
+    }
+
+    /// Content reference only; process-local descriptors never enter snapshots.
+    pub fn snapshot_reference(&self) -> Option<String> {
+        self.content_sha256
+            .as_ref()
+            .map(|sha| format!("aenv-pmem-content:v1:{sha}:{}", self.bytes))
     }
 
     pub fn bytes(&self) -> u64 {

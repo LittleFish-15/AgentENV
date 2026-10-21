@@ -158,8 +158,9 @@ impl RootfsFilesystem {
     }
 }
 
-/// Experimental cold-boot layout. Capture is deliberately refused until the new
-/// pmem device/backing identities can be committed and restored durably.
+/// Versions 1/2 are cold-boot only. Version 3 snapshots portable content
+/// references; operators must retain immutable bases and provide fresh local
+/// bindings on every restore node. An absent base is a hard restore error.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RootfsBinding {
@@ -240,16 +241,16 @@ pub fn verify_binary(path: &Path, expected: &str) -> Result<()> {
 impl RootfsBinding {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            (self.version == 1 || self.version == 2)
+            (self.version == 1 || self.version == 2 || self.version == 3)
                 && !self.layers.is_empty()
                 && self.layers.len() <= MAX_PMEM_LAYERS,
-            "native rootfs requires 1..8 version-1/2 layers"
+            "native rootfs requires 1..8 version-1/2/3 layers"
         );
         match (self.version, &self.device_runtime) {
             (1, None) => (),
-            (2, Some(runtime)) => runtime.validate()?,
+            (2 | 3, Some(runtime)) => runtime.validate()?,
             _ => anyhow::bail!(
-                "version-2 rootfs requires pinned device runtime; version-1 must omit it"
+                "version-2/3 rootfs requires pinned device runtime; version-1 must omit it"
             ),
         }
         let mut total = 0u64;
@@ -282,6 +283,56 @@ impl RootfsBinding {
             self.layers.len(),
             self.lower_filesystem.as_str()
         ))
+    }
+
+    pub fn snapshot_identity(&self) -> Result<crate::sandbox::manifest::NativeRootfsSnapshot> {
+        use crate::sandbox::manifest::{NativeRootfsLayer, NativeRootfsSnapshot};
+        self.validate()?;
+        ensure!(
+            self.version == 3,
+            "pmem capture/fork requires version-3 content rebinding support"
+        );
+        let mut unique = std::collections::HashSet::new();
+        ensure!(
+            self.layers
+                .iter()
+                .all(|l| unique.insert((&l.sha256, l.bytes))),
+            "duplicate snapshot pmem content"
+        );
+        Ok(NativeRootfsSnapshot {
+            version: 1,
+            source_image: self.source_image.clone(),
+            filesystem: self.lower_filesystem.as_str().to_string(),
+            layers: self
+                .layers
+                .iter()
+                .map(|l| NativeRootfsLayer {
+                    sha256: l.sha256.clone(),
+                    bytes: l.bytes,
+                })
+                .collect(),
+        })
+    }
+
+    pub fn restore_binding(
+        expected: &crate::sandbox::manifest::NativeRootfsSnapshot,
+    ) -> Result<Self> {
+        let path = std::env::var_os("AENV_DIRECT_ROOTFS_BINDING")
+            .context("snapshot requires explicit node-local pmem content bindings")?;
+        let binding: Self = read_binding(Path::new(&path))?;
+        binding.validate_restore_identity(expected)?;
+        Ok(binding)
+    }
+
+    pub fn validate_restore_identity(
+        &self,
+        expected: &crate::sandbox::manifest::NativeRootfsSnapshot,
+    ) -> Result<()> {
+        ensure!(
+            self.snapshot_identity()? == *expected,
+            "restore pmem content, order, length or filesystem differs from captured snapshot"
+        );
+        Ok(())
     }
 }
 
@@ -738,6 +789,41 @@ mod tests {
             bytes: PMEM_ALIGNMENT,
             socket: "/run/user/1000/backing.sock".into(),
         }
+    }
+    #[test]
+    fn snapshot_content_identity_rebinds_nodes_but_rejects_changed_base() {
+        let mut binding = RootfsBinding {
+            version: 3,
+            source_image: "source".into(),
+            layers: vec![spec()],
+            max_pmem_bytes: PMEM_ALIGNMENT * 4,
+            lower_filesystem: RootfsFilesystem::Ext4,
+            device_runtime: Some(DeviceRuntime {
+                verifier: "/opt/verifier".into(),
+                verifier_sha256: format!("sha256:{}", "b".repeat(64)),
+                firecracker_sha256: format!("sha256:{}", "c".repeat(64)),
+                verification_timeout_secs: 60,
+            }),
+        };
+        let identity = binding.snapshot_identity().unwrap();
+        let encoded = serde_json::to_string(&identity).unwrap();
+        assert!(
+            !encoded.contains("socket")
+                && !encoded.contains("generation")
+                && !encoded.contains("verifier")
+        );
+        binding.layers[0].socket = "/run/another-node/provider.sock".into();
+        binding.layers[0].object_id = "republished".into();
+        binding.layers[0].generation = "new-generation".into();
+        binding.validate_restore_identity(&identity).unwrap();
+        binding.layers[0].sha256 = format!("sha256:{}", "d".repeat(64));
+        assert!(binding.validate_restore_identity(&identity).is_err());
+        binding.layers[0] = spec();
+        binding.layers[0].bytes *= 2;
+        assert!(binding.validate_restore_identity(&identity).is_err());
+        binding.layers[0] = spec();
+        binding.version = 2;
+        assert!(binding.snapshot_identity().is_err());
     }
     #[test]
     fn memory_identity_ignores_paths_but_binds_order_and_size() {

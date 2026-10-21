@@ -664,10 +664,10 @@ impl FirecrackerSandbox {
     }
 
     fn ensure_capture_supported(&self) -> SandboxCaptureResult<()> {
-        if self.launch.common().direct_rootfs.is_some() {
-            return Err(SandboxCaptureError::recoverable(anyhow::anyhow!(
-                "pmem rootfs capture/fork requires durable pmem identities and restore support"
-            )));
+        if let Some(binding) = &self.launch.common().direct_rootfs {
+            binding
+                .snapshot_identity()
+                .map_err(SandboxCaptureError::recoverable)?;
         }
         Ok(())
     }
@@ -1185,8 +1185,9 @@ impl FirecrackerSandbox {
         &mut self,
         snapshot_dir: &Path,
     ) -> Result<(FirecrackerSnapshotConfig, SandboxSnapshotManifest)> {
-        anyhow::ensure!(self.launch.common().direct_rootfs.is_none(),
-            "pmem rootfs capture/fork requires durable pmem identities and restore support; refusing before pause");
+        if let Some(binding) = &self.launch.common().direct_rootfs {
+            binding.snapshot_identity()?;
+        }
         debug!(snapshot_dir = %snapshot_dir.display(), "pausing sandbox");
         if self.has_writable_persistent_volumes() {
             let envd = self
@@ -1347,6 +1348,11 @@ impl FirecrackerSandbox {
             &manifest_extra_drives,
         )
         .context("build firecracker snapshot manifest")?;
+        manifest.native_rootfs = snapshot_common
+            .direct_rootfs
+            .as_ref()
+            .map(|binding| binding.snapshot_identity())
+            .transpose()?;
         manifest.volume_drive_slots = snapshot_common.volume_drive_slots;
         manifest.physical_extra_drive_count = manifest_extra_drives.len();
 
@@ -1806,13 +1812,12 @@ impl FirecrackerSandbox {
         })
     }
 
-    #[tracing::instrument(skip(self, config))]
-    async fn start_fresh(&mut self, config: FirecrackerSandboxConfig) -> Result<()> {
-        if let Some(binding) = &config.common.direct_rootfs {
+    async fn acquire_rootfs_backings(&mut self, common: &FirecrackerCommonConfig) -> Result<()> {
+        if let Some(binding) = &common.direct_rootfs {
             binding.validate()?;
             if let Some(runtime) = &binding.device_runtime {
                 let runtime = runtime.clone();
-                let firecracker = config.common.firecracker_binary.clone();
+                let firecracker = common.firecracker_binary.clone();
                 tokio::task::spawn_blocking(move || -> Result<()> {
                     super::direct_backing::verify_binary(
                         &runtime.verifier,
@@ -1841,7 +1846,16 @@ impl FirecrackerSandbox {
                         .await?;
                 }
             }
+            if binding.version == 3 {
+                self.fc_instance.prepare_snapshot_pmem(binding)?;
+            }
         }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, config))]
+    async fn start_fresh(&mut self, config: FirecrackerSandboxConfig) -> Result<()> {
+        self.acquire_rootfs_backings(&config.common).await?;
         let work_dir = self.work_dir.path();
         debug!(work_dir = %work_dir.display(), "starting fresh sandbox");
 
@@ -2044,11 +2058,17 @@ impl FirecrackerSandbox {
     }
 
     #[tracing::instrument(skip(self, config))]
-    async fn start_resume(&mut self, config: FirecrackerSnapshotConfig) -> Result<()> {
-        anyhow::ensure!(
-            config.common.direct_rootfs.is_none(),
-            "pmem rootfs snapshot restoration is not supported by this experimental format"
-        );
+    async fn start_resume(&mut self, mut config: FirecrackerSnapshotConfig) -> Result<()> {
+        if let Some(binding) = &config.common.direct_rootfs {
+            let expected = binding.snapshot_identity()?;
+            config.common.direct_rootfs = Some(
+                super::direct_backing::RootfsBinding::restore_binding(&expected)?,
+            );
+            if let LaunchMode::Resume(saved) = &mut self.launch {
+                saved.common.direct_rootfs = config.common.direct_rootfs.clone();
+            }
+        }
+        self.acquire_rootfs_backings(&config.common).await?;
         let direct_memory_path = if let Some(path) = std::env::var_os("AENV_DIRECT_MEMORY_BINDING")
         {
             anyhow::ensure!(
@@ -2105,6 +2125,7 @@ impl FirecrackerSandbox {
 
         let capture_output = logging_enabled(config.common.firecracker_log_level.as_deref());
         if direct_memory_path.is_none()
+            && config.common.direct_rootfs.is_none()
             && config.common.stdout_path.is_none()
             && config.common.stderr_path.is_none()
         {

@@ -55,6 +55,26 @@ pub struct SandboxSnapshotManifest {
     /// disabled consumption, and best-effort manifest resolution failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_startup_pack: Option<crate::snapshot::ResolvedStartupPack>,
+    /// Portable immutable pmem content references. Restore requires a verified
+    /// node-local provider for every entry; sockets and FDs are never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_rootfs: Option<NativeRootfsSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NativeRootfsSnapshot {
+    pub version: u32,
+    pub source_image: String,
+    pub filesystem: String,
+    pub layers: Vec<NativeRootfsLayer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NativeRootfsLayer {
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +149,7 @@ impl SandboxSnapshotManifest {
             volume_drive_slots: 0,
             physical_extra_drive_count: attached_drives.len(),
             memory_startup_pack: None,
+            native_rootfs: None,
         }
         .with_extra_drives(attached_drives)
     }
@@ -261,6 +282,7 @@ mod tests {
             volume_drive_slots: 0,
             physical_extra_drive_count: 1,
             memory_startup_pack: None,
+            native_rootfs: None,
         };
 
         let drives = manifest.extra_drives();
