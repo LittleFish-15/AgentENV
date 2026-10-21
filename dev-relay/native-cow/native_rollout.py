@@ -25,8 +25,8 @@ ROOT = Path('/home/jwk/agent')
 WORK = ROOT / 'r/cow-rollout-v4'
 DEPLOYMENT = ROOT / 'deployments/agentenv-native-6cdac56'
 SELF = ROOT / 'native_rollout.py'
-PUBLIC_COMMIT = '9eaea49baa94b804e2da6fa1675756395452efc1'
-PUBLIC_PINS = {'A_prepare_release_v4.py': 'f9c80889c21e041c1b28420889cb8acd4270eed33ebc6a442cf0114c272f4ece', 'prepare_native_service_v4.py': '0e128f48f0094d42281cb766347f87eb65d24ea558d832e72d10621c4722efd5', 'native_release_bundle.py': 'de2ebddf3d2599306b403dfef38e944669b3d2dab345502709bfb20cd6a53641', 'native_rootfs_inputs.py': '4c0c92a447efad6aa1110c9359ef7c768e416205a59a9413b1211ca08ae28947', 'native_provider_v4.py': '3ae0a58a4e51e056cecf61f7cd60a362ed82ac317c8c22e3a1262887c6bcfb36', 'legacy_provider_handoff.py': 'fe5c1819e0bf662d62cebf3a307f0204be89258086be1ec25c384c140a469c23', 'native_cohort.py': '5138f2c435d1d6a63a07f2041c4c8ba31d974eb10b08a608cd18e577184d55ef', 'cohort_engine.py': '9b8357278749ec888abf69c4d48fa503c7779bcf0618ad55894bbb27f5d26d46', 'ram_observer.py': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload.py': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_report.py': '15081f6ad11e44319a881f217866700fda1244c4c5cac89bbc502692366b0d6e', 'cohort_sync.py': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
+PUBLIC_COMMIT = 'c2374c4f3537c71b95fc2df7a2314026b1047a62'
+PUBLIC_PINS = {'A_prepare_release_v4.py': 'f9c80889c21e041c1b28420889cb8acd4270eed33ebc6a442cf0114c272f4ece', 'prepare_native_service_v4.py': '0e128f48f0094d42281cb766347f87eb65d24ea558d832e72d10621c4722efd5', 'native_release_bundle.py': 'de2ebddf3d2599306b403dfef38e944669b3d2dab345502709bfb20cd6a53641', 'native_rootfs_inputs.py': '4c0c92a447efad6aa1110c9359ef7c768e416205a59a9413b1211ca08ae28947', 'native_provider_v4.py': '610f6bc89828592255f714dad605ab945ef88f2ebb26419acfe9e8a1d6488a82', 'legacy_provider_handoff.py': '1e006631b05836f0e8c38f7911615f95fe605f7f09484e561a81af6007122979', 'native_cohort.py': '181af4f11ff43c38611dec8c469686393df30fdc940c45ecb0f2409429a8168d', 'cohort_engine.py': '5d0cd8d4cf45b8301532517af832710c3928458f20c1cc64b0991500ddb1b89d', 'ram_observer.py': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload.py': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_report.py': '15081f6ad11e44319a881f217866700fda1244c4c5cac89bbc502692366b0d6e', 'cohort_sync.py': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
 PYTHON = '/usr/bin/python3'
 SSH = ['/usr/bin/ssh', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
        '-oConnectTimeout=10', '-oServerAliveInterval=15', '-oServerAliveCountMax=4', 'jwk@agent1']
@@ -91,7 +91,7 @@ def save(path, value):
 
 
 def ordinary(node):
-    need(os.name == 'posix' and os.getuid() == os.geteuid() == 1204
+    need(sys.version_info >= (3, 11) and os.name == 'posix' and os.getuid() == os.geteuid() == 1204
          and os.getgid() == os.getegid() == 1205 and os.uname().machine == 'aarch64'
          and socket.gethostname() == ('server1' if node == 'node-a' else 'agent1'),
          'Use the declared ordinary ARM64 node user')
@@ -137,6 +137,19 @@ def download():
 
 def remote_command(arguments):
     return SSH + [shlex.join([PYTHON, '-I', '-B', str(SELF), *arguments, '--run'])]
+
+
+def transport_readiness():
+    # This is executed only by the user-run A entry, before any build/journal or
+    # B filesystem preparation. No connectivity was established during authoring.
+    code = ("import os,socket,sys; assert sys.version_info>=(3,11) and sys.platform=='linux'; "
+            "assert os.getuid()==os.geteuid()==1204 and os.getgid()==os.getegid()==1205; "
+            "assert socket.gethostname()=='agent1' and os.uname().machine=='aarch64'; "
+            "print('B_COORDINATOR_TRANSPORT_READY')")
+    result = subprocess.run(SSH + [shlex.join([PYTHON, '-I', '-B', '-c', code])],
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    need(result.returncode == 0 and result.stdout.strip() == b'B_COORDINATOR_TRANSPORT_READY',
+         'Existing authenticated A-to-B SSH/Python prerequisite unavailable; no build, SDK or service change attempted')
 
 
 def transfer(path, destination):
@@ -470,6 +483,7 @@ def run_pair(variant, steps):
 def run_a():
     ordinary('node-a')
     need(Path(__file__).resolve() == SELF, 'Place this entry at /home/jwk/agent/native_rollout.py')
+    transport_readiness()
     download()
     s = Steps('node-a')
     s.local('build-coordinated-release', 'A_prepare_release_v4.py', ['--run'], 10800)
