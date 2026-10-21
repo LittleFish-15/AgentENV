@@ -75,6 +75,10 @@ def recovery():
         for sid in sorted(ids):need(api('/sandboxes/'+sid)[0]==404,'Previously owned Guest still exists')
         need(api('/v2/sandboxes?limit=1')==(200,[]),'Original inventory not empty')
         need(state(UNIT)==before and others()==other_before,'Service identity changed during recovery checks')
+        fixed_meta={'uid':1204,'gid':1205,'mode':0o600}
+        need(plan['original_config_metadata']==fixed_meta,'Recovery metadata differs from reviewed original')
+        current_meta=config.stat()
+        need({'uid':current_meta.st_uid,'gid':current_meta.st_gid,'mode':stat.S_IMODE(current_meta.st_mode)}==fixed_meta,'Current config metadata changed')
         if sha==NEW_SHA:
             temp=config.with_name('runtime.toml.cow4-recovery-d6423029');meta=plan['original_config_metadata']
             fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,meta['mode'])
