@@ -228,6 +228,18 @@ for name,expected in PINS.items():
   after=os.fstat(f.fileno())
  assert (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)
  assert h.hexdigest()==expected,'Reviewed new-service input changed'
+definition=json.loads(Path(DEPLOYMENT,'definition-native.json').read_bytes())
+if definition.get('rootfsBinding'):
+ p=Path(DEPLOYMENT,'rootfs-inputs.json');meta=p.stat()
+ assert p.resolve(strict=True)==p and meta.st_uid==1204 and stat.S_ISREG(meta.st_mode) and 0<meta.st_size<=65536
+ seeded=json.loads(p.read_bytes())
+ binding=json.loads(Path(definition['rootfsBinding']['path']).read_bytes())
+ assert seeded.get('status')=='ORIGINAL_ROOTFS_INPUTS_SEEDED_NOT_GUEST_ACCEPTANCE'
+ assert seeded.get('coreCommit')=='6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
+ assert seeded.get('node')==definition['node'] and seeded.get('sourceImage')==binding.get('sourceImage'),'Seeded source/binding differ'
+ source=Path(seeded['sourceConfig']);assert source.resolve(strict=True)==source and source.is_relative_to(Path(DEPLOYMENT)/'state/image-cache/configs')
+ assert source.stat().st_uid==1204 and stat.S_ISREG(source.stat().st_mode) and 0<source.stat().st_size<=2*1024**2
+ assert hashlib.sha256(source.read_bytes()).hexdigest()==seeded['sourceConfigSha256'],'Seeded source config changed'
 assert Path('/sys/module/ublk_drv').is_dir()
 assert all(Path(p).is_char_device() for p in ('/dev/kvm','/dev/ublk-control','/dev/net/tun'))
 with socket.socket() as s:s.bind(('127.0.0.1',PORT))
