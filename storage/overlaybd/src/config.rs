@@ -9,6 +9,8 @@ const DEFAULT_LOG_ROTATE_NUM: i32 = 3;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LayerConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ub: Option<UbLayerRef>,
     pub gzip_index: String,
     pub file: String,
     pub target_file: String,
@@ -19,6 +21,181 @@ pub struct LayerConfig {
     pub uuid: String,
     pub target_digest: String,
     pub size: u64,
+}
+
+/// Node-local runtime hint, never a replacement for durable snapshot layers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct UbLayerRef {
+    pub broker_socket: String,
+    pub object_name: String,
+    pub generation: String,
+    pub layer_digest: String,
+    pub file_bytes: u64,
+    pub mapping_bytes: u64,
+    #[serde(default)]
+    pub allow_repository_fallback: bool,
+}
+
+impl UbLayerRef {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            Path::new(&self.broker_socket).is_absolute()
+                && !self.broker_socket.contains('\0')
+                && self.broker_socket.len() < 108,
+            "UB broker socket must be an absolute local UNIX path"
+        );
+        ensure!(
+            self.object_name.len() == 37 && self.object_name.starts_with("aenv_"),
+            "invalid UB layer object name"
+        );
+        crate::backend::ub_protocol::hex_bytes::<16>(&self.object_name[5..])?;
+        crate::backend::ub_protocol::hex_bytes::<16>(&self.generation)?;
+        let digest = self
+            .layer_digest
+            .strip_prefix("sha256:")
+            .context("UB layer requires sha256 identity")?;
+        crate::backend::ub_protocol::hex_bytes::<32>(digest)?;
+        ensure!(
+            self.file_bytes > 0
+                && self.mapping_bytes.is_multiple_of(4 * 1024 * 1024)
+                && self
+                    .file_bytes
+                    .checked_add(4096)
+                    .is_some_and(|n| n <= self.mapping_bytes),
+            "invalid UB layer length or mapping alignment"
+        );
+        Ok(())
+    }
+}
+
+/// Bind immutable lowers in a derived runtime config, retaining its private upper
+/// and the durable catalog. The caller chooses memory or rootfs explicitly.
+pub fn bind_ub_layer_replicas(cfg: &mut ImageConfig, index_path: &Path) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReplicaIndex {
+        version: u32,
+        state: String,
+        replicas: Vec<UbLayerRef>,
+    }
+    use std::io::Read;
+    let mut raw = Vec::new();
+    std::fs::File::open(index_path)
+        .context("open UB replica index")?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut raw)
+        .context("read UB replica index")?;
+    ensure!(raw.len() <= 1024 * 1024, "UB replica index is too large");
+    let index: ReplicaIndex = serde_json::from_slice(&raw).context("parse UB replica index")?;
+    ensure!(
+        index.version == 1 && index.state == "ready",
+        "UB replica index is not ready/version1"
+    );
+    let mut by_digest = std::collections::HashMap::new();
+    for replica in index.replicas {
+        replica.validate()?;
+        ensure!(
+            !by_digest.contains_key(&replica.layer_digest),
+            "duplicate UB replica layer digest"
+        );
+        by_digest.insert(replica.layer_digest.clone(), replica);
+    }
+    let selected = cfg
+        .lowers
+        .iter()
+        .map(|layer| {
+            let replica = by_digest
+                .get(&layer.digest)
+                .context("layer missing from explicit UB replica index")?;
+            ensure!(
+                replica.file_bytes == layer.size,
+                "UB replica differs from committed layer size"
+            );
+            Ok(replica.clone())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Validate the complete selection before modifying any lower.
+    for (layer, replica) in cfg.lowers.iter_mut().zip(selected) {
+        layer.ub = Some(replica);
+    }
+    Ok(())
+}
+
+/// A distinct, immutable path per selected UB incarnation keeps the node's
+/// shared-device pool from accidentally reusing an older replica's device.
+/// The source runtime config remains suitable for the original local path.
+pub fn ub_runtime_config_view(image_path: &Path, index_path: &Path) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    let mut raw = Vec::new();
+    std::fs::File::open(image_path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut raw)?;
+    ensure!(
+        raw.len() <= 1024 * 1024,
+        "runtime image config is too large"
+    );
+    let mut cfg: ImageConfig = serde_json::from_slice(&raw)?;
+    resolve_image_config_local_paths(image_path, &mut cfg);
+    bind_ub_layer_replicas(&mut cfg, index_path)?;
+    validate_image_config(&cfg)?;
+    let serialized = serde_json::to_vec_pretty(&cfg)?;
+    let key = format!("{:x}", Sha256::digest(&serialized));
+    let parent = image_path
+        .parent()
+        .context("runtime config has no parent")?;
+    let view = parent.join(format!(".ub-view-{key}.json"));
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = parent.join(format!(
+        ".ub-view-{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    struct Pending {
+        file: Option<std::fs::File>,
+        path: PathBuf,
+    }
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            self.file.take();
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut pending = Pending {
+        file: Some(options.open(&temporary)?),
+        path: temporary.clone(),
+    };
+    let file = pending
+        .file
+        .as_mut()
+        .context("runtime config temporary file missing")?;
+    file.write_all(&serialized)?;
+    file.sync_all()?;
+    pending.file.take();
+    match std::fs::hard_link(&temporary, &view) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(&view)?;
+            ensure!(
+                metadata.file_type().is_file() && metadata.len() == serialized.len() as u64,
+                "existing UB runtime view has unexpected type/length"
+            );
+            ensure!(
+                std::fs::read(&view)? == serialized,
+                "existing UB runtime view changed"
+            );
+        }
+        Err(error) => return Err(error).context("publish immutable UB runtime config view"),
+    }
+    Ok(view)
 }
 
 impl LayerConfig {
@@ -693,11 +870,18 @@ pub fn validate_image_config(cfg: &ImageConfig) -> Result<()> {
     );
 
     for layer in &cfg.lowers {
+        if let Some(replica) = &layer.ub {
+            replica.validate()?;
+            ensure!(
+                layer.digest == replica.layer_digest && layer.size == replica.file_bytes,
+                "UB replica identity/size does not match the committed lower layer"
+            );
+        }
         ensure!(
             !layer.file.is_empty() || !layer.digest.is_empty() || !layer.dir.is_empty(),
             "each lower must provide at least one of file/dir/digest"
         );
-        let is_remote = layer.file.is_empty() && !layer.digest.is_empty();
+        let is_remote = layer.ub.is_none() && layer.file.is_empty() && !layer.digest.is_empty();
         ensure!(
             !(is_remote && layer.effective_repo_blob_url(&cfg.repo_blob_url).is_empty()),
             "repoBlobUrl is required for remote lower layers"
@@ -1227,6 +1411,7 @@ mod tests {
             repo_blob_url: String::new(),
             lowers: vec![LayerConfig {
                 gzip_index: "../gzip/base.index".to_string(),
+                ub: None,
                 file: "../rootfs/base.commit".to_string(),
                 target_file: "./target.commit".to_string(),
                 dir: "./download/layer-1".to_string(),
@@ -1266,5 +1451,208 @@ mod tests {
         assert_eq!(cfg.upper.mode, Some(UpperMode::LogStructured));
         assert_eq!(cfg.result_file, "/tmp/agentenv/overlaybd/result.txt");
         assert_eq!(cfg.record_trace_path, "/tmp/agentenv/overlaybd/trace.log");
+    }
+}
+
+#[cfg(test)]
+mod ub_tests {
+    use super::*;
+
+    struct IndexDirectory(PathBuf);
+    impl IndexDirectory {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "aenv-ub-index-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for IndexDirectory {
+        fn drop(&mut self) {
+            assert_eq!(self.0.parent(), Some(std::env::temp_dir().as_path()));
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn replica() -> UbLayerRef {
+        UbLayerRef {
+            broker_socket: std::env::temp_dir()
+                .join("aenv-ub.sock")
+                .display()
+                .to_string(),
+            object_name: "aenv_0123456789abcdef0123456789abcdef".into(),
+            generation: "0123456789abcdef0123456789abcdef".into(),
+            layer_digest: format!("sha256:{}", "a".repeat(64)),
+            file_bytes: 1234,
+            mapping_bytes: 4194304,
+            allow_repository_fallback: false,
+        }
+    }
+
+    fn image() -> ImageConfig {
+        let reference = replica();
+        ImageConfig {
+            lowers: vec![LayerConfig {
+                digest: reference.layer_digest,
+                size: reference.file_bytes,
+                ..Default::default()
+            }],
+            upper: UpperConfig {
+                mode: Some(UpperMode::Sparse),
+                data: "private-upper.data".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ub_legacy_config_omits_optional_reference() {
+        let cfg: LayerConfig = serde_json::from_str(r#"{"file":"old.commit"}"#).unwrap();
+        assert!(cfg.ub.is_none());
+        assert!(!serde_json::to_value(cfg)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("ub"));
+    }
+
+    #[test]
+    fn ub_reference_rejects_namespace_generation_digest_and_lengths() {
+        let valid = replica();
+        valid.validate().unwrap();
+        for bad in [
+            UbLayerRef {
+                object_name: "other-user-object".into(),
+                ..valid.clone()
+            },
+            UbLayerRef {
+                generation: "bad".into(),
+                ..valid.clone()
+            },
+            UbLayerRef {
+                layer_digest: "sha256:bad".into(),
+                ..valid.clone()
+            },
+            UbLayerRef {
+                file_bytes: u64::MAX,
+                ..valid.clone()
+            },
+            UbLayerRef {
+                mapping_bytes: 1,
+                ..valid.clone()
+            },
+            UbLayerRef {
+                broker_socket: "relative.sock".into(),
+                ..valid
+            },
+        ] {
+            assert!(bad.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn ub_bind_is_atomic_and_preserves_local_upper() {
+        let dir = IndexDirectory::new();
+        let index = dir.path().join("replicas.json");
+        let reference = replica();
+        std::fs::write(
+            &index,
+            serde_json::to_vec(
+                &serde_json::json!({"version":1,"state":"ready","replicas":[reference]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut cfg = image();
+        let upper = cfg.upper.clone();
+        bind_ub_layer_replicas(&mut cfg, &index).unwrap();
+        assert_eq!(cfg.upper, upper);
+        assert_eq!(cfg.lowers[0].ub.as_ref().unwrap(), &reference);
+        validate_image_config(&cfg).unwrap(); // Explicit UB needs no remote repo URL.
+        let mut missing = image();
+        missing.lowers.push(LayerConfig {
+            digest: format!("sha256:{}", "b".repeat(64)),
+            size: 1234,
+            ..Default::default()
+        });
+        let original = missing.clone();
+        assert!(bind_ub_layer_replicas(&mut missing, &index).is_err());
+        assert_eq!(missing, original);
+    }
+
+    #[test]
+    fn ub_bind_rejects_unready_duplicate_and_wrong_size() {
+        let dir = IndexDirectory::new();
+        let index = dir.path().join("replicas.json");
+        let reference = replica();
+        for value in [
+            serde_json::json!({"version":1,"state":"writing","replicas":[reference]}),
+            serde_json::json!({"version":1,"state":"ready","replicas":[reference,reference]}),
+            serde_json::json!({"version":1,"state":"ready","replicas":[UbLayerRef { file_bytes: 1235, ..reference.clone() }]}),
+        ] {
+            std::fs::write(&index, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(bind_ub_layer_replicas(&mut image(), &index).is_err());
+        }
+    }
+
+    #[test]
+    fn ub_runtime_views_are_generation_specific_and_do_not_rewrite_the_source() {
+        let dir = IndexDirectory::new();
+        let source = dir.path().join("image.json");
+        let index = dir.path().join("replicas.json");
+        let original = serde_json::to_vec(&image()).unwrap();
+        std::fs::write(&source, &original).unwrap();
+        let reference = replica();
+        let write_index = |r: &UbLayerRef| {
+            std::fs::write(
+                &index,
+                serde_json::to_vec(
+                    &serde_json::json!({"version":1,"state":"ready","replicas":[r]}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        write_index(&reference);
+        let first = ub_runtime_config_view(&source, &index).unwrap();
+        assert_eq!(ub_runtime_config_view(&source, &index).unwrap(), first);
+        write_index(&UbLayerRef {
+            generation: "f".repeat(32),
+            ..reference
+        });
+        let second = ub_runtime_config_view(&source, &index).unwrap();
+        assert_ne!(first, second);
+        assert!(first.exists() && second.exists());
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(load_image_config(first).unwrap().lowers[0].ub.is_some());
+        assert!(load_image_config(second).unwrap().lowers[0].ub.is_some());
+    }
+
+    #[test]
+    fn ub_runtime_view_refuses_to_overwrite_an_existing_different_view() {
+        let dir = IndexDirectory::new();
+        let source = dir.path().join("image.json");
+        let index = dir.path().join("replicas.json");
+        std::fs::write(&source, serde_json::to_vec(&image()).unwrap()).unwrap();
+        std::fs::write(
+            &index,
+            serde_json::to_vec(
+                &serde_json::json!({"version":1,"state":"ready","replicas":[replica()]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let view = ub_runtime_config_view(&source, &index).unwrap();
+        std::fs::write(&view, b"changed").unwrap();
+        assert!(ub_runtime_config_view(&source, &index).is_err());
+        assert_eq!(std::fs::read(view).unwrap(), b"changed");
     }
 }

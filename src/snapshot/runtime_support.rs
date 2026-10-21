@@ -238,6 +238,29 @@ where
     write_image_config(destination, label, &image_config).await
 }
 
+pub(crate) fn ub_replica_index(kind: &str) -> Option<PathBuf> {
+    let variable = match kind {
+        "memory" => "AENV_UB_MEMORY_REPLICAS",
+        "rootfs" => "AENV_UB_ROOTFS_REPLICAS",
+        _ => return None,
+    };
+    std::env::var_os(variable).map(PathBuf::from)
+}
+
+pub(crate) async fn resolve_ub_runtime_config(
+    source: &Path,
+    kind: &str,
+) -> RepositoryResult<PathBuf> {
+    let Some(index) = ub_replica_index(kind) else {
+        return Ok(source.to_path_buf());
+    };
+    let source = source.to_path_buf();
+    tokio::task::spawn_blocking(move || overlaybd::config::ub_runtime_config_view(&source, &index))
+        .await
+        .map_err(|error| RepositoryError::backend("join UB runtime config binding", error))?
+        .map_err(|error| RepositoryError::backend("bind UB runtime config", error))
+}
+
 /// Point a lower at its node-local placement as decided by the image store.
 ///
 /// The store owns the `file=` vs `dir=` rule: a remote-recoverable layer gets

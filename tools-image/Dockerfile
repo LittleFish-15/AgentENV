@@ -87,12 +87,18 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 #   /agentenv/envd                compiled control-plane daemon
 #   /agentenv/bin/busybox         stable helper binary for init scripts
 # ---------------------------------------------------------------------------
+COPY dax-check.go /tmp/dax-check.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" \
+    go build -trimpath -ldflags "-s -w" -o /out/dax-check /tmp/dax-check.go
+
 FROM --platform=${TARGETPLATFORM} ${BUSYBOX_IMAGE} AS rootfs
 
 ARG TOOLS_VERSION
 
 COPY --chmod=0755 init /tools-rootfs/init
 COPY --chmod=0755 pivot-init /tools-rootfs/agentenv/pivot-init
+COPY --chmod=0755 pmem-rootfs /tools-rootfs/agentenv/pmem-rootfs
+COPY --chmod=0755 --from=envd-builder /out/dax-check /tools-rootfs/agentenv/dax-check
 COPY --chmod=0755 --from=envd-builder /out/envd /tools-rootfs/agentenv/envd
 
 RUN set -eux; \
@@ -100,6 +106,11 @@ RUN set -eux; \
       /tools-rootfs/dev \
       /tools-rootfs/etc \
       /tools-rootfs/mnt/user \
+      /tools-rootfs/mnt/write \
+      /tools-rootfs/mnt/ro0 /tools-rootfs/mnt/ro1 \
+      /tools-rootfs/mnt/ro2 /tools-rootfs/mnt/ro3 \
+      /tools-rootfs/mnt/ro4 /tools-rootfs/mnt/ro5 \
+      /tools-rootfs/mnt/ro6 /tools-rootfs/mnt/ro7 \
       /tools-rootfs/proc \
       /tools-rootfs/sys/fs/cgroup \
       /tools-rootfs/agentenv/bin; \

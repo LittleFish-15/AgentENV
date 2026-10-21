@@ -115,6 +115,9 @@ fn split_runtime_suffix(
     runtime_owned_roots: &[PathBuf],
 ) -> (Vec<LayerConfig>, Vec<LayerConfig>) {
     let Some(first_runtime_owned_index) = lowers.iter().position(|lower| {
+        if lower.ub.is_some() {
+            return false;
+        }
         let lower_path =
             fs::canonicalize(&lower.file).unwrap_or_else(|_| PathBuf::from(&lower.file));
         runtime_owned_roots
@@ -127,6 +130,9 @@ fn split_runtime_suffix(
     let runtime_owned_suffix = lowers.split_off(first_runtime_owned_index);
 
     debug_assert!(lowers.iter().all(|lower| {
+        if lower.ub.is_some() {
+            return true;
+        }
         let lower_path =
             fs::canonicalize(&lower.file).unwrap_or_else(|_| PathBuf::from(&lower.file));
         runtime_owned_roots
@@ -900,6 +906,34 @@ mod tests {
                 .contains("overlapping dirty memory destination ranges detected"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn split_runtime_suffix_keeps_ub_ancestor_without_a_local_duplicate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = temp.path().canonicalize().unwrap();
+        let missing_ancestor = runtime.join("missing-ancestor.commit");
+        let ancestor = LayerConfig {
+            file: missing_ancestor.display().to_string(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size: 8192,
+            ub: Some(overlaybd::config::UbLayerRef {
+                broker_socket: runtime.join("b.sock").display().to_string(),
+                object_name: format!("aenv_{}", "b".repeat(32)),
+                generation: "c".repeat(32),
+                layer_digest: format!("sha256:{}", "a".repeat(64)),
+                file_bytes: 8192,
+                mapping_bytes: 4 * 1024 * 1024,
+                allow_repository_fallback: false,
+            }),
+            ..Default::default()
+        };
+        let delta = local_layer_config(&runtime.join("new-delta.commit"));
+        let (stable, local) =
+            split_runtime_suffix(vec![ancestor.clone(), delta.clone()], &[runtime]);
+        assert_eq!(stable, vec![ancestor]);
+        assert_eq!(local, vec![delta]);
+        assert!(!missing_ancestor.exists());
     }
 
     #[test]

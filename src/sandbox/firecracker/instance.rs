@@ -22,6 +22,7 @@ use serde_json::value::RawValue;
 use tokio::time::{self, Duration, Instant};
 use tracing::{debug, trace, warn};
 
+use super::direct_backing::{BackingSpec, DeviceRuntime, PinnedBacking};
 use super::mmds::MmdsMetadata;
 use super::socket::UnixSocketClient;
 use crate::privileges::{ScopedChild, ScopedSpawnSpec};
@@ -81,6 +82,8 @@ pub(crate) struct FirecrackerInstance {
     socket_path: PathBuf,
     stderr_path: Option<PathBuf>,
     process: Option<ScopedChild>,
+    // Declared after process: leases outlive the child, including on drop.
+    backings: Vec<PinnedBacking>,
 }
 
 impl FirecrackerInstance {
@@ -92,6 +95,7 @@ impl FirecrackerInstance {
             socket_path,
             stderr_path: None,
             process: None,
+            backings: Vec::new(),
         }
     }
 
@@ -103,6 +107,71 @@ impl FirecrackerInstance {
             .context("firecracker process is not running")?;
         let raw_pid = i32::try_from(raw_pid).context("firecracker pid does not fit in i32")?;
         Ok(Pid::from_raw(raw_pid))
+    }
+
+    pub async fn acquire_backing(
+        &mut self,
+        spec: BackingSpec,
+        child_fd: RawFd,
+        private_cow: bool,
+    ) -> Result<PathBuf> {
+        anyhow::ensure!(
+            self.process.is_none(),
+            "native backings must be acquired before FC spawn"
+        );
+        anyhow::ensure!(
+            !self.backings.iter().any(|b| b.child_fd == child_fd),
+            "duplicate native backing slot"
+        );
+        let backing = tokio::task::spawn_blocking(move || {
+            PinnedBacking::acquire(&spec, child_fd, private_cow)
+        })
+        .await??;
+        let path = backing.child_path();
+        self.backings.push(backing);
+        Ok(path)
+    }
+
+    pub async fn add_readonly_pmem(&self, id: &str, path: &Path) -> Result<()> {
+        // This path belongs to the FC process (/proc/self/fd/N), not the server.
+        let mut pmem = firecracker_client::models::Pmem::new(
+            id.to_string(),
+            path.to_string_lossy().into_owned(),
+        );
+        pmem.root_device = Some(false);
+        pmem.read_only = Some(true);
+        self.client
+            .request_no_content(Method::PUT, &format!("/pmem/{id}"), Some(&pmem))
+            .await
+            .context("configure read-only native pmem layer")
+    }
+
+    pub async fn acquire_nc_pmem(
+        &mut self,
+        spec: BackingSpec,
+        child_fd: RawFd,
+        runtime: DeviceRuntime,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.process.is_none() && !self.backings.iter().any(|b| b.child_fd == child_fd),
+            "NC pmem must use a fresh slot before FC spawn"
+        );
+        let acquire = spec.clone();
+        let backing =
+            tokio::task::spawn_blocking(move || PinnedBacking::acquire_nc_pmem(&acquire, child_fd))
+                .await??;
+        let backing = super::direct_verifier::verify(backing, spec, runtime).await?;
+        self.backings.push(backing);
+        Ok(())
+    }
+
+    pub async fn add_acquired_pmem(&self, id: &str, child_fd: RawFd) -> Result<()> {
+        let backing = self
+            .backings
+            .iter()
+            .find(|b| b.child_fd == child_fd)
+            .context("pmem backing was not acquired and verified")?;
+        self.add_readonly_pmem(id, &backing.child_path()).await
     }
 
     pub async fn spawn_with_netns(
@@ -178,6 +247,11 @@ impl FirecrackerInstance {
             process_group: true,
             netns: netns.map(OwnedFd::from),
             fd_handoff,
+            backing_handoffs: self
+                .backings
+                .iter()
+                .flat_map(|backing| backing.handoffs())
+                .collect(),
             capabilities: &[],
         };
 
@@ -279,16 +353,27 @@ impl FirecrackerInstance {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
 
             // Wait for the process to exit, but if it doesn't within the timeout, force kill it with SIGKILL
-            if time::timeout(timeout, child.wait()).await.is_err() {
-                warn!("firecracker stop timed out; sending SIGKILL");
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+            let exited = match time::timeout(timeout, child.wait()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("firecracker stop timed out; sending SIGKILL");
+                    match child.start_kill() {
+                        Ok(()) => child.wait().await,
+                        Err(error) => Err(error),
+                    }
+                }
+            };
+            if let Err(error) = exited {
+                // Keep both the child and native leases on an unconfirmed exit.
+                self.process = Some(child);
+                return Err(error).context("FC exit unconfirmed; native backing leases retained");
             }
         }
 
         if self.socket_path.exists() {
             let _ = fs::remove_file(&self.socket_path);
         }
+        self.backings.clear();
         debug!("firecracker process stopped");
         Ok(())
     }

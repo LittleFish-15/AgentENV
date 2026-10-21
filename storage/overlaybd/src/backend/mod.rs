@@ -6,6 +6,8 @@ pub mod oss;
 pub mod registryfs_v2;
 pub mod switch;
 pub mod tar;
+pub mod ub;
+pub(crate) mod ub_protocol;
 
 // Backward-compatible path while implementation is aligned to overlaybd registryfs_v2.
 #[cfg(feature = "full")]

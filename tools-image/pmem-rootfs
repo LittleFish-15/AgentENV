@@ -1,0 +1,45 @@
+# Sourced by /init only for the explicit experimental pmem rootfs mode.
+# Each immutable EROFS layer must include /.aenv-dax-probe (a regular file).
+case "$PMEM_COUNT" in
+    1|2|3|4|5|6|7|8) ;;
+    *) die "invalid aenv_pmem_rootfs layer count" ;;
+esac
+
+$BB mount -n -t ext4 -o rw /dev/vdb /mnt/write || die "mount private writable disk"
+$BB mkdir -p /mnt/write/.agentenv-overlay/upper /mnt/write/.agentenv-overlay/work \
+    || die "prepare private overlay upper"
+
+LOWERS=""
+INDEX=0
+while [ "$INDEX" -lt "$PMEM_COUNT" ]; do
+    LOWER="/mnt/ro$INDEX"
+    # NVDIMM probing can finish after PID 1 starts. Bound this wait rather than
+    # treating delayed device enumeration as a successful ordinary-cache boot.
+    ATTEMPTS=0
+    while [ ! -b "/dev/pmem$INDEX" ] && [ "$ATTEMPTS" -lt 30 ]; do
+        $BB sleep 1
+        ATTEMPTS=$((ATTEMPTS + 1))
+    done
+    [ -b "/dev/pmem$INDEX" ] || die "pmem layer $INDEX did not appear"
+    $BB mount -n -t erofs -o ro,dax=always "/dev/pmem$INDEX" "$LOWER" \
+        || die "mount read-only pmem layer $INDEX with DAX"
+    [ -f "$LOWER/.aenv-dax-probe" ] && [ -s "$LOWER/.aenv-dax-probe" ] \
+        && [ ! -L "$LOWER/.aenv-dax-probe" ] || die "missing non-empty regular DAX probe"
+    /agentenv/dax-check "$LOWER/.aenv-dax-probe" \
+        || die "pmem lower is not file-DAX capable"
+    /agentenv/dax-check --tree "$LOWER" \
+        || die "a common regular file lacks DAX; compressed/fallback lower refused"
+    # Binding order is bottom to top; OverlayFS lists highest priority first.
+    LOWERS="$LOWER${LOWERS:+:$LOWERS}"
+    INDEX=$((INDEX + 1))
+done
+
+$BB mount -n -t overlay overlay \
+    -o "lowerdir=$LOWERS,upperdir=/mnt/write/.agentenv-overlay/upper,workdir=/mnt/write/.agentenv-overlay/work" \
+    /mnt/user || die "mount private overlay root"
+/agentenv/dax-check /mnt/user/.aenv-dax-probe \
+    || die "overlay root lost DAX; refusing to claim file-cache sharing"
+/agentenv/dax-check --tree /mnt/user \
+    || die "a visible base file lost DAX through OverlayFS"
+
+# OverlayFS holds backing mount references across the old-root lazy detach.

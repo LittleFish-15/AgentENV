@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aenv-ub-provider"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Immutable UB image provider for AgentENV"
+license = {text = "MIT"}
+
+[project.scripts]
+aenv-ub-provider = "aenv_ub_provider.service:main"
+
+[tool.setuptools.packages.find]
+include = ["aenv_ub_provider"]

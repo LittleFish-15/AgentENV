@@ -1,0 +1,43 @@
+"""Bind trusted, prebuilt DAX filesystem images to committed source identities."""
+from pathlib import Path
+import os
+from . import contract
+from .io import atomic_json, read_json
+
+
+def rootfs(source, image_paths, socket_path, max_bytes, runtime, output):
+    contract.validate_device_runtime(runtime)
+    entries = []
+    for image in image_paths:
+        path = Path(image).resolve(strict=True)
+        backing = contract.make_spec(path, socket_path)
+        if backing['bytes'] % contract.ALIGN:
+            raise ValueError('Prebuilt DAX image must be padded to 2MiB')
+        entries.append({'path': str(path), 'backing': backing})
+    contract.validate_catalog({'version': 1, 'objects': entries}, socket_path, max_bytes)
+    binding = {'version': 2, 'sourceImage': contract.image_identity(source, 0),
+               'layers': [entry['backing'] for entry in entries],
+               'maxPmemBytes': max_bytes, 'deviceRuntime': runtime}
+    output = Path(output)
+    output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
+    atomic_json(output / 'binding.json', binding)
+    atomic_json(output / 'image-catalog.json', {'version': 1, 'objects': entries})
+    return binding
+
+
+def relocate(binding_path, socket_path, runtime, output):
+    binding = read_json(binding_path)
+    if (set(binding) != {'version', 'sourceImage', 'layers', 'maxPmemBytes', 'deviceRuntime'}
+            or type(binding['version']) is not int or binding['version'] != 2):
+        raise ValueError('Only native device rootfs v2 can be relocated')
+    contract.validate_device_runtime(runtime)
+    layers = [dict(contract.validate_spec(layer), socket=socket_path) for layer in binding['layers']]
+    if any(layer['bytes'] % contract.ALIGN for layer in layers):
+        raise ValueError('Invalid relocated pmem alignment')
+    contract.validate_catalog({'version': 1, 'objects': [{'backing': layer} for layer in layers]},
+                              socket_path, binding['maxPmemBytes'])
+    binding.update(layers=layers, deviceRuntime=runtime)
+    output = Path(output)
+    output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
+    atomic_json(output / 'binding.json', binding)
+    return binding

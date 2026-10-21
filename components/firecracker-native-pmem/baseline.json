@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "source_note": "Exact reviewed source capture; hashes are not an attestation of the deployed FC binary or an inferred upstream tag. No changes to PmemConfig or snapshot serialization schema.",
+  "files": {
+    "src/vmm/src/devices/virtio/pmem/mod.rs": "87f0d7926e0dd735ab011bf70a6cd7d3284e33d3488620e6421a08f5e48ea461",
+    "src/vmm/src/devices/virtio/pmem/device.rs": "f54bfaeb32c52a16387223007f1420c5c0944417b0b8cca5218b1eb9ee13155d",
+    "src/vmm/src/devices/virtio/pmem/persist.rs": "d37447b0896c8d018e4d48badfa30b7e1f3512030147bf850bc076192b9f05af",
+    "src/vmm/src/lib.rs": "52793bc23b8a79cc33e351cd5010f9b7ebb849bf2003283b059a7e22fa282121"
+  },
+  "native_module_sha256": "6f6c579326692752b719e1097e2a1762a42ba067a8c8f652c3d17cd06fa9b831",
+  "patch": "native-pmem-fd-v2.patch"
+}

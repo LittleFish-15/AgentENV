@@ -18,8 +18,20 @@ if $BB mount -n -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null; then
     done
 fi
 
-# Default writable user image.
-$BB mount -n -o rw /dev/vdb /mnt/user || die "mount /dev/vdb"
+# Default writable user image, or explicitly selected pmem/DAX cold-boot layout.
+PMEM_COUNT=""
+for ARG in $($BB cat /proc/cmdline); do
+    case "$ARG" in
+        aenv_pmem_rootfs=*)
+            [ -z "$PMEM_COUNT" ] || die "duplicate pmem rootfs argument"
+            PMEM_COUNT="${ARG#aenv_pmem_rootfs=}" ;;
+    esac
+done
+if [ -n "$PMEM_COUNT" ]; then
+    . /agentenv/pmem-rootfs
+else
+    $BB mount -n -o rw /dev/vdb /mnt/user || die "mount /dev/vdb"
+fi
 
 # Minimal user images may not ship the directories that become mount targets
 # after pivot_root. Create them on the mounted user rootfs before switching.
