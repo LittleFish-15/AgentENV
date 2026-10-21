@@ -24,7 +24,7 @@ ROOT = Path('/home/jwk/agent')
 CORE = '6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
 ORIGINAL = 'ae9c62693839ce7effa2b45df31c0039ae4f9fbc'
 SOURCE = 'sha256:cf786498f77bf4ba6235156ab8540d0b9335e874e70b95efbeb53168e0dce68d'
-MODULE_PINS = {'cohort_engine': 'b0c3d818e45eebdcc909ee859fb63a002c10ac264eb9e2a87fb36babf782b45d', 'ram_observer': '0b8ea355e4e0dd6ad8422968e63ff5dd9b640166cd29406096480589c6cc80af', 'public_workload': 'dfd483df3307a3a677dfc2bb1f4559b76aea3fb8ad4cc200832d572fb6a44490'}
+MODULE_PINS = {'cohort_engine': 'b0c3d818e45eebdcc909ee859fb63a002c10ac264eb9e2a87fb36babf782b45d', 'ram_observer': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload': 'dfd483df3307a3a677dfc2bb1f4559b76aea3fb8ad4cc200832d572fb6a44490'}
 
 
 def need(ok, reason):
@@ -150,7 +150,7 @@ def capacity(kind):
     return {'limit': maximum, 'count': len(devices), 'requiredFree': required}
 
 
-def cgroup_memory(group):
+def cgroup_memory(group, scope='runtime_unit_charge_including_retained_pools_and_helpers'):
     try:
         need(isinstance(group, str) and group.startswith('/') and '..' not in group.split('/'), 'Invalid cgroup')
         directory = Path('/sys/fs/cgroup' + group)
@@ -159,10 +159,55 @@ def cgroup_memory(group):
         fields = dict(line.split() for line in (directory / 'memory.stat').read_text().splitlines())
         return {'available': True, 'currentBytes': current,
                 'statBytes': {k: int(fields[k]) for k in ('anon', 'file', 'kernel', 'shmem', 'slab') if k in fields},
-                'scope': 'runtime_unit_charge_including_retained_pools_and_helpers',
-                'UBProviderCostIncluded': False, 'componentValuesNotAdditive': True}
+                'scope': scope, 'UBPhysicalChargeComplete': False, 'componentValuesNotAdditive': True}
     except Exception as error:
         return {'available': False, 'errorType': type(error).__name__}
+
+
+def provider_metrics(node, observer):
+    result = {'available': False, 'scope': 'new_provider_process_and_cgroup_only',
+              'physicalUBChargedBytes': None, 'coverageIsPhysicalCharge': False,
+              'deviceMappingsMayBeUncharged': True}
+    try:
+        fields = unit_fields('jwk-ub-real-rootfs-' + node + '-v4.service')
+        need(fields.get('ActiveState') == 'active' and fields.get('User') == fields.get('Group') == 'jwk',
+             'New provider unit is not active under the expected user')
+        pid = int(fields['MainPID'])
+        need(pid > 1, 'Unexpected provider PID')
+        start = ticks(pid)
+        session = ROOT / ('r/up-a-v4' if node == 'node-a' else 'r/up-b-v4')
+        prepared = load(session / 'prepared.json')
+        owner = load(session / 'provider/owner.json')
+        need(prepared.get('node') == node and prepared.get('sourceImage') == SOURCE
+             and owner.get('state') == 'serving' and owner.get('format') == 'native-raw-v1'
+             and owner.get('role') == ('publish' if node == 'node-a' else 'import'),
+             'Provider journal does not identify the expected serving generation')
+        rows = owner.get('objects') if node == 'node-a' else owner.get('imports')
+        need(isinstance(rows, list) and 0 < len(rows) <= 8, 'Provider mapping evidence unavailable')
+        values = [row.get('backing_coverage_bytes') for row in rows]
+        coverage = sum(values) if all(type(v) is int and v > 0 for v in values) else None
+        result.update(available=True, pid=pid, startTicks=start,
+                      wholeProcess=observer.whole_process_metrics(pid, start),
+                      cgroup=cgroup_memory(fields['ControlGroup'], scope='provider_unit_charge_not_complete_device_memory_cost'),
+                      sdkReportedBackingCoverageBytes=coverage,
+                      logicalRequestBudgetBytes=prepared.get('logicalBudgetBytes'),
+                      manifestSha256=owner.get('manifestSha256'),
+                      allocationRecords=len(owner.get('objects', [])))
+        need(ticks(pid) == start and int(unit_fields('jwk-ub-real-rootfs-' + node + '-v4.service')['MainPID']) == pid,
+             'Provider process changed during observation')
+    except Exception as error:
+        result.update(available=False, errorType=type(error).__name__,
+                      reason=str(error)[:300] if isinstance(error, RuntimeError) else 'Provider observation unavailable or not started')
+    return result
+
+
+def sample_node(api, observer, base, node, phase, sids):
+    start = time.time_ns()
+    ram = observer.collect_ram(base, api.pid, api.ticks, sids)
+    charge = cgroup_memory(api.cgroup)
+    provider = provider_metrics(node, observer)
+    return {'phase': phase, 'startNs': start, 'endNs': time.time_ns(), 'ram': ram,
+            'runtimeCharge': charge, 'provider': provider, 'atomicSnapshot': False}
 
 
 def snapshot_evidence(base, sid, variant, binding):
@@ -376,7 +421,7 @@ def run(args):
                     'coldCacheClaimed': False, 'servicesChanged': False, 'SDKCalledByController': False,
                     'memfileCrossNodeCowImplemented': False, 'globalNetSavingBytes': None,
                     'rootfsHostAccessResidency': {'status': 'NA_NO_HOST_READ_OBSERVER_ATTACHED'},
-                    'UBPhysicalChargedBytes': None, 'privateUpperResidentBytes': None}
+                    'UBPhysicalChargedBytes': None, 'privateUpperMeasurement': 'per_sample_ram_privateUpper'}
         need(all(evidence['binarySha256'][name] == installation.get('binaries', {}).get(name)
                  for name in ('server', 'aenv')), 'Installed executable differs from its preparation receipt')
         state['runtimeContext'] = {key: evidence[key] for key in (
@@ -387,10 +432,7 @@ def run(args):
             save(state_path, value)
             save(work / 'report.json', {**evidence, 'cohort': value})
         def observe(phase, sids):
-            start = time.time_ns()
-            ram = observer.collect_ram(base, api.pid, api.ticks, sids)
-            return {'phase': phase, 'startNs': start, 'endNs': time.time_ns(),
-                    'ram': ram, 'runtimeCharge': cgroup_memory(api.cgroup)}
+            return sample_node(api, observer, base, args.node, phase, sids)
         cohort = engine.Cohort(api, state, persist, observe, workload, capacity,
                                lambda sid: snapshot_evidence(base, sid, args.variant, binding))
         result = cohort.run(image)

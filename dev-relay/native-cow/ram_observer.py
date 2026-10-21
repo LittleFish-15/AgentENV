@@ -3,7 +3,7 @@
 Derived from the already reviewed read-only collector. Private smaps mappings
 describe local snapshot CoW; they do not establish cross-node physical sharing.
 """
-import http.client,json,os,re,socket,stat,struct
+import ctypes,http.client,json,os,re,socket,stat,struct
 from pathlib import Path
 def require(ok,message):
     if not ok: raise RuntimeError(message)
@@ -159,6 +159,128 @@ def whole_process_metrics(pid,ticks):
         result.update(error_type=type(e).__name__,reason=str(e) if isinstance(e,RuntimeError) else 'Process metric unavailable')
     return result
 
+# Functions appended to the scoped RAM observer; no content-read sampling.
+
+
+def owned_regular(path, limit):
+    require(path.resolve(strict=True) == path, 'Redirected cache metadata path')
+    meta = path.stat()
+    require(stat.S_ISREG(meta.st_mode) and meta.st_uid == 1204 and 0 <= meta.st_size <= limit,
+            'Unexpected cache file metadata')
+    return meta
+
+
+def cache_path(value, config_dir, roots):
+    require(isinstance(value, str) and value and '\x00' not in value, 'Missing cache file path')
+    original = Path(value)
+    original = original if original.is_absolute() else config_dir / original
+    path = Path(os.path.abspath(original))
+    require(any(path.is_relative_to(root) for root in roots)
+            and original.resolve(strict=True) == path, 'Cache file outside owned scope or redirected')
+    return path
+
+
+def upper_files(base, cwd):
+    config_path = cwd / 'overlaybd/image.json'
+    before = owned_regular(config_path, 2 * 1024**2)
+    config = json.loads(config_path.read_text())
+    after = owned_regular(config_path, 2 * 1024**2)
+    require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+            'Rootfs config changed during cache binding')
+    lowers = config.get('lowers')
+    require(isinstance(lowers, list) and 0 < len(lowers) <= 128, 'Unexpected rootfs lower inventory')
+    lower_ids = set()
+    for row in lowers:
+        require(isinstance(row, dict) and not row.get('ub'), 'Unsupported rootfs lower placement')
+        path = cache_path(row.get('file'), config_path.parent, (cwd, base / 'state'))
+        meta = owned_regular(path, 128 * 1024**3)
+        lower_ids.add((meta.st_dev, meta.st_ino))
+    upper = config.get('upper')
+    require(isinstance(upper, dict), 'Rootfs writable upper absent')
+    result = []
+    for name in ('data', 'index'):
+        path = cache_path(upper.get(name), config_path.parent, (cwd,))
+        meta = owned_regular(path, 2 * 1024**3)
+        require((meta.st_dev, meta.st_ino) not in lower_ids, 'Upper aliases a lower file')
+        result.append({'kind': name, 'path': path, 'dev': meta.st_dev, 'inode': meta.st_ino})
+    require(len({(r['dev'], r['inode']) for r in result}) == len(result), 'Upper data/index alias')
+    return result, lower_ids
+
+
+def resident_pages(fd, size, page):
+    require(type(size) is int and 0 <= size <= 2 * 1024**3
+            and type(page) is int and 4096 <= page <= 65536 and page & (page - 1) == 0,
+            'Cache observation size/page bound differs')
+    if size == 0:
+        return 0
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    cached = 0
+    for offset in range(0, size, 64 * 1024**2):
+        length = min(64 * 1024**2, size - offset)
+        # PROT_NONE + MAP_SHARED: query cache metadata without dereferencing or
+        # faulting the content. No pread, page touching or cache eviction.
+        address = libc.mmap(None, length, 0, 1, fd, offset)
+        require(address not in (None, ctypes.c_void_p(-1).value), 'Cache observation mmap failed')
+        try:
+            vector = (ctypes.c_ubyte * ((length + page - 1) // page))()
+            require(libc.mincore(address, length, vector) == 0, 'Cache residency query unavailable')
+            cached += sum(bool(value & 1) for value in vector)
+        finally:
+            require(libc.munmap(address, length) == 0, 'Cache observation munmap failed')
+    return cached
+
+
+def upper_cache(base, cwd):
+    result = {'available': False, 'files': [], 'scope': 'private_host_upper_file_cache',
+              'contentReadOrFaulted': False, 'atomicSnapshot': False,
+              'includedInRuntimeCgroupCharge': 'may_overlap_do_not_add_to_cgroup_total'}
+    try:
+        selected, lower_ids = upper_files(base, cwd)
+        page = os.sysconf('SC_PAGESIZE')
+        for row in selected:
+            fd = os.open(row['path'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                before = os.fstat(fd)
+                require(stat.S_ISREG(before.st_mode) and before.st_uid == 1204
+                        and (before.st_dev, before.st_ino) == (row['dev'], row['inode']),
+                        'Upper identity changed before cache sampling')
+                count = resident_pages(fd, before.st_size, page)
+                after = os.fstat(fd)
+                require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+                        'Writable upper changed during sampling; no stable charge attributed')
+                result['files'].append({'kind': row['kind'], 'dev': row['dev'], 'inode': row['inode'],
+                                        'logicalBytes': before.st_size, 'allocatedFileBytes': before.st_blocks * 512,
+                                        'residentPageBytes': count * page})
+            finally:
+                os.close(fd)
+        result.update(available=True, lowerFileIdentities=sorted(lower_ids),
+                      residentPageBytes=sum(row['residentPageBytes'] for row in result['files']))
+    except Exception as error:
+        result.update(errorType=type(error).__name__, reason=str(error)[:400]
+                      if isinstance(error, RuntimeError) else 'Scoped upper observation unavailable')
+    return result
+
+
+def aggregate_upper(guests):
+    rows = [g.get('rootfsUpper', {}) for g in guests]
+    if not rows or not all(row.get('available') is True for row in rows):
+        return {'available': False, 'residentPageBytes': None, 'reason': 'Incomplete per-Guest upper observation'}
+    upper_ids = [(f['dev'], f['inode']) for row in rows for f in row['files']]
+    lower_ids = {tuple(identity) for row in rows for identity in row['lowerFileIdentities']}
+    if len(set(upper_ids)) != len(upper_ids) or set(upper_ids) & lower_ids:
+        return {'available': False, 'residentPageBytes': None, 'reason': 'Upper alias across Guests/lower files'}
+    return {'available': True, 'residentPageBytes': sum(row['residentPageBytes'] for row in rows),
+            'fileCount': len(upper_ids), 'allUpperFilesDistinct': True,
+            'scope': 'private_host_upper_file_cache_only', 'hostLowerAccessResidencyMeasured': False,
+            'addToRuntimeCgroupTotal': False}
+
+
 def collect_ram(base, runtime_pid, runtime_ticks, sids):
     result = {'available': False, 'scope': 'actual_guest_ram_vmas',
               'guests': [], 'crossNodeMemfileCowAccepted': False,
@@ -184,7 +306,9 @@ def collect_ram(base, runtime_pid, runtime_ticks, sids):
             require(log.resolve(strict=True) == log and log.stat().st_uid == 1204
                     and log.stat().st_size <= 16 * 1024**2, 'Unexpected own Guest log')
             backend = memory_backend(log.read_text())
-            maps = parse_guest_smaps((proc / 'smaps').read_text(), backend, 512 * 1024**2,
+            with (proc / 'smaps').open() as stream:smaps = stream.read(4 * 1024**2 + 1)
+            require(len(smaps) <= 4 * 1024**2, 'Guest smaps exceeds observation bound')
+            maps = parse_guest_smaps(smaps, backend, 512 * 1024**2,
                                      guest_regions(cwd, pid))
             metrics = {}
             for name in ('Rss', 'Pss', 'Private_Clean', 'Private_Dirty', 'Shared_Clean', 'Shared_Dirty', 'Swap'):
@@ -193,13 +317,16 @@ def collect_ram(base, runtime_pid, runtime_ticks, sids):
             require(identity(pid)[1] == ticks, 'Guest changed during sampling')
             found[sid] = {'sandboxId': sid, 'pid': pid, 'startTicks': ticks,
                           'wholeProcess': whole_process_metrics(pid, ticks),
+                          'rootfsUpper': upper_cache(base, cwd),
                           'guestRam': {'bytes': metrics, 'vmaCount': len(maps),
                                        'virtualBytes': sum(m['end'] - m['start'] for m in maps),
                                        'binding': 'PEERCRED_FC_API_INTERSECT_SMAPS',
                                        'clippedVmas': sum(bool(m.get('smaps_metrics_omitted_due_to_clipping')) for m in maps)}}
+            require(identity(pid)[1] == ticks, 'Guest changed during upper sampling')
         require(set(found) == set(sids), 'Not every scoped Guest was bound')
         require(identity(runtime_pid)[1] == runtime_ticks, 'Runtime changed during sample')
-        result.update(available=True, guests=[found[sid] for sid in sids])
+        guests = [found[sid] for sid in sids]
+        result.update(available=True, guests=guests, privateUpper=aggregate_upper(guests))
     except Exception as error:
         result.update(errorType=type(error).__name__, reason=str(error)[:400]
                       if isinstance(error, RuntimeError) else 'Read-only proc/API observation unavailable')

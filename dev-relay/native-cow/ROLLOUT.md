@@ -98,9 +98,15 @@ The coordinator does not add a KVM-compatible UB private-write fault mechanism.
 It does not attach a privileged RAM sampler or the Host lower-read observer, and
 it does not implement an atomic cross-node workload/measurement barrier. Ordinary
 `proc` permissions can leave RAM metrics unavailable. Host actual-access versus
-residency intersections, UB physical charge and full helper/upper/cache costs
+residency intersections, UB physical charge and complete helper/cache ownership
 remain missing. Sub-cgroup differences must not be presented as global net
 savings. See COHORT.md for exact measurement scope and formulas.
+
+Actual bound private-upper cache and the new provider's process/cgroup overhead
+are now sampled when available. Provider SDK-journal coverage is shown only as
+mapping evidence. Neither it nor provider RSS substitutes for total UB physical
+cost, and upper/Guest-cache values are not added to totals that already include
+them.
 
 Local checks exercise ordering, fail-stop behavior, integrity/refusal rules and
 the generated command structure. They do not execute SSH, Linux systemd, the

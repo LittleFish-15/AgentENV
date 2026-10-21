@@ -93,9 +93,27 @@ were executing throughout the whole sampling interval.
 
 Host lower access sets and their contemporaneous residency are **not collected
 by this revision**. Whole-file residency is never substituted. UB physical
-charge, private upper residency, complete helper cost and external sharing are
-also missing. The report leaves global net saving and cross-node sharing
+charge, complete helper cost and external sharing are also missing. The report
+leaves global net saving and cross-node sharing
 acceptance unavailable, even if a process or cgroup metric improves.
+
+For a bound Guest, the collector also resolves its actual
+`overlaybd/image.json`, normalizes legitimate relative-parent paths, and confines
+the data/index upper to that Guest's working directory. It checks upper inodes
+against every bound lower and other Guest's upper. `PROT_NONE` mapping plus
+`mincore` queries private Host upper cache without dereferencing file contents;
+size/identity/timestamp changes during a file sample make it unavailable.
+Logical and allocated file sizes are separate from resident page bytes. These
+upper values may already be in the Runtime cgroup, so they are not added again.
+
+The new provider's PID/start time, RSS/PSS, cgroup charge and SDK-journal backing
+coverage are recorded separately. The provider must identify this serving
+generation. A missing/not-yet-started provider is unavailable, not an assumed
+zero-cost UB base. Device mappings may be absent from RSS/PSS/cgroup accounting;
+SDK backing coverage is not physical allocation/residency. Both node references
+to one generation must never be summed as two independently allocated bases.
+The sample's end timestamp follows RAM, upper, Runtime and provider observations;
+it describes an interval, not an atomic instantaneous snapshot.
 
 Once the four reports are returned to one machine, the pure report generator
 produces `comparison.json` and `comparison.md` in a new directory:

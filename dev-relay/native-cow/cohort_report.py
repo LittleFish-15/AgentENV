@@ -93,6 +93,15 @@ def compare(reports):
         def charge(r):
             value = after_sample(r).get('runtimeCharge', {})
             return value.get('currentBytes') if value.get('available') is True else None
+        def upper(r):
+            ram = after_sample(r).get('ram', {})
+            if ram.get('available') is not True:
+                return None
+            value = ram.get('privateUpper', {})
+            return value.get('residentPageBytes') if value.get('available') is True else None
+        def guest_cache(r):
+            return average([(w.get('result') or {}).get('guestMemoryBytes', {}).get('Cached')
+                            for w in r['cohort'].get('workloads', [])])
         nodes[node] = {
             'sameBoot': same_boot, 'comparablePublicWorkload': compatible,
             'guestWorkloadMeanSeconds': delta(mean_seconds(original) if compatible else None,
@@ -101,6 +110,13 @@ def compare(reports):
                                                guest_ram_pss(native) if compatible else None),
             'runtimeCgroupChargeBytes': delta(charge(original) if compatible else None,
                                                charge(native) if compatible else None),
+            'privateUpperResidentBytes': delta(upper(original) if compatible else None,
+                                                upper(native) if compatible else None),
+            'guestReportedCachedMeanBytes': delta(guest_cache(original) if compatible else None,
+                                                    guest_cache(native) if compatible else None),
+            'guestCacheRootfsAttributionEstablished': False,
+            'originalProviderObservation': after_sample(original).get('provider'),
+            'nativeProviderObservation': after_sample(native).get('provider'),
             'runtimeChargeIsGlobalNetSaving': False,
             'originalConditionalProcessSharing': conditional_process_sharing(original),
             'nativeConditionalProcessSharing': conditional_process_sharing(native)}
@@ -111,12 +127,11 @@ def compare(reports):
             'memfileCrossNodeCowAccepted': False,
             'rootfsCrossNodePhysicalSharingAcceptedByThisReport': False,
             'rootfsHostAccessResidency': None, 'UBPhysicalChargedBytes': None,
-            'privateUpperResidentBytes': None,
             'unresolved': [
                 'Native Guest RAM private CoW is not implemented; local snapshot RAM CoW remains.',
                 'Provider publication/import and matching content alone do not attest physical cross-node backing.',
                 'This runner has no Host lower read observer; actual per-Guest access/residency intersections are NA.',
-                'UB physical charge and helper/cache/upper ownership are not fully measured; global net is NA.',
+                'Provider RSS/PSS/cgroup and upper cache are separate observations; device-backed UB physical charge and full cost ownership remain incomplete, so global net is NA.',
                 'Guest Cached is already within Guest RAM and must not be added again.',
                 'Each variant has one two-Guest cohort; timing is descriptive, not a statistical performance result.',
                 'Captures/Fork snapshots are retained; provider must stay alive until references are removed.',
@@ -128,12 +143,27 @@ def markdown(result):
              '**Global net saving: NA. Native cross-node memfile private CoW: not implemented.**', '',
              '| Node | Metric | Original | Native | Reduction |', '|---|---|---:|---:|---:|']
     for node, values in result['nodes'].items():
-        for name in ('guestWorkloadMeanSeconds', 'actualGuestRamPssSumBytes', 'runtimeCgroupChargeBytes'):
+        for name in ('guestWorkloadMeanSeconds', 'actualGuestRamPssSumBytes', 'runtimeCgroupChargeBytes',
+                     'privateUpperResidentBytes', 'guestReportedCachedMeanBytes'):
             row = values[name]
             def show(value):
                 return 'NA' if value is None else str(round(value, 6))
             lines.append('| ' + ' | '.join((node, name, show(row['original']), show(row['native']), show(row['reduction']))) + ' |')
     lines.extend(['', 'Runtime cgroup charge excludes the separately running UB provider. A positive difference here is not global net savings.', '',
+                  '## Provider observations', '',
+                  '| Node | Variant | RSS bytes | PSS bytes | Cgroup bytes | SDK coverage bytes (not physical cost) |',
+                  '|---|---|---:|---:|---:|---:|'])
+    for node, values in result['nodes'].items():
+        for variant, key in (('original', 'originalProviderObservation'), ('native', 'nativeProviderObservation')):
+            value = values.get(key) or {}
+            process, group = value.get('wholeProcess', {}), value.get('cgroup', {})
+            valid = value.get('available') is True
+            fields = [process.get('rss_bytes') if valid and process.get('available') is True else None,
+                      process.get('pss_bytes') if valid and process.get('available') is True else None,
+                      group.get('currentBytes') if valid and group.get('available') is True else None,
+                      value.get('sdkReportedBackingCoverageBytes') if valid else None]
+            lines.append('| ' + ' | '.join([node, variant, *[show(v) for v in fields]]) + ' |')
+    lines.extend(['', 'Device-backed UB memory can be uncharged here. Coverage values across two nodes are not additive physical allocations.', '',
                   '## Measurement and implementation gaps', ''])
     lines.extend('- ' + text for text in result['unresolved'])
     return '\n'.join(lines) + '\n'
