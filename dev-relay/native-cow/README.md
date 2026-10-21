@@ -1,24 +1,27 @@
 # Native CoW experimental relay
 
-Latest consolidated A entry: A_prepare_release_v3.py --run.
+Coordinated build preparation: `A_prepare_release_v4.py --run`.
+Core source: `6cdac56ed70284e89693e7bda0470a43ad9bd0b5`. Packet SHA256: `f9c80889c21e041c1b28420889cb8acd4270eed33ebc6a442cf0114c272f4ece`.
 
-This combines finishing the already resized own rootfs copy, building the
-coordinated Runtime/CLI/daemon, native verifier and snapshot-aware Firecracker,
-and running native protocol tests. No repeated 64 GiB copy/hash or resize.
-All source is embedded from core ccd03169cc217590d25c6daa04e576d175d67772;
-AGENTS.md symlink is omitted from the no-links source archive. Existing frozen
-dependency caches and build target caches are reused. No packages downloaded.
-The verifier lock uses only versions/checksums in the Runtime lock.
+This uses a new native-release-v4 build directory, finishes the already resized
+rootfs copy without repeating the 64 GiB copy or resize, then creates a new compact
+image containing the v3 static DAX execution marker. The final image is rehashed
+even when reusing a completed preparation receipt. Runtime, CLI, daemon, verifier,
+Firecracker and native protocol tests use coordinated pinned source and existing
+offline build caches. Image failure is reported independently of binary builds.
 
-Deployments and active services are not overwritten. Artifacts and their SHA256
-pins are staged under a new build directory. Image finish failure does not stop
-independent compilation; the combined report contains both outcomes. No SDK,
-Guest, ublk allocation, mount, service restart or hardware acceptance claim.
+Outputs: `/home/jwk/agent/builds/native-release-v4/return.json`, per-phase logs and
+`artifacts/`. Use only the report's `finalImage` when `rootfsReady` is true.
+Failed or partial directories are preserved; this build entry does not overwrite
+them or automatically retry them. Previous services and deployments stay intact.
 
-Important remaining work: native snapshot/Fork hardware acceptance, actual
-service activation with retained UB bases, Guest workload comparison and native
-memfile private CoW (unimplemented for the tested NC FD). This entry does not
-label a build or service health as final cross-node CoW success. Version-3
-content references require externally retained immutable base bytes/publications.
+This is build preparation, not a service activation or hardware acceptance run.
+No SDK, Guest, mount, ublk allocation or service changes are performed here.
+The native RAM private CoW implementation is still outstanding for the tested
+NC device FD. Native pmem capture/restore/Fork and execution from shared lower
+remain pending hardware validation. Keep immutable bases retained independently
+of Guest lease completion; content references are not distributed reference counts.
 
-SHA256: fc34ad67f7576fbf826227cfa3196b9c9088c2ebd0912a275b3eca8415299ac8
+`cow_accounting.py` contains tested set/accounting primitives, not a standalone
+hardware collector. It refuses cross-node PFN comparisons and incomplete net
+accounting. A successful preparation must not be reported as positive savings.
