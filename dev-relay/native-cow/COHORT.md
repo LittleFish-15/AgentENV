@@ -27,7 +27,7 @@ identify the received original image. The original run uses the existing
 `ae9c626` service and port 18080, verifies its installation and binary hashes,
 holds the existing `cow55-replay-node-X.lock`, and requires an empty running and
 paused sandbox inventory. It does not restart or reconfigure that service.
-The native run requires the new `6cdac56` service, a pinned v3 rootfs binding and
+The native run requires the new `d3e61ea` service, a pinned v3 rootfs binding and
 the same input image. Its `cohort.lock` also excludes rollback/base retirement.
 
 Each run does exactly one cold parent, one capture, one restore and one Fork.

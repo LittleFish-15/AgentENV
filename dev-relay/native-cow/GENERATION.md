@@ -2,7 +2,7 @@
 
 This phase uses production provider sources from core
 `099201ee8aea64dd0a8380befeca1b7108b8338a`. The coordinated Runtime/FC build stays
-at `6cdac56ed70284e89693e7bda0470a43ad9bd0b5`: the newer core commit changes only
+at `d3e61ea93495f1eff668934a003d4ca87c7cfa94`: the newer core commit changes only
 the Python provider control reply handling, its tests and documentation. It does
 not change the Runtime/FC ABI, Rust source or C++ adapter. Prepared receipts
 identify both `coreCommit` (Runtime) and `providerCoreCommit` explicitly.

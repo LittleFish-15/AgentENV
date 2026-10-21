@@ -21,7 +21,7 @@ import time
 import uuid
 
 ROOT = Path('/home/jwk/agent')
-CORE = '6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
+CORE = 'd3e61ea93495f1eff668934a003d4ca87c7cfa94'
 ORIGINAL = 'ae9c62693839ce7effa2b45df31c0039ae4f9fbc'
 SOURCE = 'sha256:cf786498f77bf4ba6235156ab8540d0b9335e874e70b95efbeb53168e0dce68d'
 MODULE_PINS = {'cohort_engine': '5d0cd8d4cf45b8301532517af832710c3928458f20c1cc64b0991500ddb1b89d', 'ram_observer': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_sync': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
@@ -372,7 +372,7 @@ def run(args):
     workload_path = Path(__file__).resolve().parent / 'public_workload.py'
     workload_source = read(workload_path).decode()
     need(hashlib.sha256(workload_source.encode()).hexdigest() == MODULE_PINS['public_workload'], 'Workload source differs')
-    native_base = ROOT / 'deployments/agentenv-native-6cdac56'
+    native_base = ROOT / 'deployments/agentenv-native-d3e61ea'
     seed = load(native_base / 'rootfs-inputs.json')
     need(seed.get('status') == 'ORIGINAL_ROOTFS_INPUTS_SEEDED_NOT_GUEST_ACCEPTANCE'
          and seed.get('coreCommit') == CORE and seed.get('node') == args.node and seed.get('sourceImage') == SOURCE,
@@ -394,7 +394,7 @@ def run(args):
         need(binding.get('version') == 3 and binding.get('sourceImage') == SOURCE, 'Native v3 source differs')
         port = definition['apiPort']
         need(type(port) is int and 18082 <= port <= 18089, 'Native port differs')
-        unit = 'jwk-aenv-native-6cdac56-' + args.node + '.service'
+        unit = 'jwk-aenv-native-d3e61ea-' + args.node + '.service'
         journal_dir = base
     else:
         port = 18080

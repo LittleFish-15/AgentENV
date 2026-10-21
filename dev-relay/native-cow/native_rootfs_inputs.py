@@ -18,8 +18,8 @@ import subprocess
 import tarfile
 
 ROOT=Path('/home/jwk/agent')
-DEPLOYMENT=ROOT/'deployments/agentenv-native-6cdac56'
-CORE='6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
+DEPLOYMENT=ROOT/'deployments/agentenv-native-d3e61ea'
+CORE='d3e61ea93495f1eff668934a003d4ca87c7cfa94'
 HELPER_SHA='424ddd4cb3edc36f52b79081fedbfda67fed569578df0d7a323824611d94e048'
 OCI=ROOT/'relay/reports/node-a-cow-parent-mbw69dma/image'
 OCI_DIGEST='sha256:039f1b18eb5c1bf56c074234e718af2f6156cbb729d638f05d1d8cf95dffe409'
@@ -233,7 +233,7 @@ def receive(archive_path,pin,destination):
 
 
 def unit_absent(node):
-    result=subprocess.run(['/usr/bin/systemctl','show','jwk-aenv-native-6cdac56-'+node+'.service',
+    result=subprocess.run(['/usr/bin/systemctl','show','jwk-aenv-native-d3e61ea-'+node+'.service',
                            '--property=LoadState','--value'],capture_output=True,text=True,timeout=10)
     need(result.stdout.strip()=='not-found','New Runtime already exists; never seed a running state')
 

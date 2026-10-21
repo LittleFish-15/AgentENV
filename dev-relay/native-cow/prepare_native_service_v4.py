@@ -11,12 +11,12 @@ BASE_SOURCE_SHA = '33fe0c6770f6e62158744b1ac2d6ea033132cd9ad5247b7c09d44f2c147b6
 ROOT = Path('/home/jwk/agent')
 BASE = ROOT / 'deployments/agentenv-ae9c626-baseline'
 LEGACY = ROOT / 'deployments/agentenv-ub-b019f27'
-D = ROOT / 'deployments/agentenv-native-6cdac56'
+D = ROOT / 'deployments/agentenv-native-d3e61ea'
 RUNTIME = ROOT / 'r/native-a-v1'
 FC_WORK = ROOT / 'r/fc-a-native'
 UNIT = 'jwk-aenv-native-fe63038-node-a.service'
 OLD_UNITS = ('jwk-aenv-ae9c626-node-a.service','jwk-aenv-ub-b019f27-node-a.service')
-COMMIT = '6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
+COMMIT = 'd3e61ea93495f1eff668934a003d4ca87c7cfa94'
 CORE_TREE = '40b521b5c94312a66d4325f29017000eaf642404'
 KERNEL_SHA = '04b12a7409b60c63bc807148826969d30ecb4d93a88ffc7690c22bcc06676752'
 POLICY_SHA = 'afa4de05b17b89dec5c9a8f03b4852f836b45b28c76f6bdde812bd84ede2af00'
@@ -30,7 +30,7 @@ def select_node(node):
     NODE = node
     HOST = 'server1' if node == 'node-a' else 'agent1'
     suffix = 'a' if node == 'node-a' else 'b'
-    UNIT = 'jwk-aenv-native-6cdac56-' + node + '.service'
+    UNIT = 'jwk-aenv-native-d3e61ea-' + node + '.service'
     RUNTIME = ROOT / ('r/native-' + suffix + '-v4')
     FC_WORK = ROOT / ('r/fc-' + suffix + '-v4')
     OLD_UNITS = ('jwk-aenv-ae9c626-' + node + '.service',
@@ -235,7 +235,7 @@ if definition.get('rootfsBinding'):
  seeded=json.loads(p.read_bytes())
  binding=json.loads(Path(definition['rootfsBinding']['path']).read_bytes())
  assert seeded.get('status')=='ORIGINAL_ROOTFS_INPUTS_SEEDED_NOT_GUEST_ACCEPTANCE'
- assert seeded.get('coreCommit')=='6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
+ assert seeded.get('coreCommit')=='d3e61ea93495f1eff668934a003d4ca87c7cfa94'
  assert seeded.get('node')==definition['node'] and seeded.get('sourceImage')==binding.get('sourceImage'),'Seeded source/binding differ'
  source=Path(seeded['sourceConfig']);assert source.resolve(strict=True)==source and source.is_relative_to(Path(DEPLOYMENT)/'state/image-cache/configs')
  assert source.stat().st_uid==1204 and stat.S_ISREG(source.stat().st_mode) and 0<source.stat().st_size<=2*1024**2

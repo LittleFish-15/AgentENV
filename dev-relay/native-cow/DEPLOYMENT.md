@@ -1,6 +1,6 @@
 # Coordinated native Runtime preparation and recovery
 
-Core source is pinned to `6cdac56ed70284e89693e7bda0470a43ad9bd0b5`.
+Core source is pinned to `d3e61ea93495f1eff668934a003d4ca87c7cfa94`.
 These entries do not claim that native RAM private CoW is implemented, that
 services are deployed, or that native pmem snapshots passed hardware tests.
 
@@ -29,9 +29,9 @@ block. It does not execute systemd commands. The existing namespace, capability
 and proxy launcher is reused. It preserves the original Runtime, earlier
 experimental Runtimes, `ubsmd.service` and `ubse.service`.
 
-The new units are `jwk-aenv-native-6cdac56-node-a.service` and
-`jwk-aenv-native-6cdac56-node-b.service`, with node-local deployment directory
-`/home/jwk/agent/deployments/agentenv-native-6cdac56`. The assigned loopback port
+The new units are `jwk-aenv-native-d3e61ea-node-a.service` and
+`jwk-aenv-native-d3e61ea-node-b.service`, with node-local deployment directory
+`/home/jwk/agent/deployments/agentenv-native-d3e61ea`. The assigned loopback port
 is selected from 18082 through 18089 and recorded in the immutable definition.
 The preparation report is saved as `prepare.json` and includes the health
 command. Health establishes service readiness, not Guest or CoW acceptance.

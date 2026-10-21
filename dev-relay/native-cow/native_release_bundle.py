@@ -14,7 +14,7 @@ import re
 import stat
 import tarfile
 
-CORE = '6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
+CORE = 'd3e61ea93495f1eff668934a003d4ca87c7cfa94'
 TREE = '40b521b5c94312a66d4325f29017000eaf642404'
 POLICY = 'afa4de05b17b89dec5c9a8f03b4852f836b45b28c76f6bdde812bd84ede2af00'
 BINARIES = ('server','aenv','uvm-ublk-daemon','aenv-native-fd-verify','firecracker')

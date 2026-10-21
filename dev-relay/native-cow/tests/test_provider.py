@@ -72,7 +72,7 @@ class Provider(unittest.TestCase):
     def test_previous_retire_intent_prevents_a_second_control_request(self):
         class P(PurePosixPath):
             def exists(self):return self.name=='retire-intent.json'
-        deployment=P('/home/jwk/agent/deployments/agentenv-native-6cdac56')
+        deployment=P('/home/jwk/agent/deployments/agentenv-native-d3e61ea')
         def load(path):
             if path.name=='cohort-state.json':return {'phase':'quiesced','openRequests':[],'sandboxIds':[],'outcomeUncertain':False}
             if path.name=='owner.json':return {'state':'serving'}
@@ -185,7 +185,7 @@ class Provider(unittest.TestCase):
             def resolve(self,strict=False):return self
             def is_dir(self):return True
             def iterdir(self):return iter([self/'retained-snapshot.json'])
-        deployment=P('/home/jwk/agent/deployments/agentenv-native-6cdac56')
+        deployment=P('/home/jwk/agent/deployments/agentenv-native-d3e61ea')
         def load(path):
             if str(path).endswith('cohort-state.json'):
                 return {'phase':'quiesced','openRequests':[],'sandboxIds':[],'outcomeUncertain':False}
