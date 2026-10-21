@@ -156,6 +156,16 @@ def freeze_admission(provider):
         provider.retiring = True
 
 
+def control_reply(stream, reply):
+    # A client disconnect cannot change resource ownership. In particular, a
+    # lost refusal must not terminate the serving owner, and a lost completion
+    # reply must not overwrite an already durable release with "unresolved".
+    try:
+        contract.send_json(stream, reply)
+    except OSError:
+        pass
+
+
 def serve(config, selected, manifest):
     import fcntl
     ordinary_linux()
@@ -231,7 +241,7 @@ def serve(config, selected, manifest):
                         raise ValueError('Importer retirement only releases its own mappings')
                     freeze_admission(provider)
                 except Exception as error:
-                    contract.send_json(stream, {'state': 'refused', 'reason': str(error)[:1000]})
+                    control_reply(stream, {'state': 'refused', 'reason': str(error)[:1000]})
                     continue
                 # No timeout, process death or local disconnect substitutes for remote receipts.
                 provider.stop()
@@ -250,7 +260,7 @@ def serve(config, selected, manifest):
                 if config['role'] == 'import':
                     atomic_json(work / 'release.json', {'version': 1, 'ownerId': manifest['ownerId'],
                         'readerId': config['readerId'], 'manifestSha256': identity(manifest), 'state': 'released'})
-                contract.send_json(stream, {'state': 'released'})
+                control_reply(stream, {'state': 'released'})
                 return
     except BaseException as error:
         journal({'state': 'unresolved_preserved', 'errorType': type(error).__name__, 'reason': str(error)[:1000]})

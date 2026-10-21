@@ -137,6 +137,13 @@ identity. Unknown readers or revived imports invalidate retirement authorization
 Keep the provider running until the explicit retirement succeeds. Any live local
 Guest/inherited child lease refuses retirement.
 
+A disconnected control client does not authorize or undo resource operations.
+Failure to deliver a refusal keeps the owner serving. Once cleanup and its
+release journal/receipt have completed, failure to deliver the completion reply
+keeps that durable released state. Reconcile the journal and exact release
+receipt instead of repeating retirement after a lost reply. A cleanup failure
+still records an unresolved state and does not issue a release receipt.
+
 The owner journal is fsynced before each allocation; unknown allocation outcomes
 are preserved without retrying a new name. Interruptions retain published UB
 objects for reconciliation, including when a process dies. Never remove a failed
