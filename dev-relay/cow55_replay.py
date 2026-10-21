@@ -10,7 +10,7 @@ ROOT=Path('/home/jwk/agent');BASE=ROOT/'deployments/agentenv-ae9c626-baseline'
 PENDING=ROOT/'relay/cow55-replay-node-a.pending.json';LOCK=ROOT/'relay/cow55-replay-node-a.lock'
 BUILDER_SHA='9bbde92ad5e6552fd22574396c1e72b59c7fe3c66ddbb89150abb604275e86a9'
 COLLECTOR_SHA='3ccf6de2e9bcafcff7d00cff62a5c82e3ae1d48804c41fbf881be626d9d6fdf5'
-READER_SHA='e79e424d91078c3f035e1454702805d6e8d5b76404b8fbaddac9b7385c0b930c'
+READER_SHA='b89d9cf25fbbbb0d71ef1b57d42b300654d4a6df251967c8df6a111852413d30'
 PROCESS_SUMMARY_SHA='8778b697d99b54de027bf674b61cd9e50b7173e2b70d4eb1ccbabd04f0acd554'
 ROOTFS_SUMMARY_SHA='79d330c4e72d87224cd7d45496d1a569b7610ad8edb7dad70d06250185e3236c'
 B=H=R=None
@@ -385,6 +385,7 @@ class Cohort:
             need(len(self.created)==self.max_guests and not self.stop.is_set(),'Incomplete cohort; no replay')
             pids=R.find_firecrackers(self.api.identity[0]);need(len(pids)==self.max_guests,'Unexpected scoped Firecracker count')
             pairs=[{'template_id':self.jobs[i]['template_id'],'catalog_sha256':self.jobs[i]['catalog_sha256'],
+                    'recorded_wait_seconds':sum(step['delay'] for step in self.jobs[i]['steps']),
                     'sandbox_ids':[self.jobs[i]['sandbox_id'],self.jobs[i+1]['sandbox_id']]} for i in range(0,self.max_guests,2)]
             scope={'template_count':self.template_count,'run_id':self.run_id,'main_pid':self.api.identity[0],'main_start_ticks':self.api.identity[1],
                 'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'memory_bytes':4096*1024**2,'pairs':pairs,

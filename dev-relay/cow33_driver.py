@@ -185,7 +185,9 @@ def main():
             'device_budget':budget,'ublk_before':before,'driver_modified':False,'SDK_called':False,'B_accessed':False}
         if args.mode=='plan':print('BEGIN_RETURN_REPORT');print(json.dumps(plan,indent=2));print('END_RETURN_REPORT');return 0
         m.need(not m.PENDING.exists(),'This batch receipt exists; no blind retry')
-        m.need(budget['fits'],'Observed device capacity insufficient; no service/driver changes attempted')
+        if not budget['fits']:
+            plan['status']='STOPPED_COW33_CAPACITY_NO_GUEST'
+            print('BEGIN_RETURN_REPORT');print(json.dumps(plan,indent=2));print('END_RETURN_REPORT');return 1
         resolution=old_attempt_absent(api)
         adjusted=dict(build,original_identity=list(EXPECTED_RUNTIME),cases=built)
         subset=dict(inputs,cohort=dict(inputs['cohort'],cases=batch_cases))

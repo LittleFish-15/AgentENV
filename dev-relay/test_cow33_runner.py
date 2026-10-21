@@ -71,6 +71,12 @@ class SmallCohorts(unittest.TestCase):
         self.assertEqual(c.report['restore_calls'],0);self.assertEqual(c.report['max_guests'],32)
 
 class Reporting(unittest.TestCase):
+    def test_phase_transition_does_not_delay_short_replay_for_300_seconds(self):
+        reader=module('cow55_reader')
+        self.assertEqual(reader.physical_wave_wait_seconds('baseline','replay',10),0)
+        self.assertEqual(reader.physical_wave_wait_seconds('replay','final_hold',10),0)
+        self.assertEqual(reader.physical_wave_wait_seconds('replay','replay',10),290)
+        self.assertEqual(reader.physical_wave_wait_seconds('replay','replay',350),0)
     def test_markdown_uses_actual_reducer_field_names(self):
         process=module('cow55_process_summary');s=process.Summary()
         s.add(dict(run_id='r',variant='original',mode='continuous',node='node-a',boot_id='boot',phase='replay',template_id='template',

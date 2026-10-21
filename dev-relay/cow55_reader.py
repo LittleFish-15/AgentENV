@@ -5,6 +5,9 @@ file writes, process signals, service changes, Guest commands, or SDK calls.
 """
 import threading
 
+def physical_wave_wait_seconds(wave_phase,current_phase,elapsed):
+    return 0 if wave_phase!=current_phase else max(0,300-elapsed)
+
 def cohort_wire_send(client,value):
     data=json.dumps(value,separators=(',',':')).encode()
     require(0<len(data)<=4*1024**2,'Frame exceeds bound');client.sendall(struct.pack('!I',len(data))+data)
@@ -154,7 +157,9 @@ def cohort_reader(scope,endpoint):
             wave=0;page=os.sysconf('SC_PAGESIZE')
             while not stop.is_set():
                 began=time.time()
-                for pair in scope['pairs']:
+                with phase_lock:wave_phase=phase['name']
+                # Short trajectories need a replay sample before they finish.
+                for pair in sorted(scope['pairs'],key=lambda p:p.get('recorded_wait_seconds',3600)):
                     if stop.is_set():break
                     start=time.time();before_phase=current_phase(pair['sandbox_ids'])
                     row={'template_id':pair['template_id'],'sandbox_ids':pair['sandbox_ids'],'wave':wave,'started_unix':start,'phase':before_phase,'available':False}
@@ -169,7 +174,11 @@ def cohort_reader(scope,endpoint):
                                    available=stable and before_phase==current_phase(pair['sandbox_ids']),raw_pfns_output=False,cross_node_comparison=False)
                     except Exception as e:row.update(error_type=type(e).__name__,reason=str(e) if isinstance(e,RuntimeError) else 'Scoped physical-page sample unavailable')
                     row['finished_unix']=time.time();send('physical',row)
-                wave+=1;stop.wait(max(.01,300-(time.time()-began)))
+                wave+=1
+                while not stop.is_set():
+                    with phase_lock:current=phase['name']
+                    wait=physical_wave_wait_seconds(wave_phase,current,time.time()-began)
+                    if wait<=0 or stop.wait(min(1,wait)):break
 
         for fn in (process_loop,cache_loop,physical_loop):
             t=threading.Thread(target=lambda f=fn:guarded(f),daemon=True);t.start();threads.append(t)
