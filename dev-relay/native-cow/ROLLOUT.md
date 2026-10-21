@@ -41,6 +41,8 @@ The automatic sequence is:
 5. Print **one A root block** containing the new provider and new Runtime unit
    activation. Copy that block into A's root terminal. The ordinary A terminal
    waits for provider/service readiness for up to 15 minutes.
+   A known terminal provider journal or failed/exited Runtime stops immediately;
+   it is not mislabeled as another 15 minutes of waiting for your root action.
 6. Transfer the newly published owner manifest to B and validate it against B's
    prepared content. Print **one B root block**. Copy it into B's root terminal.
    The same ordinary A terminal waits and then checks both new Runtime services.

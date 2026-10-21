@@ -39,6 +39,10 @@ def need(ok, reason):
         raise RuntimeError(reason)
 
 
+class TerminalReadinessFailure(RuntimeError):
+    pass
+
+
 def safe(path, existing=True):
     path = Path(path)
     need(path.is_absolute() and path.is_relative_to(ROOT) and path.resolve(strict=existing) == path,
@@ -267,11 +271,16 @@ def ready(node):
     import http.client
     ordinary(node)
     owner = load(ROOT / ('r/up-a-v4/provider/owner.json' if node == 'node-a' else 'r/up-b-v4/provider/owner.json'))
+    if owner.get('state') in ('unresolved_preserved', 'unresolved_create', 'released'):
+        raise TerminalReadinessFailure('New provider has stopped or failed; preserve its owner journal and inspect the phase logs')
     need(owner.get('state') == 'serving', 'Provider not serving yet')
     unit = 'jwk-aenv-native-6cdac56-' + node + '.service'
-    result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=ActiveState', '--value'],
+    result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=LoadState,ActiveState,ExecMainCode'],
                             capture_output=True, text=True, timeout=10)
-    need(result.returncode == 0 and result.stdout.strip() == 'active', 'New Runtime not active yet')
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    if fields.get('ActiveState') == 'failed' or (fields.get('ActiveState') == 'inactive' and int(fields.get('ExecMainCode', '0')) > 0):
+        raise TerminalReadinessFailure('New Runtime unit has failed or exited; preserve its installation and inspect the phase logs')
+    need(result.returncode == 0 and fields.get('ActiveState') == 'active', 'New Runtime not active yet')
     return {'status': 'NEW_PROVIDER_AND_RUNTIME_ACTIVE_NOT_GUEST_ACCEPTANCE', 'node': node}
 
 
@@ -343,8 +352,17 @@ def wait_ready(node):
                 ready(node)
             else:
                 r = subprocess.run(remote_command(['b-ready']), capture_output=True, timeout=30)
+                if r.returncode:
+                    try:
+                        failure = json.loads(r.stdout)
+                    except (ValueError, UnicodeDecodeError):
+                        failure = {}
+                    if failure.get('errorType') == 'TerminalReadinessFailure':
+                        raise TerminalReadinessFailure('B provider/Runtime reported a terminal readiness failure; inspect retained B journals')
                 need(r.returncode == 0, 'Waiting for B root activation')
             return
+        except TerminalReadinessFailure:
+            raise
         except Exception:
             pass
         if time.monotonic() - last >= 30:

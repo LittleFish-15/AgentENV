@@ -73,8 +73,10 @@ described in ROOTFS_INPUTS.md and GENERATION.md. The bounded local
 capture/restore/Fork batch, public workload and explicit-gap report are described
 in COHORT.md. They are implemented and fixture-tested, not target-executed.
 ROLLOUT.md describes the new A-side bootstrap candidate and its two scoped root
-blocks. Atomic two-node measurement coordination, privileged sampling and Host
-lower access observer integration are still outstanding. Do not label these
+blocks. Coordinated post-workload holding now keeps both node cohorts alive
+through their samples. The samples remain non-atomic. A privileged sampling
+fallback and Host lower access observer integration are still absent; ordinary
+permission failures remain NA. Do not label these
 entries as a fully accepted cross-node RAM/rootfs CoW implementation.
 
 Local validation: 6 deployment contract checks, 7 generated rollback checks

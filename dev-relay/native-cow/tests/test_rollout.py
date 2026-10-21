@@ -23,6 +23,35 @@ sync_spec.loader.exec_module(SYNC)
 
 
 class Tests(unittest.TestCase):
+    def test_failed_provider_is_terminal_before_service_poll(self):
+        with mock.patch.object(m, 'ordinary'), mock.patch.object(m, 'load', return_value={'state': 'unresolved_preserved'}), \
+                mock.patch.object(m.subprocess, 'run') as run:
+            with self.assertRaises(m.TerminalReadinessFailure):
+                m.ready('node-a')
+        run.assert_not_called()
+
+    def test_a_terminal_failure_does_not_wait_fifteen_minutes(self):
+        with mock.patch.object(m, 'ready', side_effect=m.TerminalReadinessFailure('failed')), \
+                mock.patch.object(m.time, 'sleep') as sleep:
+            with self.assertRaises(m.TerminalReadinessFailure):
+                m.wait_ready('node-a')
+        sleep.assert_not_called()
+
+    def test_loaded_unit_not_yet_executed_is_still_waiting(self):
+        response = types.SimpleNamespace(returncode=0, stdout='LoadState=loaded\nActiveState=inactive\nExecMainCode=0\n')
+        with mock.patch.object(m, 'ordinary'), mock.patch.object(m, 'load', return_value={'state': 'serving'}), \
+                mock.patch.object(m.subprocess, 'run', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'not active yet') as caught:
+                m.ready('node-a')
+        self.assertNotIsInstance(caught.exception, m.TerminalReadinessFailure)
+
+    def test_b_terminal_failure_does_not_wait_fifteen_minutes(self):
+        response = types.SimpleNamespace(returncode=1, stdout=b'{"errorType":"TerminalReadinessFailure"}', stderr=b'')
+        with mock.patch.object(m.subprocess, 'run', return_value=response), mock.patch.object(m.time, 'sleep') as sleep:
+            with self.assertRaises(m.TerminalReadinessFailure):
+                m.wait_ready('node-b')
+        sleep.assert_not_called()
+
     def pair_fixture(self, early=False, release_failure=False):
         epoch = 'a' * 32
         events, saved, phase = [], [], {'measuring': False}
