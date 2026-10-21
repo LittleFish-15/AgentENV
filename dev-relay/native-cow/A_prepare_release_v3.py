@@ -84,7 +84,7 @@ def main():
         rust = m['RUST']
         native = m['BASE'] / 'native'
         env = {'HOME': str(Path.home()), 'USER': 'jwk', 'LOGNAME': 'jwk', 'LANG': 'C.UTF-8',
-               'PATH': str(rust) + ':/usr/local/bin:/usr/bin:/bin', 'CARGO_HOME': str(m['CARGO_HOME']),
+               'PATH': str(rust) + ':' + str(native / 'bin') + ':/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin', 'CARGO_HOME': str(m['CARGO_HOME']),
                'CARGO_TARGET_DIR': str(m['TARGET']), 'CARGO_NET_OFFLINE': 'true', 'CARGO_BUILD_JOBS': '2',
                'CARGO_INCREMENTAL': '0', 'RUSTC': str(rust / 'rustc'), 'RUSTDOC': str(rust / 'rustdoc'),
                'CARGO_PROFILE_RELEASE_LTO': 'false', 'CARGO_PROFILE_RELEASE_DEBUG': '0',
@@ -92,6 +92,19 @@ def main():
                'LD_LIBRARY_PATH': str(native / 'lib') + ':' + str(native / 'fallback/lib'),
                'TMPDIR': str(WORK / 'tmp'), 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_NOSYSTEM': '1',
                'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CEILING_DIRECTORIES': str(WORK)}
+        pkg_dirs = [p for p in (native / 'lib/pkgconfig', ROOT / 'native/lib64/pkgconfig') if p.is_dir()]
+        if pkg_dirs:
+            env['PKG_CONFIG_PATH'] = ':'.join(map(str, pkg_dirs))
+        prior_build = json.loads(m['read'](ROOT / 'builds/agentenv-native-fe63038/return.json'))
+        need(prior_build.get('status') == 'THREE_CORE_BINARIES_BUILT_STAGED_NOT_DEPLOYED', 'Prior successful build receipt required')
+        for key, patterns in (('ROCKSDB_LIB_DIR', ('librocksdb.*',)), ('SNAPPY_LIB_DIR', ('libsnappy.*',)),
+                              ('LIBCLANG_PATH', ('libclang.so*', 'libclang-*.so*'))):
+            value = prior_build.get('explicitNativeBuildDirectories', {}).get(key)
+            if value:
+                directory = Path(value)
+                need(directory.is_absolute() and directory.resolve(strict=True) == directory and directory.is_dir()
+                     and any(any(directory.glob(pattern)) for pattern in patterns), 'Prior native dependency changed: ' + key)
+                env[key] = str(directory)
         cargo = str(rust / 'cargo')
         m['run']([cargo, 'build', '--release', '--offline', '--locked', '-p', 'agentenv', '--bin', 'server',
                   '-p', 'aenv', '--bin', 'aenv', '-p', 'uvm-ublk-daemon', '--bin', 'uvm-ublk-daemon'],
