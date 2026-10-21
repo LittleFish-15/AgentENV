@@ -86,6 +86,12 @@ aenv-ub-provider relocate-rootfs --binding PUBLISHER_BINDING \
 ```
 
 `bind-rootfs --lower-filesystem ext4` explicitly selects immutable ext4 lowers.
+Add `--snapshot-references` only with the matching version-3 Runtime/FC to enable
+content-based snapshot rebinding. Relocation preserves version 3 and content
+identity while replacing node-local sockets and binary pins. Immutable base
+images and UB publications must remain externally retained for the lifetime of
+referencing snapshots; this option does not provide distributed garbage
+collection, repository backups, or native Guest RAM private CoW.
 The default and omitted legacy `lowerFilesystem` field select EROFS. A binding
 uses one filesystem type for all its lowers; relocation preserves that choice.
 Prepare ext4 with 4KiB blocks, no inline data and no journal requiring replay.

@@ -283,6 +283,8 @@ def main():
     bind.add_argument('--max-bytes', type=int, required=True)
     bind.add_argument('--device-runtime', required=True)
     bind.add_argument('--lower-filesystem', choices=['erofs', 'ext4'], default='erofs')
+    bind.add_argument('--snapshot-references', action='store_true',
+                      help='Emit v3 content references; requires matching Runtime/FC and externally retained immutable bases')
     bind.add_argument('--output', required=True)
     relocate = commands.add_parser('relocate-rootfs')
     relocate.add_argument('--binding', required=True)
@@ -294,7 +296,7 @@ def main():
         runtime = read_json(args.device_runtime)
         if args.command == 'bind-rootfs':
             value = bindings.rootfs(args.source, args.image, args.socket, args.max_bytes,
-                                    runtime, args.output, args.lower_filesystem)
+                                    runtime, args.output, args.lower_filesystem, args.snapshot_references)
         else:
             value = bindings.relocate(args.binding, args.socket, runtime, args.output)
         print(json.dumps({'state': 'binding_prepared_no_sdk', 'bytes': sum(layer['bytes'] for layer in value['layers'])}))

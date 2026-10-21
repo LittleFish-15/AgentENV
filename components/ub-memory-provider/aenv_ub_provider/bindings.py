@@ -5,7 +5,7 @@ from . import contract
 from .io import atomic_json, read_json
 
 
-def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_filesystem='erofs'):
+def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_filesystem='erofs', snapshot_references=False):
     if lower_filesystem not in ('erofs', 'ext4'):
         raise ValueError('Native lower filesystem must be erofs or ext4')
     contract.validate_device_runtime(runtime)
@@ -17,7 +17,7 @@ def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_f
             raise ValueError('Prebuilt DAX image must be padded to 2MiB')
         entries.append({'path': str(path), 'backing': backing})
     contract.validate_catalog({'version': 1, 'objects': entries}, socket_path, max_bytes)
-    binding = {'version': 2, 'sourceImage': contract.image_identity(source, 0),
+    binding = {'version': 3 if snapshot_references else 2, 'sourceImage': contract.image_identity(source, 0),
                'layers': [entry['backing'] for entry in entries],
                'maxPmemBytes': max_bytes, 'deviceRuntime': runtime,
                'lowerFilesystem': lower_filesystem}
@@ -33,8 +33,8 @@ def relocate(binding_path, socket_path, runtime, output):
     required = {'version', 'sourceImage', 'layers', 'maxPmemBytes', 'deviceRuntime'}
     if (not isinstance(binding, dict) or not required <= set(binding)
             or set(binding) - required - {'lowerFilesystem'}
-            or type(binding['version']) is not int or binding['version'] != 2):
-        raise ValueError('Only native device rootfs v2 can be relocated')
+            or type(binding['version']) is not int or binding['version'] not in (2, 3)):
+        raise ValueError('Only native device rootfs v2/v3 can be relocated')
     lower_filesystem = binding.get('lowerFilesystem', 'erofs')
     if lower_filesystem not in ('erofs', 'ext4'):
         raise ValueError('Native lower filesystem must be erofs or ext4')
