@@ -1,25 +1,22 @@
 # Native CoW experimental relay
 
-Latest: native_pair_v1.py. Prepare on each node with --prepare node-a/node-b,
-review and run each printed root block, then --observe from ordinary A while
-both units run. The assistant never connects to the nodes; observation uses
-the user's existing A-to-B SSH. No new network service is exposed.
+Latest A entry: A_build_builtin_policy_v1.py --run. It copies the reviewed FC
+source into a new build directory, adds the strict GNU policy and fail-closed
+build-script change from clean core commit 56005a7, then builds offline using
+existing frozen inputs and the existing incremental target cache. The old
+staged executable and original source are verified unchanged. No SDK call or
+service deployment is made during the build. Core/main are not changed here.
 
-One 256 MiB Guest per node reads the same A UB base and writes a node-specific
-marker into its own overlay upper. Each checks the visible private marker,
-unchanged lower probe and common-file SHA every five seconds for about 300s.
-A causal observation sequence (A live, fresh B live reply, same A PID/start
-still live) proves overlap without comparing clocks across machines. Final
-acceptance also requires both normal Guest exits and B's real import release.
-Old successful release evidence and generation locks remain required. An
-unresolved Guest keeps its provider alive. Keep A's publisher alive throughout.
+The build must emit the same 2810-byte BPF as the externally supplied policy
+already validated on the nodes, and those bytes must be present in the new
+executable. On success it prints a reviewed cap0 KVM Guest block with neither
+an external seccomp filter nor a tracer. This verifies the new binary's normal
+built-in-policy path before deployment. Build completion alone is not a Guest
+pass, Runtime deployment, snapshot/Fork support or memfile private CoW.
 
-Preparation makes private tools copies and reuses already hash-pinned runners,
-FC, policy, kernel and UB generation. Root blocks create only new cap0 test
-units with process-scoped KVM/UBSMD groups. Existing services/host permissions
-and previous test evidence remain untouched. No active manifest or measured
-results are published. This is concurrent rootfs mechanism acceptance only,
-not original-CoW comparison, memfile private CoW, complete AgentENV integration
-or global net memory savings. Prior scripts are retained for provenance.
+Keep the existing A UB publisher alive. Do not rerun an existing build directory;
+inspect its return.json/build.log or use its saved root-review.txt as appropriate.
+Earlier concurrent and component measurement scripts remain for provenance.
+No credentials, active UB manifests, measured data or binaries are published.
 
-SHA256: 3464279312f9ffc59b8fa23a589c7e7c4ce321765fea8c2f9df2074c8e935875
+SHA256: 5ebedb9f5a06b580a482a12f9ae1a2f60a51df5e7c8c67aae26a48c5c4792308
