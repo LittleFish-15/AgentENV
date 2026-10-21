@@ -1,18 +1,36 @@
 # Native CoW experimental relay
 
-These field scripts intentionally use the reviewed lab layout. Core/main are
-unchanged. No credentials, active UB object manifest, captured measurements,
-private workload or binaries are included.
+This branch contains lab execution tooling. Core/main remain unchanged.
 
-Latest: `A_futex265_policy_guest_v5.py`. Run as the ordinary experiment user with
-`--run`, then review and paste its printed root block. It verifies the actual v4
-SIGSYS report (AArch64 VMM futex 98, operation 265 and bitset MATCH_ANY, all children reaped), retains the
-getpid and tgkill fixes, and adds only VMM futex with argument 1 equal to 265 and argument 5 equal to 4294967295. The strict trap
-default and every other rule remain unchanged. It reuses the existing compiler,
-FC binary and UB publisher. No SDK allocation, service restart or full build.
-It records bounded serial/stderr tails in the Guest result. Preparation is not a
-Guest pass; no cross-node CoW or memory benefit is asserted.
+## Rootfs component comparison
 
-SHA256: `d88bdc1f2578bb5f367030e1ca7352c098016a223f6259aff2399168d067563b`
+`rootfs_cache_compare.py --node node-a --dax-pass-report <actual-pass.json>
+--guest-config <actual-config.json> --run` prepares a private tools-image copy
+and prints a reviewed root block for a new capability-free KVM unit. Requires a
+real completed DAX pass, exact FC/kernel/base and passing seccomp policy pins.
+No existing service or UB publication is restarted. The operator keeps the UB
+publisher running. The script calls no UB SDK and creates at most two Guests at
+once, six in total: block N=1, pmem N=1, block N=2, pmem N=2. Each reads the same
+8 MiB synthetic file and holds for 30 seconds. All signed results are retained.
 
-The earlier getpid-v3 runner remains for provenance; do not rerun completed cases.
+It measures Guest Cached before/after, selected FC RSS/PSS when readable, scoped
+unit memory charges and regular-file cache observations. Inputs are hashed and
+prewarmed. UB remains alive in both modes and outside the measurement unit;
+global UB physical cost and global net savings remain NA. This cold-boot
+component test is not the original snapshot-CoW baseline, memfile private CoW,
+or cross-node acceptance. It writes results/return.json and results/report.md.
+
+The self-contained packet embeds source and the project-built static ARM64
+statx query helper (its Go source is also included). The helper runs inside the
+new Guest only. No production binaries, credentials, active UB manifest,
+captured data or private benchmark is published. Source/helper hashes are
+verified during extraction. Core branch is not modified.
+
+Packet SHA256: `f7294ddb13a76cc147a8958a80fa683d34a3e400916598b0cdb407b664f06384`
+
+## Earlier compatibility runners
+
+The getpid-v3, tgkill-v4 and futex-v5 field runners are retained for provenance.
+They add observed, scoped GNU ABI rules while preserving default-trap policies.
+Do not rerun a completed case. The v5 complete pass is a prerequisite for the
+comparison; it does not itself measure memory savings.
