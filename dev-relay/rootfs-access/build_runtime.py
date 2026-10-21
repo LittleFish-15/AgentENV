@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT=Path('/home/jwk/agent')
 CACHE=ROOT/'builds/agentenv-ub-build-v2'
 RUST=ROOT/'toolchains/agentenv-rust-1.99.0/rustup/toolchains/1.99.0-aarch64-unknown-linux-gnu/bin'
-STATE=ROOT/'relay/cow4-rootfs-access-build.json'
+STATE=ROOT/'relay/cow4-rootfs-access-build-v2.json'
 def need(ok,why):
     if not ok:raise RuntimeError(why)
 def save(path,value):
@@ -37,6 +37,31 @@ def unpack(source):
         raw=base64.b64decode(item['base64'],validate=True);need(hashlib.sha256(raw).hexdigest()==item['after_sha256'],'Patch bytes differ')
         p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(raw)
     need(hashlib.sha256((source/'Cargo.lock').read_bytes()).hexdigest()==LOCK_SHA,'Original Cargo.lock changed')
+
+def verify_calibration(directory):
+    code=base64.b64decode(ACCOUNTING_BASE64,validate=True)
+    need(hashlib.sha256(code).hexdigest()==ACCOUNTING_SHA,'Accounting source differs')
+    namespace={'__name__':'calibration_accounting'};exec(compile(code,'embedded-page-accounting','exec'),namespace)
+    value=json.loads((directory/'calibration-input.json').read_bytes())
+    key=(value['dev'],value['inode']);files={key:{'path':value['fixture'],'file_bytes':value['file_bytes']}}
+    bindings={value['source'+str(i)]:{'sandbox_id':str(i),'template_id':'calibration','lower_keys':{key},'upper_keys':set()} for i in (1,2)}
+    windows={str(i):(value['start_ns'],value['end_ns']) for i in (1,2)}
+    status=json.loads((directory/'trace.status.json').read_bytes())
+    with (directory/'trace.jsonl').open() as stream:
+        sets,audit=namespace['read_sets'](stream,status,bindings,windows,files,PATCH_SHA)
+    need(audit['records_checked']==3,'Warm repeat read missing or extra calibration events')
+    observed=sets['1']|sets['2'];resident,meta=namespace['resident_accessed_pages'](files,observed)
+    measured=namespace['pair_statistics'](sets['1'],sets['2'],resident)
+    need(measured['sandbox1_accessed_lower_bytes']==measured['sandbox2_accessed_lower_bytes']==8192,'Calibration source attribution differs')
+    need(measured['shared_accessed_host_pagecache_bytes']==4096 and measured['accessed_resident_union_bytes']==12288,'Calibration overlap differs')
+    all_pages={(key[0],key[1],i) for i in range(value['file_bytes']//4096)}
+    whole_resident,_=namespace['resident_accessed_pages'](files,all_pages)
+    need(whole_resident==all_pages,'Warm fixture no longer fully resident; calibration not established')
+    return {'status':'WARM_BUFFERED_READ_ATTRIBUTION_AND_RESIDENT_INTERSECTION_VERIFIED',
+        'whole_fixture_written_bytes':value['file_bytes'],'whole_fixture_resident_bytes':len(whole_resident)*4096,
+        'whole_fixture_residency_independently_measured':True,
+        'known_accessed_union_bytes':12288,'known_common_page_bytes':4096,'warm_repeated_read_observed':True,
+        'io_uring_actual_execution':True,'Guest_or_ublk_execution':False,'audit':audit,'measurement':measured,'sampler':meta}
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('mode',choices=('build','status'));a=parser.parse_args()
     need(sys.platform=='linux' and os.getuid()==os.geteuid()==1204 and socket.gethostname()=='server1','A/server1 ordinary jwk only')
@@ -95,6 +120,17 @@ def main():
                     report['failure_log_tail']=re.sub(r'e2b_[A-Za-z0-9._~-]+','[REDACTED]',tail)
                 need(p.returncode==0,name+' failed; read '+str(log))
         run('test_observer',['test','--frozen','-p','overlaybd','--features','io-uring,rootfs-read-trace','--lib','rootfs_access_trace::','--','--test-threads=1'])
+        run('build_calibration',['build','--frozen','--release','-p','overlaybd','--features','io-uring,rootfs-read-trace','--example','rootfs_access_calibration'])
+        calibration=work/'calibration';calibration.mkdir(mode=0o700)
+        probe=calibration/'probe'
+        with (CACHE/'target/release/examples/rootfs_access_calibration').open('rb') as src,probe.open('xb') as dst:shutil.copyfileobj(src,dst)
+        os.chmod(probe,0o700)
+        need(PATCH_SHA.encode() in probe.read_bytes(),'Calibration executable build digest differs')
+        print('PHASE=calibrate_warm_file_access_intersection',flush=True)
+        result=subprocess.run([str(probe),str(calibration)],env=env,capture_output=True,text=True,timeout=30)
+        report['phases']['run_calibration']=result.returncode
+        need(result.returncode==0,'Calibration failed: '+result.stderr[-4000:])
+        report['calibration']=verify_calibration(calibration);save(STATE,report)
         run('build_daemon',['build','--frozen','--release','-p','uvm-ublk-daemon','--features','overlaybd/rootfs-read-trace'])
         candidate=work/'candidate';candidate.mkdir();binary=candidate/'uvm-ublk-daemon-observe'
         with (CACHE/'target/release/uvm-ublk-daemon').open('rb') as src,binary.open('xb') as dst:shutil.copyfileobj(src,dst)
@@ -106,11 +142,11 @@ def main():
             digest=h.hexdigest()
         data=binary.read_bytes()
         need(PATCH_SHA.encode() in data and b'ROOTFS_ACCESS_OBSERVER_DISABLED' in data,'Shared-cache artifact does not attest this observer patch')
-        report.update(status='ROOTFS_ACCESS_OBSERVER_BUILT_NOT_DEPLOYED',candidate=str(binary),candidate_sha256=digest,
+        report.update(status='ROOTFS_ACCESS_OBSERVER_BUILT_AND_CALIBRATED_NOT_DEPLOYED',candidate=str(binary),candidate_sha256=digest,
             next_action='Return this report; do not replace installed binaries or restart services manually.')
     except BaseException as e:
         report.update(status='STOPPED_ROOTFS_ACCESS_BUILD',error_type=type(e).__name__,reason=str(e))
     finally:
         save(STATE,report);save(work/'return.json',report);os.close(lock)
     print('BEGIN_RETURN_REPORT');print(json.dumps(report,indent=2));print('END_RETURN_REPORT')
-    return 0 if report['status']=='ROOTFS_ACCESS_OBSERVER_BUILT_NOT_DEPLOYED' else 1
+    return 0 if report['status']=='ROOTFS_ACCESS_OBSERVER_BUILT_AND_CALIBRATED_NOT_DEPLOYED' else 1

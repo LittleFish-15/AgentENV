@@ -13,6 +13,8 @@ def build(destination,rustfmt):
     digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     prefix='"""Build-only packet: pinned public source; no workload or credentials."""\n'
     prefix+='BASE_COMMIT='+repr(maker.BASE)+'\nLOCK_SHA='+repr(lock)+'\nBASE_ARCHIVE='+repr(archive)+'\nPATCH_FILES='+repr(payload)+'\nPATCH_SHA='+repr(digest)+'\n'
+    accounting=(HERE/'page_accounting.py').read_bytes()
+    prefix+='ACCOUNTING_BASE64='+repr(base64.b64encode(accounting).decode())+'\nACCOUNTING_SHA='+repr(hashlib.sha256(accounting).hexdigest())+'\n'
     code=(HERE/'build_runtime.py').read_text(encoding='utf-8')
     footer='''
 if __name__=='__main__':

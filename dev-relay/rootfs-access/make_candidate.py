@@ -55,6 +55,8 @@ def prepare(destination,rustfmt=None):
     change('storage/ublk/src/impls/overlaybd_target.rs',lambda s:replace(s,'        let ctx = IoCtx::new(io_ring);','        let ctx = IoCtx::new(io_ring).with_read_source(&state.image_config_path);'))
     name='storage/overlaybd/src/rootfs_access_trace.rs';raw=(HERE/'rootfs_access_trace.rs').read_bytes();changes[name]=raw
     metadata[name]={'before_sha256':None,'after_sha256':hashlib.sha256(raw).hexdigest()}
+    name='storage/overlaybd/examples/rootfs_access_calibration.rs';raw=(HERE/'calibration.rs').read_bytes();changes[name]=raw
+    metadata[name]={'before_sha256':None,'after_sha256':hashlib.sha256(raw).hexdigest()}
     for name,raw in changes.items():
         p=destination/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(raw)
     if rustfmt:

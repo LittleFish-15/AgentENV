@@ -25,7 +25,8 @@ class BuildPacket(unittest.TestCase):
         self.assertFalse(list(self.path.iterdir()))
     def test_only_observation_source_delta(self):
         self.assertEqual(m.BASE_COMMIT,'ae9c62693839ce7effa2b45df31c0039ae4f9fbc')
-        self.assertEqual(len(m.PATCH_FILES),6)
+        self.assertEqual(len(m.PATCH_FILES),7)
+        self.assertIn('storage/overlaybd/examples/rootfs_access_calibration.rs',m.PATCH_FILES)
         self.assertNotIn('src/cfg.rs',m.PATCH_FILES)
         self.assertNotIn('Cargo.lock',m.PATCH_FILES)
         self.assertNotIn('storage/ublk-daemon/src/protocol.rs',m.PATCH_FILES)
