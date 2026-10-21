@@ -20,16 +20,23 @@ fi
 
 # Default writable user image, or explicitly selected pmem/DAX cold-boot layout.
 PMEM_COUNT=""
+PMEM_FSTYPE="erofs"
+PMEM_FSTYPE_SEEN=""
 for ARG in $($BB cat /proc/cmdline); do
     case "$ARG" in
         aenv_pmem_rootfs=*)
             [ -z "$PMEM_COUNT" ] || die "duplicate pmem rootfs argument"
             PMEM_COUNT="${ARG#aenv_pmem_rootfs=}" ;;
+        aenv_pmem_fstype=*)
+            [ -z "$PMEM_FSTYPE_SEEN" ] || die "duplicate pmem filesystem argument"
+            PMEM_FSTYPE_SEEN=1
+            PMEM_FSTYPE="${ARG#aenv_pmem_fstype=}" ;;
     esac
 done
 if [ -n "$PMEM_COUNT" ]; then
     . /agentenv/pmem-rootfs
 else
+    [ -z "$PMEM_FSTYPE_SEEN" ] || die "pmem filesystem requires pmem layers"
     $BB mount -n -o rw /dev/vdb /mnt/user || die "mount /dev/vdb"
 fi
 

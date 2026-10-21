@@ -140,6 +140,24 @@ impl MemoryBinding {
     }
 }
 
+/// Supported immutable pmem lower filesystems; each must prove actual Guest DAX.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RootfsFilesystem {
+    #[default]
+    Erofs,
+    Ext4,
+}
+
+impl RootfsFilesystem {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Erofs => "erofs",
+            Self::Ext4 => "ext4",
+        }
+    }
+}
+
 /// Experimental cold-boot layout. Capture is deliberately refused until the new
 /// pmem device/backing identities can be committed and restored durably.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +170,9 @@ pub struct RootfsBinding {
     /// Bottom to top OverlayFS priority; all layers must support guest DAX.
     pub layers: Vec<BackingSpec>,
     pub max_pmem_bytes: u64,
+    /// Immutable lower filesystem; omitted legacy bindings remain EROFS.
+    #[serde(default)]
+    pub lower_filesystem: RootfsFilesystem,
     /// Required only by version 2: explicitly pinned device-aware executables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_runtime: Option<DeviceRuntime>,
@@ -256,7 +277,11 @@ impl RootfsBinding {
 
     pub fn boot_arg(&self) -> Result<String> {
         self.validate()?;
-        Ok(format!("aenv_pmem_rootfs={}", self.layers.len()))
+        Ok(format!(
+            "aenv_pmem_rootfs={} aenv_pmem_fstype={}",
+            self.layers.len(),
+            self.lower_filesystem.as_str()
+        ))
     }
 }
 
@@ -685,6 +710,7 @@ mod tests {
             source_image: "test".into(),
             layers: vec![spec()],
             max_pmem_bytes: PMEM_ALIGNMENT,
+            lower_filesystem: RootfsFilesystem::Erofs,
             device_runtime: None,
         };
         assert!(root.validate().is_err());
@@ -756,9 +782,18 @@ mod tests {
             source_image: "test".into(),
             layers: vec![spec()],
             max_pmem_bytes: PMEM_ALIGNMENT,
+            lower_filesystem: RootfsFilesystem::Erofs,
             device_runtime: None,
         };
-        assert_eq!(root.boot_arg().unwrap(), "aenv_pmem_rootfs=1");
+        assert_eq!(
+            root.boot_arg().unwrap(),
+            "aenv_pmem_rootfs=1 aenv_pmem_fstype=erofs"
+        );
+        root.lower_filesystem = RootfsFilesystem::Ext4;
+        assert_eq!(
+            root.boot_arg().unwrap(),
+            "aenv_pmem_rootfs=1 aenv_pmem_fstype=ext4"
+        );
         root.max_pmem_bytes -= 1;
         assert!(root.validate().is_err());
         root.max_pmem_bytes = 2 * PMEM_ALIGNMENT;
@@ -802,9 +837,32 @@ mod tests {
             source_image: "test".into(),
             layers: vec![value],
             max_pmem_bytes: PMEM_ALIGNMENT,
+            lower_filesystem: RootfsFilesystem::Erofs,
             device_runtime: None
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn rootfs_filesystem_defaults_to_erofs_and_refuses_unknown_types() {
+        let legacy = serde_json::json!({
+            "version": 1, "sourceImage": "test", "layers": [spec()],
+            "maxPmemBytes": PMEM_ALIGNMENT
+        });
+        let binding: RootfsBinding = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(binding.lower_filesystem, RootfsFilesystem::Erofs);
+        let mut ext4 = legacy.clone();
+        ext4["lowerFilesystem"] = serde_json::json!("ext4");
+        let binding: RootfsBinding = serde_json::from_value(ext4).unwrap();
+        assert!(binding
+            .boot_arg()
+            .unwrap()
+            .ends_with("aenv_pmem_fstype=ext4"));
+        for value in [serde_json::json!("xfs"), serde_json::json!(true)] {
+            let mut unknown = legacy.clone();
+            unknown["lowerFilesystem"] = value;
+            assert!(serde_json::from_value::<RootfsBinding>(unknown).is_err());
+        }
     }
 }

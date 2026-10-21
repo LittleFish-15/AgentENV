@@ -5,7 +5,9 @@ from . import contract
 from .io import atomic_json, read_json
 
 
-def rootfs(source, image_paths, socket_path, max_bytes, runtime, output):
+def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_filesystem='erofs'):
+    if lower_filesystem not in ('erofs', 'ext4'):
+        raise ValueError('Native lower filesystem must be erofs or ext4')
     contract.validate_device_runtime(runtime)
     entries = []
     for image in image_paths:
@@ -17,7 +19,8 @@ def rootfs(source, image_paths, socket_path, max_bytes, runtime, output):
     contract.validate_catalog({'version': 1, 'objects': entries}, socket_path, max_bytes)
     binding = {'version': 2, 'sourceImage': contract.image_identity(source, 0),
                'layers': [entry['backing'] for entry in entries],
-               'maxPmemBytes': max_bytes, 'deviceRuntime': runtime}
+               'maxPmemBytes': max_bytes, 'deviceRuntime': runtime,
+               'lowerFilesystem': lower_filesystem}
     output = Path(output)
     output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
     atomic_json(output / 'binding.json', binding)
@@ -27,16 +30,21 @@ def rootfs(source, image_paths, socket_path, max_bytes, runtime, output):
 
 def relocate(binding_path, socket_path, runtime, output):
     binding = read_json(binding_path)
-    if (set(binding) != {'version', 'sourceImage', 'layers', 'maxPmemBytes', 'deviceRuntime'}
+    required = {'version', 'sourceImage', 'layers', 'maxPmemBytes', 'deviceRuntime'}
+    if (not isinstance(binding, dict) or not required <= set(binding)
+            or set(binding) - required - {'lowerFilesystem'}
             or type(binding['version']) is not int or binding['version'] != 2):
         raise ValueError('Only native device rootfs v2 can be relocated')
+    lower_filesystem = binding.get('lowerFilesystem', 'erofs')
+    if lower_filesystem not in ('erofs', 'ext4'):
+        raise ValueError('Native lower filesystem must be erofs or ext4')
     contract.validate_device_runtime(runtime)
     layers = [dict(contract.validate_spec(layer), socket=socket_path) for layer in binding['layers']]
     if any(layer['bytes'] % contract.ALIGN for layer in layers):
         raise ValueError('Invalid relocated pmem alignment')
     contract.validate_catalog({'version': 1, 'objects': [{'backing': layer} for layer in layers]},
                               socket_path, binding['maxPmemBytes'])
-    binding.update(layers=layers, deviceRuntime=runtime)
+    binding.update(layers=layers, deviceRuntime=runtime, lowerFilesystem=lower_filesystem)
     output = Path(output)
     output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
     atomic_json(output / 'binding.json', binding)

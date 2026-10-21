@@ -1,8 +1,13 @@
 # Sourced by /init only for the explicit experimental pmem rootfs mode.
-# Each immutable EROFS layer must include /.aenv-dax-probe (a regular file).
+# Each immutable lower must include /.aenv-dax-probe (a regular file).
 case "$PMEM_COUNT" in
     1|2|3|4|5|6|7|8) ;;
     *) die "invalid aenv_pmem_rootfs layer count" ;;
+esac
+case "${PMEM_FSTYPE-erofs}" in
+    erofs) LOWER_TYPE=erofs; LOWER_OPTIONS=ro,dax=always ;;
+    ext4) LOWER_TYPE=ext4; LOWER_OPTIONS=ro,noload,dax=always ;;
+    *) die "unsupported pmem lower filesystem" ;;
 esac
 
 $BB mount -n -t ext4 -o rw /dev/vdb /mnt/write || die "mount private writable disk"
@@ -21,7 +26,7 @@ while [ "$INDEX" -lt "$PMEM_COUNT" ]; do
         ATTEMPTS=$((ATTEMPTS + 1))
     done
     [ -b "/dev/pmem$INDEX" ] || die "pmem layer $INDEX did not appear"
-    $BB mount -n -t erofs -o ro,dax=always "/dev/pmem$INDEX" "$LOWER" \
+    $BB mount -n -t "$LOWER_TYPE" -o "$LOWER_OPTIONS" "/dev/pmem$INDEX" "$LOWER" \
         || die "mount read-only pmem layer $INDEX with DAX"
     [ -f "$LOWER/.aenv-dax-probe" ] && [ -s "$LOWER/.aenv-dax-probe" ] \
         && [ ! -L "$LOWER/.aenv-dax-probe" ] || die "missing non-empty regular DAX probe"

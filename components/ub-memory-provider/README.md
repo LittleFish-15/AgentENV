@@ -65,7 +65,7 @@ maps and verifies the existing UB objects; it never allocates or deletes them.
 
 Use `mode: "pmem"`, replacing `sourceRoot`/`images` with `catalog`. Prepare the
 catalog and rootfs binding from trusted, prebuilt, uncompressed, 2MiB-padded
-EROFS image files in bottom-to-top order:
+EROFS or ext4 image files in bottom-to-top order:
 
 ```sh
 aenv-ub-provider bind-rootfs --source ROOTFS_IMAGE_JSON \
@@ -84,6 +84,14 @@ aenv-ub-provider relocate-rootfs --binding PUBLISHER_BINDING \
   --socket IMPORT_GENERATION_DIR/data.sock --device-runtime LOCAL_RUNTIME_JSON \
   --output NEW_IMPORT_BINDING_DIR
 ```
+
+`bind-rootfs --lower-filesystem ext4` explicitly selects immutable ext4 lowers.
+The default and omitted legacy `lowerFilesystem` field select EROFS. A binding
+uses one filesystem type for all its lowers; relocation preserves that choice.
+Prepare ext4 with 4KiB blocks, no inline data and no journal requiring replay.
+The Guest mounts it with `ro,noload,dax=always`, so it never replays a journal or
+writes the common base. Both filesystems must pass the same actual lower and
+OverlayFS file-DAX checks; unsupported DAX fails the launch without fallback.
 
 Images start at device offset zero. No stored-layer header is present. A raw
 image may span up to 32 exported readonly SDK backing units. Their complete

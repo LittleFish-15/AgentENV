@@ -23,8 +23,8 @@ flowchart TB
     BB --> FB[Readonly NC device FD]
     FA --> PA[Patched FC / virtio-pmem]
     FB --> PB[Patched FC / virtio-pmem]
-    PA --> DA[Guest EROFS DAX + private OverlayFS upper]
-    PB --> DB[Guest EROFS DAX + private OverlayFS upper]
+    PA --> DA[Guest EROFS/ext4 DAX + private OverlayFS upper]
+    PB --> DB[Guest EROFS/ext4 DAX + private OverlayFS upper]
 ```
 
 The stored-layer path shares **stored immutable bytes** for both memory and
@@ -33,7 +33,7 @@ Guest RAM, or Guest filesystem cache. It must not be reported as direct sharing
 of all Guest base physical pages.
 
 The native rootfs path exposes compact, uncompressed filesystem images directly
-as readonly pmem. The Guest mounts EROFS with DAX and overlays a private writable
+as readonly pmem. The Guest mounts EROFS or explicitly selected ext4 with DAX and overlays a private writable
 ext4 directory. DAX is checked on every nonempty regular file in each lower and
 the initial visible root. The final probe is checked again after envd readiness.
 A failed DAX check is a failed launch, not permission to use an ordinary cache
@@ -56,7 +56,7 @@ metadata still consume memory.
   them into one owned aligned range. It does not seek, pread, reopen `/proc/self/fd`, or manufacture
   a local copy. The patch applies only to the source hashes in `baseline.json`.
 * `components/native-fd-verifier` is the isolated executable used above.
-* `tools-image` supplies Guest pmem/EROFS/OverlayFS startup and the DAX checker.
+* `tools-image` supplies Guest pmem/EROFS/ext4/OverlayFS startup and the DAX checker.
 * `aenv-export-memory` exports a full linear immutable RAM view with sparse zero
   ranges in its **local output file**. This does not make a UB allocation sparse.
 
@@ -74,6 +74,13 @@ source identities, per-layer image hashes and lengths, and an explicit exposed
 address-range limit. The provider socket and binaries must be configured for
 each node. Source identities and content hashes are portable; FD numbers and
 socket paths are not.
+
+The optional `lowerFilesystem` field is a strict `erofs`/`ext4` choice and
+defaults to EROFS for existing bindings. All lowers in one binding use that
+type. Ext4 lowers are immutable 4KiB-block images without inline data or a
+journal requiring replay; mount options are `ro,noload,dax=always`. The upper
+remains a separate writable ext4 directory. Both choices retain the same actual
+file-DAX checks, including the merged OverlayFS root; there is no cache fallback.
 
 `AENV_DIRECT_MEMORY_BINDING` selects the full linear RAM consumer. Its provider
 must support a readable, seekable, cacheable, readonly FD with genuine writable
@@ -102,9 +109,9 @@ indexes are rejected; they are never rewritten or deleted automatically.
    verifier and FC share the same readonly segment mapper. Larger images fail;
    there is no silent copy or first-segment-only publication. Actual multi-unit
    UB mapping and KVM access still require target validation.
-4. Prebuilt EROFS input must be trustworthy and faithfully represent its committed
+4. Prebuilt EROFS/ext4 input must be trustworthy and faithfully represent its committed
    source. Hash binding does not prove filesystem conversion correctness. The
-   Guest kernel must actually support virtio-pmem, pmem block devices, EROFS DAX
+   Guest kernel must actually support virtio-pmem, pmem block devices, selected filesystem DAX
    and the final OverlayFS DAX path. These are hardware acceptance prerequisites.
 5. The existing rootfs device supplies the private upper directory. Eliminating
    its unnecessary base data by producing an independent blank upper disk is

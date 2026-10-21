@@ -1911,7 +1911,8 @@ impl FirecrackerSandbox {
                     .as_deref()
                     .unwrap_or("")
                     .split_whitespace()
-                    .any(|arg| arg.starts_with("aenv_pmem_rootfs=")),
+                    .any(|arg| arg.starts_with("aenv_pmem_rootfs=")
+                        || arg.starts_with("aenv_pmem_fstype=")),
                 "duplicate pmem rootfs boot argument"
             );
             boot_args = Some(format!("{} {argument}", boot_args.unwrap_or_default()));
