@@ -4,9 +4,10 @@ This runner tests a real API lifecycle once the declared services and same-image
 inputs are present. It does not implement native Guest RAM private CoW, bootstrap
 the two machines, or establish global memory savings by itself.
 
-Place `native_cohort.py`, `cohort_engine.py`, `ram_observer.py`, and
-`public_workload.py` together under `/home/jwk/agent`. The entry verifies the
-other three against embedded SHA256 pins. Use the same files on both nodes.
+Place `native_cohort.py`, `cohort_engine.py`, `ram_observer.py`,
+`public_workload.py` and `cohort_sync.py` together under `/home/jwk/agent`. The
+entry verifies its loaded modules against embedded SHA256 pins. Use the same
+files on both nodes.
 Everything defaults to plan only. Run as the ordinary experiment user:
 
 ```sh
@@ -15,9 +16,11 @@ python3 -I -B native_cohort.py --node node-a --variant native --run
 ```
 
 The B commands use `--node node-b`. These are individual cohort entries;
-ROLLOUT.md supplies their A-side preparation/transfer/run coordinator. Its node
-runs execute concurrently but have no atomic workload or measurement barrier.
-Do not describe them as a synchronized two-node experiment.
+ROLLOUT.md supplies their A-side preparation/transfer/run coordinator. It holds
+both nodes' two owned Guests after the workload until both post-workload samples
+complete. Standalone commands without `--pair-epoch` do not join that hold.
+This coordinates the residency observation interval; it does not create an
+atomic hardware snapshot or synchronize workload instruction starts.
 
 Before either variant, the coordinated deployment's `rootfs-inputs.json` must
 identify the received original image. The original run uses the existing
@@ -34,6 +37,18 @@ construct 2,000 deterministic queries. Content/query hashes must match. Each
 child writes its own `/tmp` marker; after both finish, each must see its own
 marker and none of its peer's marker. This verifies private upper isolation,
 not native Guest RAM CoW. The public workload is not the private replay suite.
+
+Workload revision 2 queries effective `STATX_ATTR_DAX` before and after reading
+each source file on the **same open FD**, using `statx` with `AT_EMPTY_PATH`.
+It checks the returned support mask and inode/size against that FD. Missing
+support, failed calls or changed effective attributes are unknown, never an
+assumed non-DAX zero. Counts distinguish DAX, non-DAX and unknown files and their
+cumulative read payload. The payload can contain repeated/aliased data and is
+not a resident-page union or a physical sharing measurement. Both variants use
+the same observer and workload source; timings include these metadata queries.
+The flag is the effective access mode, not the persistent advisory inode flag.
+See [Linux v6.1 DAX documentation](https://raw.githubusercontent.com/torvalds/linux/v6.1/Documentation/filesystems/dax.rst)
+and [the statx UAPI layout](https://raw.githubusercontent.com/torvalds/linux/v6.1/include/uapi/linux/stat.h).
 
 Every mutation is preceded by a durable intent. An uncertain response is never
 automatically retried. Known sandbox IDs are deleted only after checking their
@@ -132,3 +147,20 @@ variant is descriptive evidence, not a statistical performance result.
 Local validation executes request-state transitions, capture content guards,
 RAM interval parsing and report arithmetic with fixtures. It does not execute
 Linux KVM, UB, a target service, target filesystem, or the Guest workload.
+
+## Coordinated post-workload hold
+
+The coordinator creates a fresh private epoch on each node before launching its
+cohort. Each worker publishes its own run/Guest IDs only after the workload and
+isolation checks finish. Both readiness records must exist before either worker
+is told to sample. Each publishes a digest of its actual sample and waits.
+Only after both measured receipts are collected does the coordinator release
+both workers into owned cleanup. The reports independently check those receipt
+hashes against their own samples and matching two-node epoch.
+
+Cancellation is an explicit private epoch record. It prevents a new create,
+capture or Fork before writing an intent, while allowing owned cleanup. Failure
+or a 10-minute worker hold timeout records failure and cleans only known owned
+Guests. A missing peer receipt never becomes a completed common window. Control
+files are immutable, bounded and private; successful duplicate control delivery
+is idempotent only when bytes match. No synchronized host clock is assumed.

@@ -64,6 +64,16 @@ def fixture(api=None, observe=None, execute=None, capacity=None, snapshot=None):
 
 
 class Tests(unittest.TestCase):
+    def test_coordinator_abort_before_send_creates_no_unknown_request(self):
+        api, cohort = fixture()
+        def cancelled():
+            raise RuntimeError('Pair cancelled')
+        cohort.mutation_guard = cancelled
+        result = cohort.run('image')
+        self.assertTrue(C.quiescent(result))
+        self.assertFalse(any(c[0] in ('POST', 'DELETE') for c in api.calls))
+        self.assertFalse(result['openRequests'])
+
     def recovery(self, request, guests=None, ids=None):
         api, cohort = fixture()
         api.guests = guests or {}

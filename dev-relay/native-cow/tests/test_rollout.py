@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import hashlib
 import importlib.util
 import io
@@ -7,6 +8,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import types
 import unittest
 from unittest import mock
 import uuid
@@ -15,9 +17,73 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('rollout', HERE.parent / 'native_rollout.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+sync_spec = importlib.util.spec_from_file_location('pair_module', HERE.parent / 'cohort_sync.py')
+SYNC = importlib.util.module_from_spec(sync_spec)
+sync_spec.loader.exec_module(SYNC)
 
 
 class Tests(unittest.TestCase):
+    def pair_fixture(self, early=False, release_failure=False):
+        epoch = 'a' * 32
+        events, saved, phase = [], [], {'measuring': False}
+        readies = {node: {'node': node, 'variant': 'native', 'epoch': epoch,
+                         'runId': ('b' if node == 'node-a' else 'c') * 32,
+                         'sandboxIds': [node + '-1', node + '-2']} for node in SYNC.NODES}
+        measurements = {node: {'node': node, 'epoch': epoch, 'readySha256': SYNC.digest(readies[node]),
+                              'sampleSha256': 'd' * 64} for node in SYNC.NODES}
+        def control(node, variant, value, operation, payload=None):
+            self.assertEqual((variant, value), ('native', epoch))
+            events.append((node, operation))
+            if operation == 'status':
+                return {'ready': readies[node], 'measured': measurements[node] if phase['measuring'] else None,
+                        'abort': None, 'failed': None}
+            if operation == 'measure' and node == 'node-a':
+                phase['measuring'] = True
+            if operation == 'release' and node == 'node-a' and release_failure:
+                raise RuntimeError('A release delivery failed')
+            return {'recorded': operation}
+        class Future:
+            def __init__(self, local):self.local = local
+            def done(self):return self.local and early
+            def result(self):return {'node': 'node-a'} if self.local else (Path('log'), 0)
+        class Pool:
+            def __init__(self, **kwargs):self.count = 0
+            def __enter__(self):return self
+            def __exit__(self, *args):return False
+            def submit(self, fn, *args):
+                self.count += 1
+                return Future(self.count == 1)
+        sync = types.SimpleNamespace(prepare=lambda n, v, e: control(n, v, e, 'prepare'),
+                                     control=control, control_message=SYNC.control_message)
+        steps = types.SimpleNamespace(call=lambda *a: None)
+        with mock.patch.object(m, 'sync_module', return_value=sync), \
+                mock.patch.object(m.uuid, 'uuid4', return_value=types.SimpleNamespace(hex=epoch)), \
+                mock.patch.object(m.concurrent.futures, 'ThreadPoolExecutor', Pool), \
+                mock.patch.object(m, 'remote_pair', side_effect=lambda v, e, o, p=None: control('node-b', v, e, o, p)), \
+                mock.patch.object(m.time, 'sleep'), mock.patch.object(m, 'save', side_effect=lambda p, v: saved.append(copy.deepcopy(v))), \
+                mock.patch.object(m, 'fetch_b', return_value='{"node":"node-b"}'):
+            result = m.run_pair('native', steps)
+        self.assertEqual(result, ({'node': 'node-a'}, {'node': 'node-b'}))
+        return events, saved[-1]
+
+    def test_pair_releases_only_after_both_samples(self):
+        events, report = self.pair_fixture()
+        self.assertEqual(report['status'], 'COORDINATED_POST_WORKLOAD_HOLD_RELEASED')
+        self.assertEqual(events[-2:], [('node-b', 'release'), ('node-a', 'release')])
+        self.assertLess(events.index(('node-a', 'measure')), events.index(('node-b', 'release')))
+        self.assertEqual(set(report['measurements']), {'node-a', 'node-b'})
+
+    def test_early_worker_exit_aborts_both_without_measure_or_release(self):
+        events, report = self.pair_fixture(early=True)
+        self.assertEqual(report['status'], 'PAIR_STOPPED_PRESERVE_COHORT_JOURNALS')
+        self.assertEqual(events[-2:], [('node-a', 'abort'), ('node-b', 'abort')])
+        self.assertFalse(any(op in ('measure', 'release') for node, op in events))
+
+    def test_partial_release_is_not_reported_as_completed(self):
+        events, report = self.pair_fixture(release_failure=True)
+        self.assertEqual(report['status'], 'PAIR_STOPPED_PRESERVE_COHORT_JOURNALS')
+        self.assertEqual(events[-2:], [('node-a', 'abort'), ('node-b', 'abort')])
+
     def directory(self):
         path = HERE / 't' / uuid.uuid4().hex[:8]
         path.mkdir(parents=True)
@@ -109,6 +175,10 @@ class Tests(unittest.TestCase):
         def fetch(name):
             events.append('fetch-' + name)
             return json.dumps(own) if name.endswith('.json') else 'B ROOT BLOCK\n'
+        def pair(variant, steps):
+            events.append(variant + '-node-a')
+            events.append('fetch-' + variant + '-node-b.json')
+            return own, own
         entry = directory / 'native_rollout.py'
         with contextlib.ExitStack() as stack:
             for name, value in {'ROOT': directory, 'WORK': work, 'SELF': entry, '__file__': str(entry),
@@ -120,6 +190,7 @@ class Tests(unittest.TestCase):
             stack.enter_context(mock.patch.object(m, 'sha', return_value='a' * 64))
             stack.enter_context(mock.patch.object(m, 'transfer', side_effect=lambda *a: events.append('transfer') or 'a' * 64))
             stack.enter_context(mock.patch.object(m, 'cohort', side_effect=fake_cohort))
+            stack.enter_context(mock.patch.object(m, 'run_pair', side_effect=pair))
             stack.enter_context(mock.patch.object(m, 'fetch_b', side_effect=fetch))
             stack.enter_context(mock.patch.object(m, 'wait_ready', side_effect=lambda node: events.append('ready-' + node)))
             stack.enter_context(mock.patch.object(m, 'combined_root', return_value='A ROOT BLOCK\n'))

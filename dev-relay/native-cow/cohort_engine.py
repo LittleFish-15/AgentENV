@@ -44,11 +44,13 @@ def acknowledged_identity(kind, status, reply):
 
 
 class Cohort:
-    def __init__(self, api, state, persist, observe, execute, capacity, snapshot, *, run_id=None):
+    def __init__(self, api, state, persist, observe, execute, capacity, snapshot, *, run_id=None,
+                 residency_gate=None, mutation_guard=None):
         require(quiescent(state), 'Previous batch is not quiescent; no new run allowed')
         self.api, self.persist = api, persist
         self.observe, self.execute = observe, execute
         self.capacity, self.snapshot = capacity, snapshot
+        self.residency_gate, self.mutation_guard = residency_gate, mutation_guard
         self.state = copy.deepcopy(state)
         self.run_id = run_id or uuid.uuid4().hex
         require(re.fullmatch('[0-9a-f]{32}', self.run_id), 'Invalid batch identity')
@@ -72,6 +74,8 @@ class Cohort:
         return body
 
     def mutation(self, kind, route, body, decode, timeout):
+        if kind != 'delete' and self.mutation_guard is not None:
+            self.mutation_guard()
         require(not self.state['openRequests'] or kind == 'delete',
                 'Unresolved operation; no new allocation/capture permitted')
         request = {'id': uuid.uuid4().hex, 'kind': kind, 'route': route,
@@ -184,6 +188,7 @@ class Cohort:
             identifier(sid)
         instance = cls.__new__(cls)
         instance.api, instance.persist = api, persist
+        instance.mutation_guard = None
         instance.state, instance.run_id = copy.deepcopy(state), state['runId']
         return instance
 
@@ -279,7 +284,11 @@ class Cohort:
             identities = {(r['result']['catalogSha256'], r['result']['sqlSha256'],
                            r['result']['fileCount'], r['result']['fileBytes']) for r in results}
             require(len(identities) == 1, 'Children did not execute the same public workload')
-            self.sample('after_workload', children)
+            if self.residency_gate is None:
+                self.sample('after_workload', children)
+            else:
+                self.state['pairedWindow'] = self.residency_gate(self, children)
+                self.save()
             self.state['lifecyclePassed'] = True
             self.save()
         except (Exception, KeyboardInterrupt) as error:

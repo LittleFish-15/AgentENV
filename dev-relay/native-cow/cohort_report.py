@@ -61,6 +61,67 @@ def conditional_process_sharing(report):
             'externalSharersExcluded': False, 'memfileAttributionEstablished': False}
 
 
+def dax_evidence(report):
+    missing = {'status': 'NA_FILE_DAX_OBSERVATION_INCOMPLETE', 'allReadFilesDax': None,
+               'physicalSharedBytes': None, 'hostLowerAccessResidencyMeasured': False}
+    rows = report.get('cohort', {}).get('workloads', [])
+    if len(rows) != 2:
+        return missing
+    totals = dict.fromkeys(('files', 'daxFiles', 'nonDaxFiles', 'unknownFiles',
+                           'daxReadPayloadBytes', 'nonDaxReadPayloadBytes', 'unknownReadPayloadBytes'), 0)
+    for row in rows:
+        value = row.get('result') or {}
+        observed = value.get('fileDax', {})
+        if row.get('passed') is not True or any(type(observed.get(k)) is not int or observed[k] < 0 for k in totals):
+            return missing
+        if (observed['files'] != value.get('fileCount') or observed['files'] <= 0
+                or observed['daxFiles'] + observed['nonDaxFiles'] + observed['unknownFiles'] != observed['files']
+                or observed['daxReadPayloadBytes'] + observed['nonDaxReadPayloadBytes'] + observed['unknownReadPayloadBytes'] != value.get('fileBytes')):
+            return missing
+        for key in totals:
+            totals[key] += observed[key]
+    complete = totals['unknownFiles'] == 0
+    return {**totals, 'status': 'EFFECTIVE_DAX_ON_READ_FDS_OBSERVED' if complete else missing['status'],
+            'allReadFilesDax': totals['nonDaxFiles'] == 0 if complete else None,
+            'complete': complete, 'physicalSharedBytes': None, 'hostLowerAccessResidencyMeasured': False,
+            'payloadBytesAreResidentOrDeduplicatedBytes': False,
+            'scope': 'effective_DAX_queried_before_and_after_each_same_FD_read'}
+
+
+def paired_window(by, variant):
+    missing = {'status': 'NA_NO_COMPLETE_PAIRED_HOLD', 'atomicSnapshot': False,
+               'synchronizedWorkloadStart': False}
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    try:
+        pair = {node: by[node, variant]['cohort']['pairedWindow'] for node in ('node-a', 'node-b')}
+        a, b = pair['node-a'], pair['node-b']
+        if (any(value.get('status') != 'COORDINATED_POST_WORKLOAD_HOLD_COMPLETED' for value in pair.values())
+                or a.get('epoch') != b.get('epoch') or not isinstance(a.get('epoch'), str) or len(a['epoch']) != 32
+                or any(c not in '0123456789abcdef' for c in a['epoch'])
+                or a.get('readies') != b.get('readies') or a.get('measurements') != b.get('measurements')
+                or set(a['readies']) != {'node-a', 'node-b'} or set(a['measurements']) != {'node-a', 'node-b'}):
+            return missing
+        complete = True
+        for node in ('node-a', 'node-b'):
+            report = by[node, variant]
+            ready, measured, sample = a['readies'][node], a['measurements'][node], after_sample(report)
+            if (pair[node].get('node') != node or ready.get('node') != node or ready.get('variant') != variant
+                    or ready.get('epoch') != a['epoch'] or ready.get('runId') != report['cohort'].get('runId')
+                    or not isinstance(ready.get('sandboxIds'), list) or len(set(ready['sandboxIds'])) != 2
+                    or len(ready['sandboxIds']) != 2 or measured.get('node') != node
+                    or measured.get('epoch') != a['epoch'] or measured.get('readySha256') != digest(ready)
+                    or not sample or measured.get('sampleSha256') != digest(sample)):
+                return missing
+            complete = complete and sample.get('ram', {}).get('available') is True
+        return {'status': 'COORDINATED_POST_WORKLOAD_HOLD_COMPLETED', 'epoch': a['epoch'],
+                'atomicSnapshot': False, 'synchronizedWorkloadStart': False,
+                'guestRamObservationsAvailableOnBothNodes': complete,
+                'scope': 'both_workers_waited_for_both_measurement_receipts_before_owned_cleanup'}
+    except (KeyError, TypeError, ValueError):
+        return missing
+
+
 def compare(reports):
     need(len(reports) == 4, 'Exactly four reports required: A/B original and native')
     by = {(r.get('node'), r.get('variant')): r for r in reports}
@@ -117,13 +178,16 @@ def compare(reports):
             'guestCacheRootfsAttributionEstablished': False,
             'originalProviderObservation': after_sample(original).get('provider'),
             'nativeProviderObservation': after_sample(native).get('provider'),
+            'originalFileDax': dax_evidence(original), 'nativeFileDax': dax_evidence(native),
             'runtimeChargeIsGlobalNetSaving': False,
             'originalConditionalProcessSharing': conditional_process_sharing(original),
             'nativeConditionalProcessSharing': conditional_process_sharing(native)}
+    windows = {variant: paired_window(by, variant) for variant in ('original', 'native')}
+    common_hold = all(w['status'] == 'COORDINATED_POST_WORKLOAD_HOLD_COMPLETED' for w in windows.values())
     return {'revision': 'cohort-comparison-v1',
             'status': 'PUBLIC_WORKLOAD_COMPARISON_WITH_EXPLICIT_GAPS' if paired else 'INCOMPLETE_COMPARISON_NO_BENEFIT_CLAIM',
             'matchedInputsAndGuestOutputs': workload_equal, 'allFourFunctionalCohortsPassed': functional,
-            'nodes': nodes, 'globalNetSavingBytes': None, 'globalNetSavingFraction': None,
+            'nodes': nodes, 'pairedResidencyWindows': windows, 'globalNetSavingBytes': None, 'globalNetSavingFraction': None,
             'memfileCrossNodeCowAccepted': False,
             'rootfsCrossNodePhysicalSharingAcceptedByThisReport': False,
             'rootfsHostAccessResidency': None, 'UBPhysicalChargedBytes': None,
@@ -131,11 +195,13 @@ def compare(reports):
                 'Native Guest RAM private CoW is not implemented; local snapshot RAM CoW remains.',
                 'Provider publication/import and matching content alone do not attest physical cross-node backing.',
                 'This runner has no Host lower read observer; actual per-Guest access/residency intersections are NA.',
+                'Effective DAX on actual read FDs describes the file access mode; cumulative read payload is not shared physical memory or a resident-page union.',
                 'Provider RSS/PSS/cgroup and upper cache are separate observations; device-backed UB physical charge and full cost ownership remain incomplete, so global net is NA.',
                 'Guest Cached is already within Guest RAM and must not be added again.',
                 'Each variant has one two-Guest cohort; timing is descriptive, not a statistical performance result.',
                 'Captures/Fork snapshots are retained; provider must stay alive until references are removed.',
-                'The two node cohorts are not yet synchronized; do not claim simultaneous cross-node savings.']}
+                'Both nodes completed the coordinated post-workload hold; reads are non-atomic and workload starts were not synchronized.'
+                if common_hold else 'No complete common two-node residency hold was established; do not claim simultaneous cross-node savings.']}
 
 
 def markdown(result):
@@ -164,6 +230,19 @@ def markdown(result):
                       value.get('sdkReportedBackingCoverageBytes') if valid else None]
             lines.append('| ' + ' | '.join([node, variant, *[show(v) for v in fields]]) + ' |')
     lines.extend(['', 'Device-backed UB memory can be uncharged here. Coverage values across two nodes are not additive physical allocations.', '',
+                  '## Effective DAX on the workload read files', '',
+                  '| Node | Variant | Files read | DAX files | Non-DAX files | Unknown files | Payload bytes read from DAX files |',
+                  '|---|---|---:|---:|---:|---:|---:|'])
+    for node, values in result['nodes'].items():
+        for variant, key in (('original', 'originalFileDax'), ('native', 'nativeFileDax')):
+            value = values[key]
+            numbers = [value.get(k) for k in ('files', 'daxFiles', 'nonDaxFiles', 'unknownFiles', 'daxReadPayloadBytes')]
+            lines.append('| ' + ' | '.join([node, variant, *[show(v) for v in numbers]]) + ' |')
+    lines.extend(['', 'These are effective file modes observed on the actual read FDs. Payload counts can include repeated/aliased data; they are not physical or resident shared bytes.', '',
+                  '## Two-node post-workload hold', ''])
+    for variant, window in result['pairedResidencyWindows'].items():
+        lines.append('- ' + variant + ': `' + window['status'] + '`' + ('; epoch `' + window['epoch'] + '`' if window.get('epoch') else ''))
+    lines.extend(['', 'A completed hold establishes coordinated collection before either worker cleans its Guests. It is not an atomic physical-memory snapshot or a synchronized workload start.', '',
                   '## Measurement and implementation gaps', ''])
     lines.extend('- ' + text for text in result['unresolved'])
     return '\n'.join(lines) + '\n'

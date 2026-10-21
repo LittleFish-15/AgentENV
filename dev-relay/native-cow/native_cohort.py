@@ -24,7 +24,7 @@ ROOT = Path('/home/jwk/agent')
 CORE = '6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
 ORIGINAL = 'ae9c62693839ce7effa2b45df31c0039ae4f9fbc'
 SOURCE = 'sha256:cf786498f77bf4ba6235156ab8540d0b9335e874e70b95efbeb53168e0dce68d'
-MODULE_PINS = {'cohort_engine': 'b0c3d818e45eebdcc909ee859fb63a002c10ac264eb9e2a87fb36babf782b45d', 'ram_observer': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload': 'dfd483df3307a3a677dfc2bb1f4559b76aea3fb8ad4cc200832d572fb6a44490'}
+MODULE_PINS = {'cohort_engine': '9b8357278749ec888abf69c4d48fa503c7779bcf0618ad55894bbb27f5d26d46', 'ram_observer': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_sync': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
 
 
 def need(ok, reason):
@@ -433,8 +433,10 @@ def run(args):
             save(work / 'report.json', {**evidence, 'cohort': value})
         def observe(phase, sids):
             return sample_node(api, observer, base, args.node, phase, sids)
+        fence = module('cohort_sync').Fence(args.node, args.variant, args.pair_epoch) if args.pair_epoch else None
         cohort = engine.Cohort(api, state, persist, observe, workload, capacity,
-                               lambda sid: snapshot_evidence(base, sid, args.variant, binding))
+                               lambda sid: snapshot_evidence(base, sid, args.variant, binding),
+                               residency_gate=fence, mutation_guard=fence.check if fence is not None else None)
         result = cohort.run(image)
         report = {**evidence, 'cohort': result,
                   'status': 'COHORT_FUNCTIONAL_PASS_SNAPSHOTS_RETAINED' if result['lifecyclePassed']
@@ -455,6 +457,7 @@ def main():
     parser.add_argument('--variant', choices=('original', 'native'), required=True)
     parser.add_argument('--attempt', type=int, default=1)
     parser.add_argument('--cleanup', action='store_true', help='Reconcile/clean the existing batch; never create or capture')
+    parser.add_argument('--pair-epoch', help='Coordinator-owned post-workload hold epoch')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
     if not args.run:
@@ -465,6 +468,8 @@ def main():
                           'memfileCrossNodeCowImplemented': False}))
         return 0
     need(bool(MODULE_PINS), 'Unpublished draft; pinned modules required')
+    need(args.pair_epoch is None or re.fullmatch('[0-9a-f]{32}', args.pair_epoch), 'Invalid pair epoch')
+    need(not (args.cleanup and args.pair_epoch), 'Cleanup does not join a new pair hold')
     return run(args)
 
 

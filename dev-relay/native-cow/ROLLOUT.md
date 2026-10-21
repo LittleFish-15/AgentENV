@@ -15,7 +15,7 @@ cd /home/jwk/agent
 python3 -I -B native_rollout.py run-a --run
 ```
 
-Keep that terminal open. It downloads eleven public helpers at an immutable
+Keep that terminal open. It downloads twelve public helpers at an immutable
 GitHub commit and verifies their hashes. Existing files with different contents
 are preserved and stop the run. It uses the already configured A-to-B SSH trust,
 requiring batch authentication and strict host-key checking. It does not create
@@ -34,7 +34,9 @@ The automatic sequence is:
    B holds the SDK fence while the old owner retires its own object. Unknown
    objects and existing UB daemons are not stopped or deleted.
 4. Run the original two-Guest cohort on each node before publishing the new UB
-   image. The two node runs execute concurrently, without an atomic barrier.
+   image. Each node holds its two Guests after the workload until both nodes'
+   post-workload samples have completed. This is a coordinated hold, not an
+   atomic hardware snapshot or synchronized workload instruction start.
    Known owned Guests are cleaned. Any unconfirmed cleanup stops progression.
 5. Print **one A root block** containing the new provider and new Runtime unit
    activation. Copy that block into A's root terminal. The ordinary A terminal
@@ -58,6 +60,8 @@ All orchestration output is retained under `/home/jwk/agent/r/cow-rollout-v4`:
 
 - `steps-node-a.json` / `steps-node-b.json`: stage state, exit codes and log paths.
 - `logs/`: complete build/prepare/control/cohort phase output.
+- `hold-VARIANT-EPOCH/` and `pair-VARIANT-EPOCH.json`: immutable readiness,
+  measurement and cleanup-release evidence; RPC diagnostics remain in `logs/`.
 - `root-node-a.txt` / `root-node-b.txt`: the generated literal activation blocks.
 - `original-node-a.json`, `original-node-b.json`, `native-node-a.json`,
   `native-node-b.json`: the returned cohort reports, also retained in each
@@ -96,7 +100,7 @@ provider to reclaim its base while those references remain.
 
 The coordinator does not add a KVM-compatible UB private-write fault mechanism.
 It does not attach a privileged RAM sampler or the Host lower-read observer, and
-it does not implement an atomic cross-node workload/measurement barrier. Ordinary
+the coordinated post-workload hold is not an atomic physical snapshot. Ordinary
 `proc` permissions can leave RAM metrics unavailable. Host actual-access versus
 residency intersections, UB physical charge and complete helper/cache ownership
 remain missing. Sub-cgroup differences must not be presented as global net
