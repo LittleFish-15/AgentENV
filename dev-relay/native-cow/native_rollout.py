@@ -7,6 +7,7 @@ without --run. Unknown or interrupted stage outcomes are preserved, not retried.
 import argparse
 import concurrent.futures
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,13 +19,14 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 
 ROOT = Path('/home/jwk/agent')
 WORK = ROOT / 'r/cow-rollout-v4'
 DEPLOYMENT = ROOT / 'deployments/agentenv-native-6cdac56'
 SELF = ROOT / 'native_rollout.py'
-PUBLIC_COMMIT = '3bb8cf469290c9973a7aa59117856273d935cc34'
-PUBLIC_PINS = {'A_prepare_release_v4.py': 'f9c80889c21e041c1b28420889cb8acd4270eed33ebc6a442cf0114c272f4ece', 'prepare_native_service_v4.py': '0e128f48f0094d42281cb766347f87eb65d24ea558d832e72d10621c4722efd5', 'native_release_bundle.py': 'de2ebddf3d2599306b403dfef38e944669b3d2dab345502709bfb20cd6a53641', 'native_rootfs_inputs.py': '4c0c92a447efad6aa1110c9359ef7c768e416205a59a9413b1211ca08ae28947', 'native_provider_v4.py': '3ae0a58a4e51e056cecf61f7cd60a362ed82ac317c8c22e3a1262887c6bcfb36', 'legacy_provider_handoff.py': 'fe5c1819e0bf662d62cebf3a307f0204be89258086be1ec25c384c140a469c23', 'native_cohort.py': 'b4cc5122ce8d870bcb36a0c1bca482ec1206faa25749bef61aa88c453abcd76c', 'cohort_engine.py': 'b0c3d818e45eebdcc909ee859fb63a002c10ac264eb9e2a87fb36babf782b45d', 'ram_observer.py': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload.py': 'dfd483df3307a3a677dfc2bb1f4559b76aea3fb8ad4cc200832d572fb6a44490', 'cohort_report.py': '04b5f5c6aece32adc421057dbba071f1426888b6d724617f50c3a8ae2300f634'}
+PUBLIC_COMMIT = '9eaea49baa94b804e2da6fa1675756395452efc1'
+PUBLIC_PINS = {'A_prepare_release_v4.py': 'f9c80889c21e041c1b28420889cb8acd4270eed33ebc6a442cf0114c272f4ece', 'prepare_native_service_v4.py': '0e128f48f0094d42281cb766347f87eb65d24ea558d832e72d10621c4722efd5', 'native_release_bundle.py': 'de2ebddf3d2599306b403dfef38e944669b3d2dab345502709bfb20cd6a53641', 'native_rootfs_inputs.py': '4c0c92a447efad6aa1110c9359ef7c768e416205a59a9413b1211ca08ae28947', 'native_provider_v4.py': '3ae0a58a4e51e056cecf61f7cd60a362ed82ac317c8c22e3a1262887c6bcfb36', 'legacy_provider_handoff.py': 'fe5c1819e0bf662d62cebf3a307f0204be89258086be1ec25c384c140a469c23', 'native_cohort.py': '5138f2c435d1d6a63a07f2041c4c8ba31d974eb10b08a608cd18e577184d55ef', 'cohort_engine.py': '9b8357278749ec888abf69c4d48fa503c7779bcf0618ad55894bbb27f5d26d46', 'ram_observer.py': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload.py': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_report.py': '15081f6ad11e44319a881f217866700fda1244c4c5cac89bbc502692366b0d6e', 'cohort_sync.py': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
 PYTHON = '/usr/bin/python3'
 SSH = ['/usr/bin/ssh', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
        '-oConnectTimeout=10', '-oServerAliveInterval=15', '-oServerAliveCountMax=4', 'jwk@agent1']
@@ -273,9 +275,11 @@ def ready(node):
     return {'status': 'NEW_PROVIDER_AND_RUNTIME_ACTIVE_NOT_GUEST_ACCEPTANCE', 'node': node}
 
 
-def cohort(node, variant, s=None):
+def cohort(node, variant, s=None, pair_epoch=None):
     ordinary(node)
     command = [PYTHON, '-I', '-B', str(ROOT / 'native_cohort.py'), '--node', node, '--variant', variant, '--run']
+    if pair_epoch is not None:
+        command.extend(['--pair-epoch', pair_epoch])
     name = variant + '-cohort-' + node
     if s is not None:
         log, code = s.call(name, command, 2100, True)
@@ -350,6 +354,101 @@ def wait_ready(node):
     raise RuntimeError('Root/provider readiness not observed within 15 minutes; journals preserved')
 
 
+def sync_module():
+    path = ROOT / 'cohort_sync.py'
+    need(sha(path) == PUBLIC_PINS.get('cohort_sync.py'), 'Pinned pair coordination module differs')
+    spec = importlib.util.spec_from_file_location('owned_cohort_sync', path)
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+
+def remote_pair(variant, epoch, operation, payload=None):
+    need(variant in ('original', 'native') and re.fullmatch('[0-9a-f]{32}', epoch), 'Invalid remote pair scope')
+    args = ['b-pair', '--variant', variant, '--pair-epoch', epoch, '--operation', operation]
+    if payload is not None:
+        args.extend(['--payload', json.dumps(payload, sort_keys=True, separators=(',', ':'))])
+    audit = {'variant': variant, 'epoch': epoch, 'operation': operation, 'startNs': time.time_ns()}
+    try:
+        result = subprocess.run(remote_command(args), capture_output=True, timeout=30)
+        audit.update(exitCode=result.returncode, stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr))
+        if result.returncode:
+            text = (result.stdout + result.stderr)[-8192:].decode(errors='replace')
+            audit['errorTail'] = re.sub(r'e2b_[A-Za-z0-9._~-]+', '[REDACTED]', text)
+    except Exception as error:
+        audit.update(errorType=type(error).__name__, controlDeliveryUncertain=True)
+        raise
+    finally:
+        audit['endNs'] = time.time_ns()
+        with (WORK / 'logs' / ('pair-' + variant + '-' + epoch + '.rpc.jsonl')).open('a') as stream:
+            stream.write(json.dumps(audit) + '\n')
+    need(result.returncode == 0 and len(result.stdout) <= 65536, 'B pair control unavailable; preserve its cohort journal')
+    return json.loads(result.stdout)
+
+
+def run_pair(variant, steps):
+    sync = sync_module()
+    epoch = uuid.uuid4().hex
+    sync.prepare('node-a', variant, epoch)
+    remote_pair(variant, epoch, 'prepare')
+    report = {'epoch': epoch, 'variant': variant, 'status': 'PAIR_STARTING',
+              'atomicSnapshot': False, 'synchronizedWorkloadStart': False}
+    released = False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        local = pool.submit(cohort, 'node-a', variant, None, epoch)
+        remote = pool.submit(steps.call, variant + '-cohort-b',
+                             remote_command(['b-cohort', '--variant', variant, '--pair-epoch', epoch]), 2400, True)
+        try:
+            deadline, last = time.monotonic() + 1800, time.monotonic()
+            measuring = False
+            while time.monotonic() < deadline:
+                need(not local.done() and not remote.done(), 'A cohort ended before the common residency hold completed')
+                states = {'node-a': sync.control('node-a', variant, epoch, 'status'),
+                          'node-b': remote_pair(variant, epoch, 'status')}
+                need(not any(state.get('failed') or state.get('abort') for state in states.values()),
+                     'A node refused or stopped the residency hold')
+                if not measuring and all(state.get('ready') for state in states.values()):
+                    readies = {node: state['ready'] for node, state in states.items()}
+                    command = sync.control_message('measure', variant, epoch, readies)
+                    remote_pair(variant, epoch, 'measure', command)
+                    sync.control('node-a', variant, epoch, 'measure', command)
+                    report['readies'] = readies
+                    measuring = True
+                if measuring and all(state.get('measured') for state in states.values()):
+                    measurements = {node: state['measured'] for node, state in states.items()}
+                    command = sync.control_message('release', variant, epoch, report['readies'], measurements)
+                    remote_pair(variant, epoch, 'release', command)
+                    sync.control('node-a', variant, epoch, 'release', command)
+                    report.update(status='COORDINATED_POST_WORKLOAD_HOLD_RELEASED', measurements=measurements)
+                    released = True
+                    break
+                if time.monotonic() - last >= 30:
+                    print('PAIR_PROGRESS variant=' + variant + ' phase=' + ('measuring' if measuring else 'waiting_for_guests'), flush=True)
+                    last = time.monotonic()
+                time.sleep(1)
+            need(released, 'Two-node residency hold deadline exceeded')
+        except Exception as error:
+            report.update(status='PAIR_STOPPED_PRESERVE_COHORT_JOURNALS', errorType=type(error).__name__,
+                          reason=str(error)[:600] if isinstance(error, RuntimeError) else 'Inspect node-local journals')
+        finally:
+            if not released:
+                for node in ('node-a', 'node-b'):
+                    try:
+                        if node == 'node-a':
+                            sync.control(node, variant, epoch, 'abort')
+                        else:
+                            remote_pair(variant, epoch, 'abort')
+                    except Exception as error:
+                        report.setdefault('abortErrors', []).append({'node': node, 'type': type(error).__name__})
+            save(WORK / ('pair-' + variant + '-' + epoch + '.json'), report)
+        # Both workers run their owned cleanup before returning. A transport
+        # timeout never substitutes for cleanup or a successful pair receipt.
+        local_report = local.result()
+        remote.result()
+    peer_report = json.loads(fetch_b(variant + '-node-b.json'))
+    return local_report, peer_report
+
+
 def run_a():
     ordinary('node-a')
     need(Path(__file__).resolve() == SELF, 'Place this entry at /home/jwk/agent/native_rollout.py')
@@ -383,13 +482,9 @@ def run_a():
             '--tools-report', TOOLS, '--rootfs-binding', binding, '--binding-sha256', sha(binding)])
     s.local('seed-rootfs-a', 'native_rootfs_inputs.py', ['seed', '--input-directory', WORK / 'rootfs', '--node', 'node-a', '--run'], 1800)
     s.local('legacy-sdk-handoff', 'legacy_provider_handoff.py', ['transition-a', '--run'], 1800)
-    # Baseline precedes the new UB publication. Original services/configs are
-    # never restarted. Two nodes run concurrently but have no atomic barrier.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        remote = pool.submit(s.call, 'original-cohort-b', remote_command(['b-cohort', '--variant', 'original']), 2400, True)
-        original_a = cohort('node-a', 'original')
-        remote.result()
-    original_b = json.loads(fetch_b('original-node-b.json'))
+    # Baseline precedes the new UB publication. Both cohorts retain their owned
+    # Guests until both post-workload samples have completed.
+    original_a, original_b = run_pair('original', s)
     for result in (original_a, original_b):
         state = result.get('cohort')
         need(state is not None and state.get('phase') == 'quiesced' and state.get('openRequests') == []
@@ -409,11 +504,7 @@ def run_a():
     print('\nCOPY_FOLLOWING_BLOCK_ON_B_ROOT\n' + block + 'KEEP_THIS_ORDINARY_A_TERMINAL_OPEN\n', flush=True)
     wait_ready('node-b')
     s.call('runtime-health-b', remote_command(['b-health']), 180)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        remote = pool.submit(s.call, 'native-cohort-b', remote_command(['b-cohort', '--variant', 'native']), 2400, True)
-        cohort('node-a', 'native')
-        remote.result()
-    fetch_b('native-node-b.json')
+    run_pair('native', s)
     arguments = []
     for variant in ('original', 'native'):
         for node in ('node-a', 'node-b'):
@@ -428,11 +519,14 @@ def run_a():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('run-a', 'b-prepare', 'b-root', 'b-ready', 'b-health', 'b-cohort', 'b-fetch'))
+    parser.add_argument('mode', choices=('run-a', 'b-prepare', 'b-root', 'b-ready', 'b-health', 'b-cohort', 'b-fetch', 'b-pair'))
     for name in ('bundle-sha', 'inputs-sha', 'binding-sha', 'manifest-sha'):
         parser.add_argument('--' + name)
     parser.add_argument('--variant', choices=('original', 'native'))
     parser.add_argument('--file')
+    parser.add_argument('--pair-epoch')
+    parser.add_argument('--operation', choices=('prepare', 'status', 'measure', 'release', 'abort'))
+    parser.add_argument('--payload')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
     if not args.run:
@@ -447,6 +541,7 @@ def main():
         return
     ordinary('node-b')
     need(Path(__file__).resolve() == SELF, 'Unexpected transferred coordinator path')
+    need(args.pair_epoch is None or re.fullmatch('[0-9a-f]{32}', args.pair_epoch), 'Invalid pair epoch')
     if args.mode == 'b-prepare':
         need(all((args.bundle_sha, args.inputs_sha, args.binding_sha)), 'Missing B input pins')
         prepare_b(args)
@@ -459,7 +554,18 @@ def main():
         subprocess.run([PYTHON, '-I', '-B', str(DEPLOYMENT / 'libexec/native_service.py'), 'health'], check=True, timeout=120)
     elif args.mode == 'b-cohort':
         need(args.variant, 'Missing cohort variant')
-        cohort('node-b', args.variant)
+        cohort('node-b', args.variant, pair_epoch=args.pair_epoch)
+    elif args.mode == 'b-pair':
+        need(args.variant and args.pair_epoch and args.operation, 'Missing B pair scope')
+        sync = sync_module()
+        if args.operation == 'prepare':
+            sync.prepare('node-b', args.variant, args.pair_epoch)
+            result = {'prepared': True}
+        else:
+            need(args.payload is None or len(args.payload) <= 65536, 'Pair payload too large')
+            result = sync.control('node-b', args.variant, args.pair_epoch, args.operation,
+                                  json.loads(args.payload) if args.payload else None)
+        print(json.dumps(result))
     else:
         need(args.file in ('root-node-b.txt', 'original-node-b.json', 'native-node-b.json'), 'File outside public result contract')
         data = read(WORK / args.file, 8 * 1024**2)
