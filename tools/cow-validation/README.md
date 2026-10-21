@@ -22,6 +22,7 @@ existing tools; no elevation fallback is supplied.
 | `native_pmem_guest.py` | One independently configured FC Guest, same-UID provider FD/lease handoff, private copy of upper, strict serial DAX/Base markers. Requires existing KVM access. No SDK. |
 | `native_pmem_guest_trace.py` | The same bounded experiment with an explicitly pinned trace runner. Original FC filters stay enabled. Diagnostic only. |
 | `owned_sigsys_trace.cpp` | Compile with an existing native C++ compiler. Trace only the freshly created child and its reported descendants; never attach to unrelated processes. |
+| `getpid_policy_guest.py` | After an actual AArch64 VMM/root-thread syscall-172 trap, add only `getpid` to a pinned strict policy, compile the existing offline seccompiler CLI and optionally retry one traced Guest. All site settings arrive through `--profile-json`; no profile is bundled. |
 | `collect.py` | Explicit PID/start-ticks/RAM ranges and file mincore sampling. Missing permissions/masked PFNs are unknown, never zero. No whole-file cache warming or cache dropping. |
 | `report.py` | Read `--evidence` and optional `--sample` JSON files and write a new report directory. No bundled laboratory data or automatic acceptance. |
 
@@ -32,6 +33,15 @@ first native Guest stopped with SIGSYS. Building successfully therefore does
 not approve that policy for GNU libc. Identify the exact rejected syscall and
 validate an ABI-appropriate strict policy before deployment; never disable the
 filter or silently replace it with a default-allow policy.
+
+The observed-getpid repair runner accepts a JSON **string** in `--profile-json`,
+with explicit workspace/case/build/toolchain paths, expected host/UID/GID/KVM
+group and source/configuration/binary/policy digests. Keep that profile local.
+Default invocation prints a plan without reading experiment files. An authorized
+ordinary account with existing KVM access can use `--run --execute-guest`; the
+runner verifies the recorded trap and preserves all original rules and outputs.
+It does not automatically allow any subsequent rejected syscall, allocate UB
+memory, restart a provider, install tools, or prove full cross-node CoW.
 
 1. Validate exact source/binary/content hashes, available resources, existing
    permissions and lifecycle receipts. Never reuse a failed/uncertain pending
