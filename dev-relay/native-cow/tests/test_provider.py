@@ -97,6 +97,16 @@ class Provider(unittest.TestCase):
                 patch.object(m,'prepare',side_effect=AssertionError('No preparation requested')), \
                 contextlib.redirect_stdout(io.StringIO()):self.assertEqual(m.main(),0)
 
+    def test_deleted_record_lock_is_not_a_snapshot_reference(self):
+        class Lock:
+            name='11111111-2222-3333-4444-555555555555.lock'
+            def lstat(self):return types.SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_uid=1204,st_nlink=1,st_size=0)
+            def resolve(self,strict=False):return self
+        self.assertFalse(m.retained_snapshot_records(types.SimpleNamespace(iterdir=lambda:iter([Lock()]))))
+        unknown=types.SimpleNamespace(name='unknown.lock')
+        with self.assertRaisesRegex(RuntimeError,'Unknown catalog'):
+            m.retained_snapshot_records(types.SimpleNamespace(iterdir=lambda:iter([unknown])))
+
     def test_retained_snapshots_block_retirement_before_any_rpc(self):
         class P(PurePosixPath):
             def exists(self):return True

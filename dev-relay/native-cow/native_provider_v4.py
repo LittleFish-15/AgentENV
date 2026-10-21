@@ -294,6 +294,20 @@ print('NEW_REAL_ROOTFS_PROVIDER_SUBMITTED_NOT_A_GUEST_OR_PHYSICAL_SHARING_PASS')
             'postMapCoverageGuardBytes':report['postMapCoverageGuardBytes'],'physicalHardQuota':False,'SDK_called':False}
 
 
+def retained_snapshot_records(records):
+    # POSIX catalog record locks survive deletion of their JSON record. They
+    # are synchronization files, not durable snapshot references.
+    for count,path in enumerate(records.iterdir(),1):
+        need(count<=4096,'Snapshot directory exceeds field-run inspection bound')
+        if path.name.endswith('.json'):return True
+        need(re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.lock',path.name),
+             'Unknown catalog entry; preserve the base')
+        meta=path.lstat()
+        need(stat.S_ISREG(meta.st_mode) and meta.st_uid==1204 and meta.st_nlink==1 and meta.st_size==0
+             and path.resolve(strict=True)==path,'Unexpected catalog lock; preserve the base')
+    return False
+
+
 def retire(args):
     ordinary(args.node);session,work,_=prepared(args.node)
     import fcntl
@@ -316,7 +330,7 @@ def retire(args):
         records=DEPLOYMENT/'state/snapshot-store/repository/catalog/records'
         if records.exists():
             need(records.resolve(strict=True)==records and records.is_dir(),'Repository path differs')
-            need(next(records.iterdir(),None) is None,'Retained snapshot records require this base; keep publication alive')
+            need(not retained_snapshot_records(records),'Retained snapshot records require this base; keep publication alive')
         key=read(DEPLOYMENT/'config/api-key',1024).decode().strip()
         need(re.fullmatch('e2b_[0-9a-f]{48}',key),'API key format differs; value withheld')
         connection=http.client.HTTPConnection('127.0.0.1',definition['apiPort'],timeout=15)

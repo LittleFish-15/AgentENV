@@ -68,11 +68,13 @@ timed out. Rollback refuses pending requests or retained sandbox IDs.
 ## Still outstanding
 
 The release bundle deliberately contains no workload rootfs or live UB manifest.
-The same committed immutable rootfs layers and correctly scoped provider
-generation still need to be supplied on each node before workload validation.
-The complete capture/restore/Fork batch, same-workload comparison controller and
-measurement/report wiring are separate unfinished work. Do not label the
-commands above as a completed one-command CoW experiment.
+The immutable input transport and real-rootfs provider transition entries are
+described in ROOTFS_INPUTS.md and GENERATION.md. The bounded local
+capture/restore/Fork batch, public workload and explicit-gap report are described
+in COHORT.md. They are implemented and fixture-tested, not target-executed.
+The complete bootstrap, synchronized two-node coordination, privileged sampler
+and Host lower access observer integration are still outstanding. Do not label
+the commands above as a completed one-command CoW experiment.
 
 Local validation: 6 deployment contract checks, 7 generated rollback checks
 against an in-memory OS model, and 5 bundle integrity/layout tests passed. They
