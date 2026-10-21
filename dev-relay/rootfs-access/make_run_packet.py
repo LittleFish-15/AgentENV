@@ -9,7 +9,8 @@ RELAY=HERE.parent
 def build():
     payload={}
     for name,path in [('engine',RELAY/'cow55_replay.py'),('accounting',HERE/'page_accounting.py'),
-                      ('process_summary',RELAY/'cow55_process_summary.py'),('root_session',HERE/'root_session.py')]:
+                      ('process_summary',RELAY/'cow55_process_summary.py'),('root_session',HERE/'root_session.py'),
+                      ('recovery',HERE/'recover_previous.py')]:
         raw=path.read_bytes()
         if name=='engine':
             old=b'template_count in (16,17,55)'
@@ -30,6 +31,7 @@ ENGINE=_module('engine')
 ACCOUNTING=_module('accounting')
 PROCESS=_module('process_summary')
 ROOT_SOURCE=_source('root_session')
+RECOVERY_SOURCE=_source('recovery')
 '''
     footer='''
 if __name__=='__main__':

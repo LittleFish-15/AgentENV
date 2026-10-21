@@ -1,4 +1,4 @@
-import ast, copy, importlib.util, json, tempfile, unittest
+import ast, base64, copy, importlib.util, json, tempfile, unittest, shutil, uuid
 import types
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
@@ -44,9 +44,61 @@ class FourRunTests(unittest.TestCase):
         strings=[n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str)]
         for forbidden in ('modprobe','rmmod','drop_caches','sudo'):self.assertNotIn(forbidden,strings)
     def test_rpc_rejects_early_restoration_during_sample(self):
-        r=object.__new__(m.FourRun);r.sock=object()
-        with patch.object(m.ENGINE,'send'),patch.object(m.ENGINE,'receive',return_value={'op':'restored'}):
+        r=object.__new__(m.FourRun);r.sock=object();r.root_failed=False;r.c=types.SimpleNamespace(report={})
+        with patch.object(m.ENGINE,'send'),patch.object(m.ENGINE,'receive',return_value={'op':'restored','report':{'status':'failed'}}):
             with self.assertRaises(RuntimeError):r.rpc('sample')
+        self.assertEqual(r.c.report['root_session'],{'status':'failed'})
+    def test_root_error_is_preserved_then_cleanup_ack_precedes_restore(self):
+        r=object.__new__(m.FourRun);r.sock=object();r.root_failed=False;r.c=types.SimpleNamespace(report={})
+        error={'op':'session_error','reason':'bad binding'}
+        with patch.object(m.ENGINE,'send') as send,patch.object(m.ENGINE,'receive',side_effect=[error,{'op':'restored','report':{'status':'restored'}}]):
+            with self.assertRaisesRegex(RuntimeError,'bad binding'):r.rpc('bind',jobs=[])
+            self.assertTrue(r.root_failed);self.assertEqual(r.c.report['root_failure'],error)
+            r.rpc('restore')
+            self.assertEqual(send.call_args.args[1],{'op':'cleanup_complete'})
+    def test_runtime_relative_parent_path_is_normalized_before_scope_check(self):
+        spec=importlib.util.spec_from_file_location('collector_for_paths',HERE/'cow_ram_readonly.py');collector=importlib.util.module_from_spec(spec);spec.loader.exec_module(collector)
+        directory=Path.cwd()/('.cow4-path-test-'+uuid.uuid4().hex);directory.mkdir(mode=0o755)
+        try:
+            base=directory/'base';repo=base/'state/repository/managed-layers';repo.mkdir(parents=True)
+            runtime=directory/'short/vm/overlaybd';runtime.mkdir(parents=True)
+            lower=repo/'lower';lower.write_bytes(b'fixture')
+            path=runtime/'../../../base/state/repository/managed-layers/lower'
+            self.assertNotEqual(path.resolve(strict=True),path)
+            with patch.object(collector,'BASE',base),patch.object(collector,'SHORT',directory/'short'):
+                self.assertEqual(collector.scoped_file_path(path),lower)
+                with self.assertRaises(RuntimeError):collector.scoped_file_path(directory/'outside')
+        finally:
+            self.assertEqual(directory.resolve().parent,Path.cwd().resolve());self.assertTrue(directory.name.startswith('.cow4-path-test-'));shutil.rmtree(directory)
+    def test_retry_refuses_uncertain_or_executed_old_attempt(self):
+        ids=[str(i) for i in range(8)]
+        old={'run_id':'d64230294a1844b69712a9cf27ac0789','status':'STOPPED_COW4_ACCESS','all_cohort_guests_released':True,
+            'restore_outcome_uncertain':False,'replay_completed_guests':0,'jobs':[{'sandbox_id':i,'steps_completed':0} for i in ids],'released_sandboxes':ids}
+        recovery={'status':'COW4_ORIGINAL_RECOVERED_READY_FOR_REVIEWED_RETRY','run_id':old['run_id'],'original_config_sha256':m.CONFIG_SHA,
+                  'empty_inventory':True,'prior_eight_guests_http404':True,'other_services_unchanged':True}
+        self.assertEqual(m.validate_retry(old,recovery),set(ids))
+        old['jobs'][0]['steps_completed']=1
+        with self.assertRaises(RuntimeError):m.validate_retry(old,recovery)
+        old['jobs'][0]['steps_completed']=0;old['restore_outcome_uncertain']=True
+        with self.assertRaises(RuntimeError):m.validate_retry(old,recovery)
+    def test_recovery_refuses_nonempty_inventory_without_write_or_restart(self):
+        ns={};exec(compile(m.RECOVERY_SOURCE,'recovery','exec'),ns)
+        ids=[f'{i:08x}-0000-0000-0000-000000000000' for i in range(8)]
+        previous={'run_id':ns['RUN'],'status':'STOPPED_COW4_ACCESS','replay_completed_guests':0,
+            'all_cohort_guests_released':True,'restore_outcome_uncertain':False,'released_sandboxes':ids,
+            'jobs':[{'sandbox_id':s,'steps_completed':0} for s in ids],
+            'root_plan':{'new_config_sha256':ns['NEW_SHA'],'original_config_sha256':ns['OLD_SHA'],
+                'owner_pid':1,'owner_ticks':'previous','boot_id':'boot','original_config_base64':base64.b64encode(b'old').decode()}}
+        def read(path,limit=0):return json.dumps(previous).encode() if path==ns['PENDING'] else b'new'
+        state={'ActiveState':'active','User':'jwk','Group':'jwk','MainPID':'3873455','ticks':'36630090'}
+        ns['read']=read;ns['ticks']=lambda _: (_ for _ in ()).throw(FileNotFoundError());ns['state']=lambda _:state;ns['others']=lambda:{}
+        from unittest.mock import Mock
+        ns['api']=Mock(side_effect=[(404,None)]*8+[(200,[{'sandboxID':'foreign'}])])
+        with patch.object(ns['os'],'geteuid',return_value=0,create=True),patch.object(ns['os'],'uname',return_value=types.SimpleNamespace(nodename='server1'),create=True),patch.object(Path,'read_text',return_value='boot'),patch.object(ns['hashlib'],'sha256',side_effect=lambda x:types.SimpleNamespace(hexdigest=lambda:ns['OLD_SHA'] if x==b'old' else ns['NEW_SHA'])),patch.object(ns['os'],'open') as write,patch.object(ns['subprocess'],'run') as command,patch('builtins.print') as output:
+            ns['recovery']()
+        write.assert_not_called();command.assert_not_called()
+        report=json.loads(output.call_args_list[1].args[0]);self.assertEqual(report['status'],'STOPPED_COW4_RECOVERY')
+        self.assertIn('not empty',report['reason'])
     def test_completed_window_does_not_silently_drop_start_straddler(self):
         a=m.ACCOUNTING
         header={'kind':'header','version':1,'pid':1,'clock':'CLOCK_MONOTONIC','build_patch_sha256':'x'}

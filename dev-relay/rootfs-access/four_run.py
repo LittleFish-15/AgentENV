@@ -48,6 +48,33 @@ def inventory():
             'registered':len(list(char.glob('ublkc*')))}
 
 
+def validate_retry(old, recovery):
+    ENGINE.need(old['run_id']=='d64230294a1844b69712a9cf27ac0789' and old['status']=='STOPPED_COW4_ACCESS','Only the reviewed first failure can be retried')
+    ENGINE.need(old['all_cohort_guests_released'] and not old['restore_outcome_uncertain'] and old['replay_completed_guests']==0,'Old execution/cleanup is uncertain')
+    ids={j['sandbox_id'] for j in old['jobs']}
+    ENGINE.need(len(old['jobs'])==len(ids)==8 and ids==set(old['released_sandboxes']) and all(j['steps_completed']==0 for j in old['jobs']),'Previous eight-Guest scope differs')
+    ENGINE.need(recovery['status']=='COW4_ORIGINAL_RECOVERED_READY_FOR_REVIEWED_RETRY' and recovery['run_id']==old['run_id'] and recovery['original_config_sha256']==CONFIG_SHA,'Trusted recovery not complete')
+    ENGINE.need(recovery['empty_inventory'] and recovery['prior_eight_guests_http404'] and recovery['other_services_unchanged'],'Recovery coverage incomplete')
+    return ids
+
+
+def prepare_retry():
+    m=ENGINE;p=Path('/run/cow4-access-recovery-d6423029.json')
+    m.need(p.resolve(strict=True)==p,'Redirected root recovery receipt')
+    meta=p.stat();m.need(stat.S_ISREG(meta.st_mode) and meta.st_uid==0 and not meta.st_mode&0o022 and meta.st_size<65536,'Untrusted root recovery receipt')
+    recovery=json.loads(p.read_bytes());raw=m.H.read(m.PENDING,2*1024**2);old=json.loads(raw)
+    ids=validate_retry(old,recovery);m.need(digest(raw)==recovery['previous_pending_sha256'],'Previous pending changed since recovery')
+    identity=m.H.runtime_pid();m.need(list(identity)==recovery['original_after'],'Recovered Runtime identity changed')
+    api=m.Api(identity);m.need(api.call('GET','/v2/sandboxes?limit=1')==(200,[]),'Original inventory no longer empty')
+    for sid in sorted(ids):m.need(api.call('GET','/sandboxes/'+sid)[0]==404,'Previous Guest still exists')
+    archive=m.PENDING.with_name('cow4-access-node-a.previous-d6423029.json')
+    m.need(not archive.exists(),'Previous attempt already archived; no repeat')
+    m.need(m.H.read(m.PENDING,2*1024**2)==raw,'Previous attempt changed during validation')
+    os.link(m.PENDING,archive);m.PENDING.unlink()
+    return {'previous_run_id':old['run_id'],'previous_report_preserved':str(archive),
+            'recovery_receipt':str(p),'old_eight_guests_http404':True,'old_trajectory_actions':0}
+
+
 def summarize(work, report, process):
     samples=[]
     p=work/'measurements/access-cache.jsonl'
@@ -102,8 +129,15 @@ class FourRun:
     def __init__(self, cohort, plan, files, sock):
         self.c=cohort;self.plan=plan;self.files=files;self.sock=sock;self.bindings={};self.bound=[];self.ends={}
         self.start=None;self.process=PROCESS.Summary();self.index=0;self.cache_index=0;self.observer_pid=None
+        self.root_failed=False;self.root_final=None
     def rpc(self,op,**values):
-        ENGINE.send(self.sock,dict(op=op,**values));r=ENGINE.receive(self.sock)
+        wire_op='cleanup_complete' if op=='restore' and self.root_failed else op
+        ENGINE.send(self.sock,dict(op=wire_op,**values));r=ENGINE.receive(self.sock)
+        if r.get('op')=='session_error':
+            self.root_failed=True;self.c.report['root_failure']=r
+            raise RuntimeError('Root supervisor failed: '+str(r.get('reason')))
+        if r.get('op')=='restored':
+            self.root_final=r['report'];self.c.report['root_session']=r['report']
         expected={'activate':'activated','bind':'bound','restore':'restored'}.get(op,op)
         ENGINE.need(r.get('op')==expected,'Root session returned unexpected state: '+str(r.get('op')))
         return r
@@ -192,17 +226,22 @@ class FourRun:
 
 
 def main():
-    m=ENGINE;parser=argparse.ArgumentParser();parser.add_argument('mode',choices=('run','status'));args=parser.parse_args()
+    m=ENGINE;parser=argparse.ArgumentParser();parser.add_argument('mode',choices=('run','status','recover-previous','retry-after-recovery'));args=parser.parse_args()
     m.need(os.getuid()==os.geteuid()==1204 and os.uname().nodename=='server1','A ordinary jwk only');os.umask(0o077)
     caps=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
     m.need(all(int(caps[k].strip(),16)==0 for k in ('CapEff','CapPrm','CapAmb')),'Capability-free owner required')
     m.PENDING=m.ROOT/'relay/cow4-access-node-a.pending.json'
     if args.mode=='status':print(m.PENDING.read_text());return 0
-    m.need(not m.PENDING.exists(),'This experiment receipt already exists; return status, do not repeat')
+    if args.mode=='recover-previous':
+        print('Paste the following literal recovery body in A/root. No Guest creation or replay is requested.')
+        print("/usr/bin/python3 -I -B - <<'COW4_RECOVER_D6423029'\n"+RECOVERY_SOURCE+'\nrecovery()\nCOW4_RECOVER_D6423029')
+        return 0
+    m.need(m.PENDING.exists() if args.mode=='retry-after-recovery' else not m.PENDING.exists(),'Unexpected pending state; use status')
     import fcntl
     lock=os.open(m.LOCK,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600);fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     m.B,_=m.load(m.ROOT/'cow55_build_edf502d.py',m.BUILDER_SHA,'four_builder');m.B.load_helper();m.H=m.B.H
     m.R,collector=m.load(m.ROOT/'cow_ram_readonly.py',m.COLLECTOR_SHA,'four_collector')
+    retry=prepare_retry() if args.mode=='retry-after-recovery' else None
     m.B.inputs(m.ROOT/'cow55_inputs.json');inputs=m.B.read_json(m.ROOT/'cow55_inputs.json');build=m.B.read_json(m.B.STATE)
     previous=m.B.read_json(m.ROOT/'relay/cow33-batch1-node-a.pending.json')
     m.need(previous['run_id']=='083604f2f76045c0beb8de4cf92c0758' and previous.get('all_cohort_guests_released') and not previous.get('restore_outcome_uncertain'),'First batch cleanup differs')
@@ -221,7 +260,8 @@ def main():
     work=Path(tempfile.mkdtemp(prefix='node-a-cow4-access-',dir=m.ROOT/'relay/reports'))
     cohort=m.Cohort(work,dict(build,original_identity=list(identity),cases=built),dict(inputs,cohort=dict(inputs['cohort'],cases=selected)),template_count=4,admission_workers=1)
     cohort.control=lambda _:None;cohort.deadline=time.monotonic()+5400
-    cohort.report.update(revision='cow4-attributed-v1',variant='original_with_diagnostic_observer',status='PREPARING_COW4_ACCESS',replay_completed_guests=0)
+    cohort.report.update(revision='cow4-attributed-v2',variant='original_with_diagnostic_observer',status='PREPARING_COW4_ACCESS',replay_completed_guests=0)
+    cohort.report['previous_attempt_resolution']=retry
     cohort.report.update(configured_guest_ram_bytes=8*4096*1024**2,physical_guest_ram_resampled=False,cache_target_interval_seconds=15)
     observer=work/'observer';observer.mkdir(mode=0o700);candidate=observer/'uvm-ublk-daemon-observe'
     source=Path(receipt['candidate']);m.need(source==Path(BUILD_WORK)/'candidate/uvm-ublk-daemon-observe','Candidate path differs')
@@ -275,7 +315,7 @@ def main():
         if sock and runner:
             try:
                 m.need(cohort.report['all_cohort_guests_released'],'Uncertain Guest ownership; no service restoration request')
-                cohort.report['root_session']=runner.rpc('restore')['report']
+                cohort.report['root_session']=runner.root_final if runner.root_final is not None else runner.rpc('restore')['report']
             except Exception as e:cohort.report['root_restore_error']={'type':type(e).__name__,'reason':str(e)}
         if sock:sock.close()
         listener.close()

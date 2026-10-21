@@ -99,14 +99,18 @@ def bind_guests(plan, active, jobs):
         for layer in cfg['lowers']:
             require(set(layer).issuperset({'file'}) and not layer.get('ub'),'Expected local original lower')
             p=Path(layer['file']);p=p if p.is_absolute() else cfg_path.parent/p
-            require(p.resolve(strict=True)==p and p.parent==BASE/'state/snapshot-store/repository/managed-layers','Unexpected lower placement')
+            # Runtime materialization intentionally writes relative-parent paths.
+            # Normalize lexical .. first, then retain symlink/root/inode checks.
+            p=scoped_file_path(p)
+            require(p.parent==BASE/'state/snapshot-store/repository/managed-layers','Unexpected normalized lower placement: '+str(p))
             meta=p.stat();require(stat.S_ISREG(meta.st_mode) and meta.st_uid==1204,'Unexpected lower inode')
             lowers.append({'path':str(p),'dev':meta.st_dev,'inode':meta.st_ino,'file_bytes':meta.st_size})
         require(sorted(lowers,key=lambda x:x['path'])==sorted(plan['template_lowers'][job['template_id']],key=lambda x:x['path']),'Runtime lower binding differs')
         upper=[]
         for name in ('data','index'):
             p=Path(cfg['upper'][name]);p=p if p.is_absolute() else cfg_path.parent/p
-            require(p.resolve(strict=True)==p and p.is_relative_to(b['cwd']),'Unexpected upper path')
+            p=scoped_file_path(p)
+            require(p.is_relative_to(b['cwd']),'Unexpected upper path')
             meta=p.stat();require(stat.S_ISREG(meta.st_mode) and meta.st_uid==1204,'Unexpected upper inode')
             upper.append({'path':str(p),'dev':meta.st_dev,'inode':meta.st_ino})
         bound.append({'sandbox_id':b['sandbox_id'],'template_id':job['template_id'],'pid':pid,'start_ticks':b['start_ticks'],
@@ -185,6 +189,13 @@ def root_session(plan):
         report['status']='COW4_ROOT_SESSION_ENDING'
     except BaseException as e:
         report.update(status='STOPPED_COW4_ROOT_SESSION',error_type=type(e).__name__,reason=str(e))
+        if armed and sock and active:
+            try:
+                wire_send(sock,{'op':'session_error','error_type':type(e).__name__,'reason':str(e)})
+                require(wire_recv(sock)=={'op':'cleanup_complete'},'Owner cleanup acknowledgement missing')
+                report['owner_cleanup_acknowledged_after_error']=True
+            except BaseException as coordination:
+                report['cleanup_coordination_error']={'type':type(coordination).__name__,'reason':str(coordination)}
     finally:
         try:
             require(armed,'Supervisor never armed; no restoration action')
