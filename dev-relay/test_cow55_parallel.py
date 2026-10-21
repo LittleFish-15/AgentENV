@@ -6,6 +6,10 @@ spec=importlib.util.spec_from_file_location('parallel55_test',Path(__file__).wit
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 class Checkpoints(unittest.TestCase):
+    def test_disappeared_worker_without_receipt_not_adopted(self):
+        state={'run_id':'run','input_sha256':'pin','status':'COW55_TEMPLATE_PREPARATION_RUNNING','worker_pid':123,'worker_start_ticks':'ticks','worker_finished':False}
+        with patch.object(m,'B',types.SimpleNamespace(STATE='state',INPUT_SHA='pin',read_json=lambda p:state)),patch.object(m,'same_process',return_value=False):
+            with self.assertRaisesRegex(RuntimeError,'orphan'):m.handoff({'source_run_id':'run'})
     def test_only_known_build_poll_is_transferable(self):
         for stage in ('BUILDING','WAITING_ASYNC'):
             self.assertTrue(m.transferable({'cases':[{'state':'READY'},{'state':stage},{'state':'RESOLVED'}]}))

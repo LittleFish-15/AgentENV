@@ -86,7 +86,8 @@ def handoff(control):
         s=B.read_json(B.STATE);need(s['run_id']==control['source_run_id'] and s['input_sha256']==B.INPUT_SHA,'Original batch changed')
         if s['status']=='COW55_ALL_TEMPLATES_READY_NO_REPLAY_STARTED':return False
         pid,start=s.get('worker_pid'),s.get('worker_start_ticks')
-        if s.get('worker_finished') or not same_process(pid,start):return True
+        if s.get('worker_finished'):return True
+        need(same_process(pid,start),'Coordinator disappeared without a finished receipt; possible orphan download, no automatic takeover')
         need(s.get('max_parallel_builds')==1 and serial_identity(pid,start),'Unexpected active coordinator; no signals')
         if transferable(s):
             interrupted=False
@@ -275,6 +276,7 @@ def coordinator(control,resume=False):
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         state=B.read_json(B.STATE);need(state['run_id']==control['source_run_id'] and state['input_sha256']==B.INPUT_SHA,'Batch changed at handoff')
         need(not same_process(state.get('worker_pid'),state.get('worker_start_ticks')),'Previous coordinator still present')
+        need(state.get('worker_finished') is True,'Previous coordinator did not acknowledge its exit; no automatic adoption')
         H.save(Path(control['work_directory'])/('before-'+uuid.uuid4().hex+'.json'),state)
         control['status']='COW55_PARALLEL_RUNNING';H.save(CONTROL,control);parallel_run(state,control)
         control['status']='COW55_PARALLEL_WORKER_FINISHED_CHECK_MAIN_RESULT'
