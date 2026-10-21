@@ -83,7 +83,7 @@ def summarize(work, report, process):
             for line in f:samples.append(json.loads(line))
     rows=[]
     for tid in sorted({j['template_id'] for j in report['jobs']}):
-        matching=[(s,r) for s in samples for r in s.get('templates',[]) if r['template_id']==tid]
+        matching=[(s,DETAILS.expand_row(r)) for s in samples for r in s.get('templates',[]) if r['template_id']==tid]
         for phase in sorted({r['phase'] for _,r in matching}):
             subset=[r for _,r in matching if r['phase']==phase];metrics={}
             for key in subset[0]:
@@ -101,6 +101,7 @@ def summarize(work, report, process):
         'payload_is_host_backing_format_not_decoded_guest_file_bytes':True,
         'boot_id':report['root_plan']['boot_id'],'candidate_sha256':CANDIDATE_SHA,'observer_patch_sha256':PATCH_SHA,
         'phase_note':'both_replaying, mixed_running_idle and after_replay are separate; finished Guest access sets freeze at trajectory completion.'}
+    result['rootfs_storage_details']=DETAILS.summarize(report,samples)
     ENGINE.H.save(work/'combined-summary.json',result)
     def amount(v,ratio=False):
         if not v:return 'NA'
@@ -121,7 +122,7 @@ def summarize(work, report, process):
         fields=('sandbox_min_rss_bytes','sandbox_max_rss_bytes','sandbox_min_pss_bytes','sandbox_max_pss_bytes','template_min_shared_bytes','template_max_shared_bytes')
         lines.append('|'+ '|'.join([r['template_id'],r['sandbox_id'],r['phase']]+['NA' if r[k] is None else f'{r[k]/1024**2:.3f}' for k in fields]+[str(r['template_valid_paired_samples'])])+'|')
     lines+=['','共享估计逐轮Σ(RSS−PSS)/(2−1)，整进程口径不等于memfile物理共享。lower层数/大小及upper各次file/allocated/resident数据见JSON。不得将各模板交集直接相加作为全局去重收益。','']
-    (work/'combined-summary.md').write_text('\n'.join(lines),encoding='utf-8')
+    (work/'combined-summary.md').write_text('\n'.join(lines)+'\n'+DETAILS.markdown(result['rootfs_storage_details']),encoding='utf-8')
     return result
 
 
