@@ -1,4 +1,4 @@
-import contextlib,copy,importlib.util,types,unittest,json
+import contextlib,copy,importlib.util,types,unittest,json,stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -85,5 +85,69 @@ class BuildTests(unittest.TestCase):
         raw=json.dumps({'manifests':[row,row]}).encode()
         with patch.object(m,'H',types.SimpleNamespace(checked_process=lambda *a:None,read=lambda *a:raw)):
             with self.assertRaisesRegex(RuntimeError,'Ambiguous'):m.resolve({'image_tag':'registry/repo:tag'},Path('/owned'),{})
+
+class ReadyInventoryTests(unittest.TestCase):
+    def setup_inventory(self,mode='ok'):
+        repo=m.BASE/'state/snapshot-store/repository'
+        layer=lambda n:{'digest':'sha256:'+format(n,'064x'),'size':1024}
+        record={'id':ID,'resources':{'cpu_count':2,'memory_mib':4096,'disk_size_mib':65536},
+                'committed':{'memory_layers':[layer(1)],'rootfs_layers':[{'Managed':layer(n)} for n in range(2,10)]}}
+        if mode=='external':record['committed']['rootfs_layers'][0]={'External':layer(2)}
+        raw=json.dumps(record).encode();reads=[];stats=[]
+        def read(path,*args):
+            reads.append(path)
+            if path==repo/'catalog/records'/(ID+'.json'):return raw
+            if path==repo/'snapshots'/ID/'commit':return b'committed'
+            raise FileNotFoundError('Unexpected path: '+str(path))
+        def safe(path):
+            if not path.is_relative_to(repo/'managed-layers'):raise AssertionError('Wrong layer root')
+            return path
+        def observe(path,*args,**kwargs):
+            stats.append(path)
+            if mode=='missing':raise FileNotFoundError(2,'Missing fixture layer',str(path))
+            if mode=='denied':raise PermissionError(13,'Unreadable fixture layer',str(path))
+            return types.SimpleNamespace(st_mode=stat.S_IFDIR if mode=='directory' else stat.S_IFREG,
+                st_size=512 if mode=='size' else 1024,st_blocks=8,st_dev=1,st_ino=len(stats),st_mtime_ns=123)
+        def legacy(sid):raise AssertionError('Pinned legacy helper uses the old root; must not be called')
+        stack=contextlib.ExitStack();self.addCleanup(stack.close)
+        stack.enter_context(patch.object(m,'H',types.SimpleNamespace(read=read,safe=safe,parent_layer_inventory=legacy)))
+        stack.enter_context(patch.object(Path,'stat',observe))
+        return {'template_id':ID,'build_id':ID,'state':'BUILDING'},reads,stats
+    def test_verified_catalog_reused_correct_root_and_no_legacy_call(self):
+        case,reads,stats=self.setup_inventory();m.verify_ready(case)
+        self.assertEqual(len(reads),2);self.assertEqual(len(stats),9)
+        self.assertEqual(case['resources']['cpu_count'],2)
+        self.assertEqual(case['layer_inventory_summary']['memory_layers'],1)
+        self.assertEqual(case['layer_inventory_summary']['rootfs_layers'],8)
+        self.assertTrue(case['layer_inventory_summary']['available'])
+    def test_missing_files_still_block_and_retain_diagnostics(self):
+        case,_,_=self.setup_inventory('missing')
+        with self.assertRaisesRegex(RuntimeError,'unavailable'):m.verify_ready(case)
+        v=case['layer_inventory_summary'];self.assertEqual(v['failed_layer_count'],9)
+        self.assertEqual(v['failed_layers'][0]['errno'],2)
+    def test_size_mismatch_not_ignored(self):
+        case,_,_=self.setup_inventory('size')
+        with self.assertRaises(RuntimeError):m.verify_ready(case)
+        r=case['layer_inventory_summary']['failed_layers'][0]
+        self.assertEqual(r['file_bytes'],512);self.assertEqual(r['stored_bytes_declared'],1024)
+    def test_external_is_not_silently_accepted(self):
+        case,_,stats=self.setup_inventory('external')
+        with self.assertRaises(RuntimeError):m.verify_ready(case)
+        self.assertEqual(case['layer_inventory_summary']['failed_layer_count'],1)
+        self.assertEqual(len(stats),8)
+    def test_non_regular_file_rejected(self):
+        case,_,_=self.setup_inventory('directory')
+        with self.assertRaises(RuntimeError):m.verify_ready(case)
+        self.assertEqual(case['layer_inventory_summary']['failed_layer_count'],9)
+    def test_unreadable_files_keep_errno(self):
+        case,_,_=self.setup_inventory('denied')
+        with self.assertRaises(RuntimeError):m.verify_ready(case)
+        self.assertEqual(case['layer_inventory_summary']['failed_layers'][0]['errno'],13)
+    def test_resume_first_ready_build_needs_no_new_post(self):
+        case,_,_=self.setup_inventory();api=FakeApi([(200,{'status':'ready'})]);writes=[]
+        with patch.object(m,'save',lambda s:writes.append(copy.deepcopy(s))),patch.object(m,'empty',lambda a:None):
+            m.build_case(case,{'cases':[case]},api,Path('/unused'),{})
+        self.assertEqual(case['state'],'READY');self.assertEqual([c[0] for c in api.calls],['GET'])
+        self.assertTrue(writes[-1]['cases'][0]['layer_inventory_summary']['available'])
 
 if __name__=='__main__':unittest.main()

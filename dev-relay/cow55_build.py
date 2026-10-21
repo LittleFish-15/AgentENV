@@ -139,17 +139,56 @@ def resolve(case,work,env):
     digest='sha256:'+sha(raw)
     case.update(manifest_digest=digest,tag_manifest_digest=top,pinned_image=ref.rsplit(':',1)[0]+'@'+digest,compressed_bytes=descriptors(manifest),state='RESOLVED')
 
+def layer_inventory(repo,record):
+    """Use the already validated catalog and its explicit repository root.
+
+    The pinned 424b012 parent helper omits repository/ in its inventory root.
+    Its file/networking utilities are reusable, but that inventory path is not.
+    """
+    result={'scope':'stored_layer_metadata_only_no_shared_page_claim','snapshot_id':record['id'],
+            'repository':str(repo),'content_hashes_verified':False,'available':True}
+    for kind in ('memory','rootfs'):
+        raw=record['committed'].get(kind+'_layers')
+        need(isinstance(raw,list) and 0<len(raw)<=256,'Missing/invalid '+kind+' layer list')
+        rows=[]
+        for item in raw:
+            need(isinstance(item,dict),'Invalid layer record')
+            origin='Managed' if kind=='memory' else next(iter(item),'')
+            need(kind=='memory' or len(item)==1,'Ambiguous rootfs layer type')
+            layer=item if kind=='memory' else item.get(origin)
+            need(isinstance(layer,dict),'Invalid layer descriptor')
+            digest,size=layer.get('digest'),layer.get('size')
+            need(isinstance(digest,str) and re.fullmatch(DIGEST,digest) and type(size) is int and size>=0,'Invalid layer digest/size')
+            row={'origin':origin,'digest':digest,'stored_bytes_declared':size,'available':False}
+            if origin=='Managed':
+                path=repo/'managed-layers'/(digest.replace(':','_')+'.overlaybd.commit');row['path']=str(path)
+                try:
+                    H.safe(path);meta=path.stat();need(stat.S_ISREG(meta.st_mode),'Managed layer is not a regular file')
+                    row.update(file_bytes=meta.st_size,allocated_file_bytes=meta.st_blocks*512,dev=meta.st_dev,inode=meta.st_ino,mtime_ns=meta.st_mtime_ns)
+                    need(meta.st_size==size,'Managed layer descriptor/file size mismatch')
+                    row['available']=True
+                except Exception as error:
+                    row.update(error_type=type(error).__name__,errno=getattr(error,'errno',None),reason=str(error))
+            else:row['reason']='External placement unresolved; no local-file measurement claimed'
+            result['available']=result['available'] and row['available'];rows.append(row)
+        result[kind]=rows
+    return result
+
 def verify_ready(case):
     sid=case['build_id'];repo=BASE/'state/snapshot-store/repository';raw=H.read(repo/'catalog/records'/(sid+'.json'),2*1024**2);record=json.loads(raw)
     need(record['id']==sid and record['resources']['memory_mib']==4096,'Built template resource/identity mismatch')
     need(H.read(repo/'snapshots'/sid/'commit')==b'committed','Built snapshot not committed')
     need(record['committed'],'Ready template lacks committed artifacts')
     need('catalog_sha256' not in case or case['catalog_sha256']==sha(raw),'Previously ready catalog changed')
-    inv=H.parent_layer_inventory(sid)
-    need(inv.get('available') and all(inv.get(k) and all(r.get('origin')=='Managed' and r.get('file_bytes')==r.get('stored_bytes_declared') for r in inv[k]) for k in ('memory','rootfs')),
-         'Built layers are not completely available as measured managed files')
+    inv=layer_inventory(repo,record)
     case.update(catalog_sha256=sha(raw),resources=record['resources'],parent_layer_inventory=inv,
        build_vm_stop_evidence='Ready publication follows successful TemplateBuildRunner sandbox.stop; not an independent process audit')
+    # Preserve observations before rejecting an incomplete inventory, so status
+    # exposes the precise failed files without another diagnostic round trip.
+    failures=[r for k in ('memory','rootfs') for r in inv[k] if not r['available']]
+    case['layer_inventory_summary']={'repository':str(repo),'memory_layers':len(inv['memory']),
+        'rootfs_layers':len(inv['rootfs']),'available':inv['available'],'failed_layer_count':len(failures),'failed_layers':failures[:16]}
+    need(inv['available'],'Built layers unavailable; inspect case layer_inventory_summary (strict metadata checks preserved)')
 
 def build_case(case,state,api,work,env,wait_seconds=1800):
     current=case['state']
@@ -224,7 +263,7 @@ def worker(state):
 
 def summary(state):
     result={k:v for k,v in state.items() if k not in ('cases','network_environment')}
-    result['case_states']=[{k:c.get(k) for k in ('instance_id','state','template_id','build_id','resources','build_error')} for c in state['cases']]
+    result['case_states']=[{k:c.get(k) for k in ('instance_id','state','template_id','build_id','last_build_status','resources','build_error','layer_inventory_summary')} for c in state['cases']]
     result['completed_templates']=sum(c['state']=='READY' for c in state['cases'])
     result['worker_liveness']='not_attested'
     if state.get('worker_pid') and state.get('worker_start_ticks'):
