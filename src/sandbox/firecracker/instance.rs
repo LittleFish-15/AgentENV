@@ -16,7 +16,6 @@ use firecracker_client::models::{
     SnapshotCreateParams, SnapshotLoadParams, Vm,
 };
 use hyper::Method;
-use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use serde_json::value::RawValue;
 use tokio::time::{self, Duration, Instant};
@@ -407,7 +406,7 @@ impl FirecrackerInstance {
             // First try a graceful stop with SIGTERM
             let pid = child.id();
             trace!(pid, "sending SIGTERM to firecracker");
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            let _ = child.start_terminate();
 
             // Wait for the process to exit, but if it doesn't within the timeout, force kill it with SIGKILL
             let exited = match time::timeout(timeout, child.wait()).await {
@@ -415,7 +414,10 @@ impl FirecrackerInstance {
                 Err(_) => {
                     warn!("firecracker stop timed out; sending SIGKILL");
                     match child.start_kill() {
-                        Ok(()) => child.wait().await,
+                        // A task blocked in the kernel may not exit promptly
+                        // even after SIGKILL. Keep its handle and native leases
+                        // below unless a bounded reap actually confirms exit.
+                        Ok(()) => super::process_wait::forced_reap(timeout, child.wait()).await,
                         Err(error) => Err(error),
                     }
                 }

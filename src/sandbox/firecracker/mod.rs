@@ -14,6 +14,7 @@ mod mmds;
 mod overlaybd_snapshot;
 mod pool;
 mod process_vm_reader;
+mod process_wait;
 mod sandbox;
 mod socket;
 mod startup_pack;

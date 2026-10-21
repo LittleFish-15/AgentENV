@@ -256,6 +256,15 @@ impl ScopedChild {
         }
     }
 
+    /// Request graceful termination through the pinned task identity. A no-op
+    /// once reaped: the numeric PID may already belong to another process.
+    pub fn start_terminate(&mut self) -> io::Result<()> {
+        if self.status.is_some() {
+            return Ok(());
+        }
+        pidfd_send_signal(self.pidfd.as_fd(), Signal::TERM).map_err(io::Error::from)
+    }
+
     /// SIGKILLs the child. A no-op once the child has been reaped.
     pub fn start_kill(&mut self) -> io::Result<()> {
         if self.status.is_some() {
@@ -719,6 +728,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scoped_child_termination_after_reap_keeps_cached_exit() -> Result<()> {
+        let mut child = spawn_scoped(sh_spec("exit 73")).await?;
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
+        assert_eq!(status.code(), Some(73));
+        child.start_terminate()?;
+        child.start_kill()?;
+        assert_eq!(child.wait().await?, status);
         Ok(())
     }
 
