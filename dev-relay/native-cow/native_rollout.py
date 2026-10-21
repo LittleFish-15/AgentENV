@@ -23,10 +23,10 @@ import uuid
 
 ROOT = Path('/home/jwk/agent')
 WORK = ROOT / 'r/cow-rollout-v4'
-DEPLOYMENT = ROOT / 'deployments/agentenv-native-6cdac56'
+DEPLOYMENT = ROOT / 'deployments/agentenv-native-d3e61ea'
 SELF = ROOT / 'native_rollout.py'
-PUBLIC_COMMIT = 'c2374c4f3537c71b95fc2df7a2314026b1047a62'
-PUBLIC_PINS = {'A_prepare_release_v4.py': 'f9c80889c21e041c1b28420889cb8acd4270eed33ebc6a442cf0114c272f4ece', 'prepare_native_service_v4.py': '0e128f48f0094d42281cb766347f87eb65d24ea558d832e72d10621c4722efd5', 'native_release_bundle.py': 'de2ebddf3d2599306b403dfef38e944669b3d2dab345502709bfb20cd6a53641', 'native_rootfs_inputs.py': '4c0c92a447efad6aa1110c9359ef7c768e416205a59a9413b1211ca08ae28947', 'native_provider_v4.py': '610f6bc89828592255f714dad605ab945ef88f2ebb26419acfe9e8a1d6488a82', 'legacy_provider_handoff.py': '1e006631b05836f0e8c38f7911615f95fe605f7f09484e561a81af6007122979', 'native_cohort.py': '181af4f11ff43c38611dec8c469686393df30fdc940c45ecb0f2409429a8168d', 'cohort_engine.py': '5d0cd8d4cf45b8301532517af832710c3928458f20c1cc64b0991500ddb1b89d', 'ram_observer.py': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload.py': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_report.py': '15081f6ad11e44319a881f217866700fda1244c4c5cac89bbc502692366b0d6e', 'cohort_sync.py': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
+PUBLIC_COMMIT = 'fca7026da1e4b34aab0ae65ca97a96caac7e5c2e'
+PUBLIC_PINS = {'A_prepare_release_v4.py': 'eb05c180316d77e7dd39840ee131a1f277d6f878cd2de68e694d3b8ea313243c', 'prepare_native_service_v4.py': '4882986a27b66f94a24bb8eaeb944aa5e2add5d6cbfed01217cf864b0d04db3c', 'native_release_bundle.py': 'b25ac5dd860dc190e0ce6d3e95ab4165fe3f4734b27512bb3b2d5920d29f2a59', 'native_rootfs_inputs.py': '8eadd27e6e62ad284d815c64bc1bfe5d140fb7f6ca25c5bad86345aababcde79', 'native_provider_v4.py': '5d6895ed6c2f74ae46031c292c24e44c1cb268245b074782e9ee15454fe9269f', 'legacy_provider_handoff.py': 'e2d7de4c0eff8709cbfffcee873e45a86b745103c7131fc9b474cd827ad9ac54', 'native_cohort.py': 'd7984b88b21f83f3a57180f834b3b7d4c4b95a69bde8f6bcf15bebaaafcc4823', 'cohort_engine.py': '5d0cd8d4cf45b8301532517af832710c3928458f20c1cc64b0991500ddb1b89d', 'ram_observer.py': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload.py': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_report.py': '15081f6ad11e44319a881f217866700fda1244c4c5cac89bbc502692366b0d6e', 'cohort_sync.py': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
 PYTHON = '/usr/bin/python3'
 SSH = ['/usr/bin/ssh', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
        '-oConnectTimeout=10', '-oServerAliveInterval=15', '-oServerAliveCountMax=4', 'jwk@agent1']
@@ -287,7 +287,7 @@ def ready(node):
     if owner.get('state') in ('unresolved_preserved', 'unresolved_create', 'released'):
         raise TerminalReadinessFailure('New provider has stopped or failed; preserve its owner journal and inspect the phase logs')
     need(owner.get('state') == 'serving', 'Provider not serving yet')
-    unit = 'jwk-aenv-native-6cdac56-' + node + '.service'
+    unit = 'jwk-aenv-native-d3e61ea-' + node + '.service'
     result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=LoadState,ActiveState,ExecMainCode'],
                             capture_output=True, text=True, timeout=10)
     fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
