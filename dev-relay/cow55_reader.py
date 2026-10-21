@@ -1,6 +1,6 @@
 """Appended to the pinned read-only collector and pasted inline by the operator.
 
-Only the 110 literal Guest identities supplied at launch are eligible. No root
+Only the authorized literal Guest identities supplied at launch are eligible. No root
 file writes, process signals, service changes, Guest commands, or SDK calls.
 """
 import threading
@@ -20,6 +20,7 @@ def cohort_wire_receive(client):
     value=json.loads(exact(n));require(isinstance(value,dict),'Invalid frame');return value
 
 def cohort_reader(scope,endpoint):
+    prefix='COW33_BATCH' if scope.get('template_count') in (16,17) else 'COW55'
     result={'revision':'cow55-scoped-reader-v1','run_id':scope['run_id'],'read_only':True,
             'SDK_called':False,'services_modified':False,'process_memory_contents_read':False,'frames':{},'errors':[]}
     stop=threading.Event();send_lock=threading.Lock();phase_lock=threading.Lock()
@@ -41,14 +42,22 @@ def cohort_reader(scope,endpoint):
             stop.set()
     try:
         require(os.geteuid()==0 and os.uname().nodename=='server1','A root inline reader only')
-        require(scope['memory_bytes']==4096*1024**2 and len(scope['pairs'])==55 and len(scope['children'])==110,'Unexpected cohort budget')
+        count=scope.get('template_count',55)
+        require(type(count) is int and count in (16,17,55),'Unexpected template count')
+        guests=2*count
+        require(scope['memory_bytes']==4096*1024**2 and len(scope['pairs'])==count and len(scope['children'])==guests,'Unexpected cohort budget')
         require(re.fullmatch(r'[0-9a-f]{32}',scope['run_id']) and type(scope['main_pid']) is int and scope['main_pid']>1,'Invalid run/process identity')
-        require(len({c['pid'] for c in scope['children']})==110 and all(type(c['pid']) is int and c['pid']>1 and re.fullmatch(r'[0-9]+',c['start_ticks']) for c in scope['children']),'Invalid child identity set')
+        require(len({c['pid'] for c in scope['children']})==guests and all(type(c['pid']) is int and c['pid']>1 and re.fullmatch(r'[0-9]+',c['start_ticks']) for c in scope['children']),'Invalid child identity set')
         ids=[sid for p in scope['pairs'] for sid in p['sandbox_ids']]
-        require(len(set(ids))==110 and all(re.fullmatch(r'[0-9a-f-]{36}',sid) for sid in ids),'Invalid sandbox scope')
-        require(len({p['template_id'] for p in scope['pairs']})==55,'Duplicate templates')
+        require(all(len(p['sandbox_ids'])==2 for p in scope['pairs']),'Each template requires exactly two Guests')
+        require(len(set(ids))==guests and all(re.fullmatch(r'[0-9a-f-]{36}',sid) for sid in ids),'Invalid sandbox scope')
+        require(len({p['template_id'] for p in scope['pairs']})==count,'Duplicate templates')
         require(Path('/proc/sys/kernel/random/boot_id').read_text().strip()==scope['boot_id'],'Boot changed')
         require(identity(scope['main_pid'])[1]==scope['main_start_ticks'],'Original Runtime changed')
+        if count in (16,17):
+            limits=Path('/proc/'+str(scope['main_pid'])+'/limits').read_text()
+            require(re.search(r'Max locked memory\s+2147483648\s+2147483648\s+bytes',limits),'Original process memlock differs')
+            result['original_runtime_memlock_bytes']=2147483648
         unit=subprocess.run(['/usr/bin/systemctl','show',UNIT,'--property=ActiveState,MainPID,User'],capture_output=True,text=True,timeout=10,check=True)
         props=dict(s.split('=',1) for s in unit.stdout.splitlines() if '=' in s)
         require(props.get('ActiveState')=='active' and props.get('User')=='jwk' and int(props.get('MainPID','0'))==scope['main_pid'],'Approved original unit differs')
@@ -69,21 +78,25 @@ def cohort_reader(scope,endpoint):
             result['last_binding_pid']=child['pid'];result['bound_guest_count']=len(bound)
             b=bind(binding_scope,child);require(b['sandbox_id'] not in bound,'Duplicate Guest binding');bound[b['sandbox_id']]=b
         require(set(bound)==set(ids),'Guest bindings do not match complete cohort')
-        result['bound_guest_count']=110
-        send('ready',{'bound_guests':110,'template_count':55,'binding_method':'FC_API_PEERCRED_AND_SCOPED_PROCESS_TREE'})
+        result['bound_guest_count']=guests
+        result['template_count']=count
+        send('ready',{'bound_guests':guests,'template_count':count,'binding_method':'FC_API_PEERCRED_AND_SCOPED_PROCESS_TREE'})
 
         def process_loop():
             sequence=0
             while not stop.is_set():
                 began=time.time();rows=[]
                 for pair in scope['pairs']:
-                    start=time.time();metrics=[]
+                    start=time.time();metrics=[];before_phase=current_phase(pair['sandbox_ids'])
                     for sid in pair['sandbox_ids']:
                         b=bound[sid];value=whole_process_metrics(b['pid'],b['start_ticks'])
                         metrics.append(dict(sandbox_id=sid,identity_verified=value.get('available',False),
                                             rss_bytes=value.get('rss_bytes'),pss_bytes=value.get('pss_bytes'),error_type=value.get('error_type')))
+                    phase_stable=before_phase==current_phase(pair['sandbox_ids'])
+                    if not phase_stable:
+                        for value in metrics:value.update(identity_verified=False,error_type='PHASE_CHANGED_DURING_PAIR_SAMPLE')
                     rows.append({'run_id':scope['run_id'],'variant':'original','mode':'continuous','node':'node-a','boot_id':scope['boot_id'],
-                        'phase':current_phase(pair['sandbox_ids']),'template_id':pair['template_id'],'sample_id':str(sequence),
+                        'phase':before_phase,'phase_stable':phase_stable,'template_id':pair['template_id'],'sample_id':str(sequence),
                         'sandbox_ids':pair['sandbox_ids'],'started_unix':start,'finished_unix':time.time(),'processes':metrics})
                 host={k+'_bytes':int(v)*1024 for k,v in re.findall(r'(?m)^(MemAvailable|Cached|SReclaimable|Dirty|Writeback):\s+(\d+) kB',Path('/proc/meminfo').read_text())}
                 helper=whole_process_metrics(os.getpid(),identity(os.getpid())[1]);helper['scope']='python_root_collector'
@@ -177,10 +190,10 @@ def cohort_reader(scope,endpoint):
         stop.set()
         for t in threads:t.join(timeout=180)
         require(not any(t.is_alive() for t in threads),'Sampler has not exited; owner must retain Guest scope')
-        result['status']='COW55_ROOT_READERS_STOPPED' if not result['errors'] else 'COW55_ROOT_READERS_STOPPED_WITH_ERRORS'
+        result['status']=prefix+'_ROOT_READERS_STOPPED' if not result['errors'] else prefix+'_ROOT_READERS_STOPPED_WITH_ERRORS'
         send('stopped',result)
     except Exception as e:
-        result.update(status='STOPPED_COW55_ROOT_READER',error_type=type(e).__name__,reason=str(e) if isinstance(e,RuntimeError) else 'Scoped reader failed')
+        result.update(status='STOPPED_'+prefix+'_ROOT_READER',error_type=type(e).__name__,reason=str(e) if isinstance(e,RuntimeError) else 'Scoped reader failed')
     finally:
         stop.set()
         for t in threads:

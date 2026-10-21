@@ -10,7 +10,7 @@ ROOT=Path('/home/jwk/agent');BASE=ROOT/'deployments/agentenv-ae9c626-baseline'
 PENDING=ROOT/'relay/cow55-replay-node-a.pending.json';LOCK=ROOT/'relay/cow55-replay-node-a.lock'
 BUILDER_SHA='9bbde92ad5e6552fd22574396c1e72b59c7fe3c66ddbb89150abb604275e86a9'
 COLLECTOR_SHA='3ccf6de2e9bcafcff7d00cff62a5c82e3ae1d48804c41fbf881be626d9d6fdf5'
-READER_SHA='45665420eb0a12841b4933df751f9bf721bbb650820adc06719f56a6fb4d3a6d'
+READER_SHA='e79e424d91078c3f035e1454702805d6e8d5b76404b8fbaddac9b7385c0b930c'
 PROCESS_SUMMARY_SHA='8778b697d99b54de027bf674b61cd9e50b7173e2b70d4eb1ccbabd04f0acd554'
 ROOTFS_SUMMARY_SHA='79d330c4e72d87224cd7d45496d1a569b7610ad8edb7dad70d06250185e3236c'
 B=H=R=None
@@ -142,7 +142,7 @@ def summarize_measurements(work,labels=None):
         if not v:return 'NA'
         scale=100 if percent else 1/1024**2
         return format(v['min']*scale,'.3f')+'~'+format(v['max']*scale,'.3f')+('%' if percent else '')
-    lines=['# 55模板原版 continuous 实测汇总','',
+    lines=['# '+str(len(labels or {}))+'模板原版 continuous 实测汇总','',
            '本报告来自实际采样文件。容量单位MiB；NA为缺失。回放、混合运行/空闲、回放后空闲及最终保持阶段在JSON中分开。',
            '创建使用全员就绪屏障，已结束任务的Guest保留至整批采样结束；传输使用aenv CLI，不能冒称原SDK runner的原封不动性能复现。',
            '整进程RSS/PSS共享估计包含非Guest映射；物理页、文件分配、缓存不同口径不能相加冒充净收益。','',
@@ -235,7 +235,11 @@ def prepare_after_repair(build):
         'historical_template_build_receipt_modified':False}
 
 class Cohort:
-    def __init__(self,work,build,inputs):
+    def __init__(self,work,build,inputs,template_count=55,admission_workers=2):
+        need(template_count in (16,17,55) and len(inputs['cohort']['cases'])==template_count,'Unexpected authorized template budget')
+        need(admission_workers in (1,2),'Invalid admission concurrency')
+        self.template_count=template_count;self.max_guests=2*template_count;self.admission_workers=admission_workers
+        self.initial_memory_gib=512 if template_count==55 else self.max_guests*4+32
         self.work=work;self.api=Api(build['original_identity']);self.lock=threading.RLock();self.send_lock=threading.Lock();self.stop=threading.Event()
         self.reader_ready=threading.Event();self.reader_stopped=threading.Event();self.client=None;self.listener=None
         self.reader_error=None;self.frame_counts={};self.created=[];self.deadline=time.monotonic()+6600
@@ -250,7 +254,7 @@ class Cohort:
                 'parent_snapshot_id':built['build_id'],'catalog_sha256':built['catalog_sha256'],'slot':slot,'steps':steps,'terminal_action':terminal,'replay_sha256':c['replay_sha256'],'state':'NOT_CREATED','steps_completed':0,'failed_commands':0})
         self.report={'revision':'cow55-continuous-v1','run_id':self.run_id,'report_directory':str(work),'source_build_run_id':build['run_id'],
             'runtime_source_commit':'ae9c62693839ce7effa2b45df31c0039ae4f9fbc',
-            'implementation':'original','mode':'continuous','template_count':55,'max_guests':110,'memory_mib_each':4096,'restore_calls':0,
+            'implementation':'original','mode':'continuous','template_count':self.template_count,'max_guests':self.max_guests,'memory_mib_each':4096,'restore_calls':0,
             'restore_outcome_uncertain':False,'released_sandboxes':[],'SDK_called':False,'services_modified':False,'B_accessed':False,
             'workdir':'/','execution_transport':'existing aenv exec CLI; shell/delay/editor normalization aligned, not the original SDK runner',
             'timing_adaptation':'all-ready start barrier; completed Guests retained until cohort end; replay/mixed/idle phases separated',
@@ -265,13 +269,13 @@ class Cohort:
     def guard(self,initial=False):
         need(time.monotonic()<self.deadline and not self.stop.is_set(),'Cohort cancelled or deadline reached')
         text=Path('/proc/meminfo').read_text();m=re.search(r'(?m)^MemAvailable:\s+(\d+) kB',text)
-        need(m and int(m[1])*1024>=(512 if initial else 64)*1024**3,'Insufficient host memory headroom')
+        need(m and int(m[1])*1024>=(self.initial_memory_gib if initial else 64)*1024**3,'Insufficient host memory headroom')
         fs=os.statvfs(ROOT);need(not fs.f_flag&os.ST_RDONLY and fs.f_bavail*fs.f_frsize>=512*1024**3,'Filesystem reserve exhausted/read-only')
     def create(self,job):
         try:
             self.guard()
             with self.lock:
-                need(self.report['restore_calls']<110,'Restore budget exhausted');self.report['restore_calls']+=1;job['state']='CREATE_INTENT';self.persist()
+                need(self.report['restore_calls']<self.max_guests,'Restore budget exhausted');self.report['restore_calls']+=1;job['state']='CREATE_INTENT';self.persist()
             code,body=self.api.call('POST','/sandboxes',{'templateID':job['template_id'],'timeout':7200,'autoPause':False,'secure':True,
                 'allow_internet_access':False,'metadata':{'cow55_run':self.run_id,'cow55_slot':str(job['index']),'cow55_create':self.run_id+'-'+str(job['index'])}},timeout=300)
             need(code==201 and isinstance(body,dict) and re.fullmatch(B.ID,str(body.get('sandboxID',''))),'Restore response unconfirmed: '+json.dumps(H.error_summary(body,self.api.key)))
@@ -280,7 +284,7 @@ class Cohort:
             value=self.command(job,'test "$(id -u)" = 0 && /agentenv/bin/busybox timeout -s TERM -k 1 5 /bin/bash -l -c true','probe')
             need(value['return_code']==0,'Guest root/timeout/shell probe failed')
             with self.lock:job['admission_probe_passed']=True;self.persist()
-            print('PHASE=admission passed='+str(sum(bool(j.get('admission_probe_passed')) for j in self.jobs))+'/110',flush=True)
+            print('PHASE=admission passed='+str(sum(bool(j.get('admission_probe_passed')) for j in self.jobs))+'/'+str(self.max_guests),flush=True)
         except BaseException as e:
             with self.lock:
                 job['error']=str(e).replace(self.api.key,'[REDACTED]')
@@ -377,12 +381,12 @@ class Cohort:
             # Two genuine cohort Guests validate the command channel before 108 more.
             for job in self.jobs[:2]:self.create(job)
             # Bound creation pressure independently from the 110-Guest replay concurrency.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(self.create,self.jobs[2:]))
-            need(len(self.created)==110 and not self.stop.is_set(),'Incomplete cohort; no replay')
-            pids=R.find_firecrackers(self.api.identity[0]);need(len(pids)==110,'Expected exactly 110 scoped Firecrackers')
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.admission_workers) as pool:list(pool.map(self.create,self.jobs[2:]))
+            need(len(self.created)==self.max_guests and not self.stop.is_set(),'Incomplete cohort; no replay')
+            pids=R.find_firecrackers(self.api.identity[0]);need(len(pids)==self.max_guests,'Unexpected scoped Firecracker count')
             pairs=[{'template_id':self.jobs[i]['template_id'],'catalog_sha256':self.jobs[i]['catalog_sha256'],
-                    'sandbox_ids':[self.jobs[i]['sandbox_id'],self.jobs[i+1]['sandbox_id']]} for i in range(0,110,2)]
-            scope={'run_id':self.run_id,'main_pid':self.api.identity[0],'main_start_ticks':self.api.identity[1],
+                    'sandbox_ids':[self.jobs[i]['sandbox_id'],self.jobs[i+1]['sandbox_id']]} for i in range(0,self.max_guests,2)]
+            scope={'template_count':self.template_count,'run_id':self.run_id,'main_pid':self.api.identity[0],'main_start_ticks':self.api.identity[1],
                 'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'memory_bytes':4096*1024**2,'pairs':pairs,
                 'children':[{'pid':p,'start_ticks':R.identity(p)[1]} for p in pids]}
             self.report['scope']=scope;self.report['status']='AWAITING_INLINE_ROOT_READER';self.persist()
@@ -390,17 +394,18 @@ class Cohort:
             self.listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);self.listener.bind(str(sock));os.chmod(sock,0o600)
             meta=sock.lstat();self.socket_identity=(meta.st_dev,meta.st_ino);self.listener.listen(1);self.listener.settimeout(600)
             endpoint={'path':str(sock),'pid':os.getpid(),'ticks':R.identity(os.getpid())[1]}
-            command="/usr/bin/python3 -I -B - <<'COW55_ROOT_READER'\n"+collector_source+'\n'+reader_source+'\nscope = '+pprint.pformat(scope,width=100)+'\nendpoint = '+pprint.pformat(endpoint,width=100)+'\ncohort_reader(scope, endpoint)\nCOW55_ROOT_READER'
+            tag='COW33_BATCH' if self.template_count in (16,17) else 'COW55'
+            command="/usr/bin/python3 -I -B - <<'"+tag+"_ROOT_READER'\n"+collector_source+'\n'+reader_source+'\nscope = '+pprint.pformat(scope,width=100)+'\nendpoint = '+pprint.pformat(endpoint,width=100)+'\ncohort_reader(scope, endpoint)\n'+tag+'_ROOT_READER'
             (self.work/'root-reader-review.txt').write_text(command)
-            print('BEGIN_REVIEWED_COW55_ROOT_COPY_BODY_ONLY');print(command);print('END_REVIEWED_COW55_ROOT_COPY_BODY_ONLY',flush=True)
+            print('BEGIN_REVIEWED_'+tag+'_ROOT_COPY_BODY_ONLY');print(command);print('END_REVIEWED_'+tag+'_ROOT_COPY_BODY_ONLY',flush=True)
             print('Keep this jwk terminal open. Paste the body once into A root within 600 seconds. No done input.',flush=True)
             self.client,_=self.listener.accept();peer=struct.unpack('3i',self.client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12));need(peer[1]==0,'Expected root reader peer')
-            print('PHASE=root_reader_connected_binding_110_guests',flush=True)
+            print('PHASE=root_reader_connected_binding_'+str(self.max_guests)+'_guests',flush=True)
             self.client.settimeout(600);root_thread=threading.Thread(target=self.reader_receive,daemon=True);root_thread.start()
             need(self.reader_ready.wait(600) and self.reader_error is None,'Root binding failed/timed out')
             print('PHASE=root_reader_bound_starting_continuous_replay',flush=True)
             time.sleep(5);self.control({'op':'phase','phase':'replay'});self.report['status']='COW55_CONTINUOUS_REPLAY_RUNNING';self.persist()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=110) as pool:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_guests) as pool:
                 futures=[pool.submit(self.replay,j) for j in self.jobs]
                 try:
                     while not all(f.done() for f in futures):
@@ -408,7 +413,7 @@ class Cohort:
                     for f in futures:f.result()
                 except BaseException:self.stop.set();raise
             self.control({'op':'phase','phase':'final_hold'});end=time.monotonic()+600
-            while len(self.final_physical_templates)<55 and time.monotonic()<end:
+            while len(self.final_physical_templates)<self.template_count and time.monotonic()<end:
                 self.guard();self.control({'op':'heartbeat'});time.sleep(5)
             self.report['final_hold_templates_attempted']=len(self.final_physical_templates)
             self.report['status']='COW55_REPLAY_COMPLETED_MEASUREMENTS_PENDING_REVIEW'
@@ -434,7 +439,7 @@ class Cohort:
             self.report['templates_and_runtime_cache_preserved']=True
             self.report['post_cleanup_device_pool_cache_release_measured']=False
             self.report['replay_completed_guests']=sum(j['state']=='REPLAY_COMPLETED' for j in self.jobs)
-            self.report['replay_completed_templates']=sum(all(j['state']=='REPLAY_COMPLETED' for j in self.jobs[i:i+2]) for i in range(0,110,2))
+            self.report['replay_completed_templates']=sum(all(j['state']=='REPLAY_COMPLETED' for j in self.jobs[i:i+2]) for i in range(0,self.max_guests,2))
             self.report['full_measurement_acceptance']='PENDING_PER_TEMPLATE_EFFECTIVE_SAMPLE_AND_CACHE_COVERAGE_REVIEW'
             try:self.report['measurement_summary']=summarize_measurements(self.work,{j['template_id']:j['instance_id'] for j in self.jobs})
             except Exception as e:self.report['summary_error']={'type':type(e).__name__,'reason':str(e)}
@@ -443,14 +448,15 @@ class Cohort:
                     self.report['status']='COW55_REPLAY_COMPLETED_CLEANUP_OR_MEASUREMENT_INCOMPLETE'
                 else:
                     measured=self.report['measurement_summary'];gaps=[]
-                    if measured['replay_process_rows']!=110 or not measured['minimum_template_paired_samples']:gaps.append('RSS_PSS_PAIR_COVERAGE')
-                    if not measured['cache_complete_sweeps'] or measured['replay_rootfs_template_count']!=55:gaps.append('ROOTFS_CACHE_COVERAGE')
-                    if measured['templates_with_valid_physical_sample']!=55:gaps.append('GUEST_RAM_PHYSICAL_COVERAGE')
-                    if measured['replay_templates_with_valid_physical_sample']!=55:gaps.append('GUEST_RAM_REPLAY_PHYSICAL_COVERAGE')
+                    if measured['replay_process_rows']!=self.max_guests or not measured['minimum_template_paired_samples']:gaps.append('RSS_PSS_PAIR_COVERAGE')
+                    if not measured['cache_complete_sweeps'] or measured['replay_rootfs_template_count']!=self.template_count:gaps.append('ROOTFS_CACHE_COVERAGE')
+                    if measured['templates_with_valid_physical_sample']!=self.template_count:gaps.append('GUEST_RAM_PHYSICAL_COVERAGE')
+                    if measured['replay_templates_with_valid_physical_sample']!=self.template_count:gaps.append('GUEST_RAM_REPLAY_PHYSICAL_COVERAGE')
                     self.report['measurement_gaps']=gaps
                     if gaps:self.report['status']='COW55_REPLAY_COMPLETED_MEASUREMENT_GAPS'
             self.persist();H.save(self.work/'return.json',self.report)
-            print('BEGIN_RETURN_REPORT');print(json.dumps(self.report,indent=2));print('END_RETURN_REPORT',flush=True)
+            if getattr(self,'emit_final_report',True):
+                print('BEGIN_RETURN_REPORT');print(json.dumps(self.report,indent=2));print('END_RETURN_REPORT',flush=True)
         return 0 if self.report['status']=='COW55_REPLAY_COMPLETED_MEASUREMENTS_PENDING_REVIEW' else 1
 
 def main():
