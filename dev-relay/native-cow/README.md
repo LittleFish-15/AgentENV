@@ -1,25 +1,23 @@
 # Native CoW experimental relay
 
-A rootfs component comparison has its separate execution entry points. The
-latest B_import_release_v2_github.py --prepare-root prints a reviewed transient
-capability-free B unit with a process-scoped ubsmd supplementary group.
-Its --run operation is only for that unit. The prior ordinary B process could
-not traverse the local SDK IPC directory. No daemon restart, persistent group
-change, chmod, ACL or host-network change is performed.
+Latest sequence: run A_transfer_verified_fc_v1.py --run as the ordinary account
+on A, then B_native_dax_guest_v3.py --prepare-root as the ordinary account on B.
+Review and paste the printed B root block. The assistant does not connect to
+either node. The user-run transfer uses normal SSH authentication and host-key
+verification and transfers only the hash-pinned FC and BPF from A. It refuses
+different or incomplete existing destination files, and changes no services.
 
-The importer verifies the exact prior pre-map initialization failure, pinned
-sources and coordination locks. It reads the exact A manifest already saved on
-B; no active manifest is embedded in this public script. B imports the one
-existing 64 MiB object read-only, validates its full hash, then releases its own
-maps and emits the production release receipt. Allocation, writes and owner
-deletion are forbidden. Existing v2 work/receipts stop duplicate execution.
-This step creates no Guest and does not claim two-node DAX or net memory gain.
-The A publisher must remain alive. Prior core/main branches remain unchanged.
+B verifies the actual prior v2 import/release evidence and locks. It imports
+the same A base read-only, starts one 256 MiB DAX selftest Guest using the pinned
+FC/filter, and retires the import only after the Guest lease is safe to release.
+If the Guest lifecycle is unresolved, the provider remains alive. Keep A's
+publisher alive and do not use an older B release receipt to retire A while a
+new B run is active. No allocation, owner deletion, existing service restart,
+permanent account-group change or Host permission change is performed.
 
-B script SHA256: e3020b30e278087421552daa084ef9788873baeabb9ced8eaaf2aca5cc2b3f2b
-
-The rootfs comparison packet remains a synthetic cold-boot component test with
-its project-built Guest statx helper and source. Global UB physical costs and
-original snapshot-CoW benefit remain separate acceptance criteria. No private
-benchmark, credentials, active object manifests or measured results are
-published on this branch.
+This is a standalone B mechanism test. It does not claim simultaneous A/B
+Guests, full AgentENV integration, memfile private CoW or global memory savings.
+The active object manifest stays in B's existing local experiment directory.
+No credentials, private benchmark, measured data or production binaries are
+published. Lab metadata is within the user's explicitly approved disclosure
+scope. Core/main remain unchanged. Earlier scripts remain for provenance.
