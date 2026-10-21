@@ -1,24 +1,22 @@
 # Native CoW experimental relay
 
-Latest A service preparation: A_prepare_native_service_builtin_v2.py prepare
-with explicit core, builtin-FC and runtime-tools receipts. The entry requires
-the actual ef4c6e1b FC build and its successful Guest run without external
-seccomp/tracer. It copies the already built Runtime executables and verified
-FC/tools/dependencies to a new isolated deployment on port 18082. Old original
-and modified services must stay healthy and keep the same identities.
+Latest: A_prepare_native_service_builtin_v3.py prepare with the already-built
+Runtime, builtin-FC and runtime-tools reports. V2 stopped on EADDRINUSE during
+the new-service port probe before starting any service or Guest.
 
-Preparation does not start a service or Guest and calls no SDK. The printed
-root block submits only the new native Runtime unit as the ordinary account
-with process-scoped KVM/aenv groups, CAP_SYS_ADMIN/CAP_NET_ADMIN and private
-network/mount namespaces. Those capabilities are powerful; the block makes
-them explicit. LimitMEMLOCK=2 GiB applies only to the new unit, not the Host or
-old services. After starting it, run the printed ordinary-account health entry.
+V3 selects the first bindable IPv4 loopback port in 18082..18089. It does not
+connect to, inspect or stop existing listeners. Non-EADDRINUSE errors and range
+exhaustion stop preparation. The selected port is saved in the immutable new
+service definition and used by Runtime, proxies, CLI credentials, root block
+and health reporting. Root rechecks availability immediately before submission;
+a concurrent new occupant stops activation. Existing partial deployments remain
+preserved. There is no cleanup, overwrite or silent migration of an installation.
 
-Without an explicitly validated rootfs binding this is service readiness with
-native sharing disabled. Do not claim UB rootfs activation, complete AgentENV
-integration, snapshot/Fork support, memfile private CoW or net memory savings
-from health alone. The synthetic test image must not impersonate a business
-source image. Core/main are unchanged by this experiment script publication.
-No credentials, active object manifests, measured results or binaries included.
+The actual builtin-FC Guest acceptance and all old-service identity checks are
+retained. Root creates only the new isolated Runtime unit with the previously
+reviewed process groups/capabilities/private namespaces and 2 GiB memlock limit.
+Without a source-matched rootfs binding, readiness is explicitly sharing-disabled.
+No SDK calls, Guests or existing-service changes occur during preparation.
+No core/main modifications, credentials, active manifests or binaries published.
 
-SHA256: 79a166ff9b8d750b807289600c60a1f96ce96b1ca2510ea15ca5fc60815b83d9
+SHA256: 7151a01eb7259cc20162cd6ab8f38d01df00325d8ca114ad0a919833ef7c0525
