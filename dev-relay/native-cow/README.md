@@ -1,23 +1,23 @@
 # Native CoW experimental relay
 
-Latest sequence: run A_transfer_verified_fc_v1.py --run as the ordinary account
-on A, then B_native_dax_guest_v3.py --prepare-root as the ordinary account on B.
-Review and paste the printed B root block. The assistant does not connect to
-either node. The user-run transfer uses normal SSH authentication and host-key
-verification and transfers only the hash-pinned FC and BPF from A. It refuses
-different or incomplete existing destination files, and changes no services.
+Latest B entry: B_native_dax_guest_v4.py --prepare-root, then review and paste
+its printed root block. Reuse A's already-transferred FC and filter. The prior
+v3 run stopped before SDK calls because it wrongly required the retired control
+socket pathname to disappear. Production teardown closes that listener without
+unlinking the control socket file; the data socket is unlinked.
 
-B verifies the actual prior v2 import/release evidence and locks. It imports
-the same A base read-only, starts one 256 MiB DAX selftest Guest using the pinned
-FC/filter, and retires the import only after the Guest lease is safe to release.
-If the Guest lifecycle is unresolved, the provider remains alive. Keep A's
-publisher alive and do not use an older B release receipt to retire A while a
-new B run is active. No allocation, owner deletion, existing service restart,
-permanent account-group change or Host permission change is performed.
+V4 retains both coordination locks and successful v2 release checks, requires
+the old data socket to be absent, and allows only an unchanged, owned 0600
+control socket whose connect returns ECONNREFUSED. Live endpoints, permission
+errors and changed identities stop execution. No old socket or receipt is
+removed. New v4 state is separate; any v3 state/pending is refused.
 
-This is a standalone B mechanism test. It does not claim simultaneous A/B
-Guests, full AgentENV integration, memfile private CoW or global memory savings.
-The active object manifest stays in B's existing local experiment directory.
-No credentials, private benchmark, measured data or production binaries are
-published. Lab metadata is within the user's explicitly approved disclosure
-scope. Core/main remain unchanged. Earlier scripts remain for provenance.
+One B Guest reads A's existing base through UB/pmem/DAX and checks private upper
+copy-up. Only after definitive Guest exit are B's mappings retired. Unresolved
+Guest lifecycles preserve the provider. Keep A publisher alive throughout.
+No existing daemon restart, global permissions, owner deletion or UB allocation.
+This is not full AgentENV integration, simultaneous A/B Guest acceptance,
+memfile private CoW or global memory savings. Active manifest stays local to B.
+Core/main remain unchanged; previous experiment scripts remain for evidence.
+
+SHA256: ddbe0102021c03cc71c74aa6dec263928c8cc4021f9c931886d8e713216a1ef5
