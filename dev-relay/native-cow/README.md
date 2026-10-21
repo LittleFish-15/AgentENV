@@ -1,23 +1,25 @@
 # Native CoW experimental relay
 
-Latest: A_rootfs_compare_ext4_v2.py --run (ordinary experiment account).
-Reuses the pinned, already downloaded rootfs_cache_compare.py packet. Verifies
-the prior run stopped at ext4 Unknown parameter nodax, all FCs were reaped and
-leases closed. Prepares a new cache-compare-v2 stage and new v2 unit; preserves
-all v1 files. The only Guest semantic change is block lower mount options from
-ro,noload,nodax to ro,noload,dax=never, supported by Linux 6.1 ext4. Negative DAX
-statx checks remain mandatory. No SDK call, existing service change, filter
-change, new UB allocation or automatic retries. Review and paste printed root
-block to run four matched block/pmem N=1/2 groups.
+A rootfs component comparison has its separate execution entry points. The
+latest B_import_release_v2_github.py --prepare-root prints a reviewed transient
+capability-free B unit with a process-scoped ubsmd supplementary group.
+Its --run operation is only for that unit. The prior ordinary B process could
+not traverse the local SDK IPC directory. No daemon restart, persistent group
+change, chmod, ACL or host-network change is performed.
 
-This measures synthetic cold-boot rootfs Guest cache and scoped Host charge.
-It does not measure original snapshot CoW, memfile private CoW or global
-cross-node net savings. UB stays alive outside the measurement unit in both
-modes. Unknown and signed results are retained.
+The importer verifies the exact prior pre-map initialization failure, pinned
+sources and coordination locks. It reads the exact A manifest already saved on
+B; no active manifest is embedded in this public script. B imports the one
+existing 64 MiB object read-only, validates its full hash, then releases its own
+maps and emits the production release receipt. Allocation, writes and owner
+deletion are forbidden. Existing v2 work/receipts stop duplicate execution.
+This step creates no Guest and does not claim two-node DAX or net memory gain.
+The A publisher must remain alive. Prior core/main branches remain unchanged.
 
-The original comparison packet contains the project-built Guest statx helper
-and its Go source. No credentials, private workload or captured measurements
-are included. Core and main remain unchanged. Earlier scripts are retained for
-provenance; do not rerun completed cases.
+B script SHA256: e3020b30e278087421552daa084ef9788873baeabb9ced8eaaf2aca5cc2b3f2b
 
-Repair SHA256: 91614a2a00647f989eb3448cf5f57191b3cf7d05df0f3033aa6e44e973419e99
+The rootfs comparison packet remains a synthetic cold-boot component test with
+its project-built Guest statx helper and source. Global UB physical costs and
+original snapshot-CoW benefit remain separate acceptance criteria. No private
+benchmark, credentials, active object manifests or measured results are
+published on this branch.
