@@ -2,6 +2,49 @@
 
 此目录集中存放本轮个人实验环境使用的协调入口和控制测试，方便从功能分支获取。允许含实验节点、账号、路径及已验证产物身份等环境绑定信息；不存凭据、二进制、完整日志或实验数据。
 
+## 2026-10-21 55模板就绪后的110Guest continuous回放
+
+`cow55_replay.py run`复用已完成且final_merge_verified的55模板、原private输入，
+普通A用户最多110次restore、每模板2个4GiB Guest，不重建模板、不SDK/不改服务。
+先用本批第1对检查Guest root、bash、timeout命令通道，通过后有界10路扩展到110；
+每个Guest均做准入检查。全员就绪才开始回放；首个非预期失败不盲重试create。
+
+辅助程序保留前台，打印完整`BEGIN_REVIEWED_COW55_ROOT_COPY_BODY_ONLY`块，
+操作员在600秒内直接粘贴正文到A/root；不能root运行jwk可写文件。根采集器只读
+本批110个固定PID/start_ticks、原Runtime后代/日志SID、55个固定catalog SHA，
+FC GET guest-memory-regions经SO_PEERCRED绑定实际RAM；不执行Guest命令/写Host
+文件/发信号/改变服务。仅通过0600本地socket向原普通协调器发送有界结果。
+
+Rss/Pss约1Hz，按同事公式逐模板同次配对，独立有效计数；原始帧保存JSONL。
+rootfs/memory lower/upper stat+mincore约10秒，按node/boot/dev/inode去重并保留
+模板/沙箱引用图，设备cache单列；实际扫描间隔/非原子窗口记录。PFN按55对轮转，
+约300秒一轮（超时不重叠），标记变化/特殊页并分别统计有效样本。
+Host Cached是背景值，不作为模板专属cache。普通Guest RAM/file-backed子集与
+整进程RSS-PSS分别报告，不加总PSS与memory设备cache冒称净物理收益。
+
+轨迹源为私有main@4bb7d8b已审查55项。运行器独立实现原delay、终止动作排除、
+rendered str_replace边界归一化（4598动作本地对照全部一致；4543可执行命令，
+两份共9086命令），但执行传输使用已安装aenv exec，而非原Python SDK runner。
+命令只作为Guest bash参数传入，Host从不用shell=True；Guest内300秒timeout，
+本地CLI330秒/16MiB日志界限。正常非零命令依照默认stop_on_error=false继续并计数，
+超时/缺返回标记/传输失败停止本批。命令结果/每步耗时保存私有日志，不上传Git。
+
+为共享计量有全员就绪屏障，已结束Guest保持到整批结束；replay、mixed、idle与
+final_hold分开，不能将空闲补成1200个回放样本。主表55模板/110行RSS-PSS及
+rootfs/物理页表自动生成measurement-summary.json/md；不足/无效记NA或measurement_gaps。
+辅助CLI进程与原SDK客户端的开销不同，不能宣称原样性能复现或相减成优化收益。
+
+所有创建先落盘intent。丢失响应仅按本批唯一metadata查询一次匹配并验证后清理，
+不重发POST；无法确认的请求保留不明确标记。先请求只读采集器退出，再最多10路
+删除并GET404确认本批已知Guest；其他metadata不符者不删。CLI临时凭据/自己的
+socket清理，模板与Runtime池缓存保留，不能把Guest清理说成host缓存已释放。
+启动前至少512GiB MemAvailable，运行中至少64GiB及512GiB磁盘保留检查；仍非硬配额。
+整批6600秒期限、Guest TTL7200秒，root handoff600秒，最终只读PFN保持窗最多600秒。
+
+`status`只读本批pending；已有pending不允许盲目再run。采样/清理未完整明确返回
+INCOMPLETE或MEASUREMENT_GAPS，不能用回放完成替代统计验收。目标110实机运行尚待
+操作员执行；本地生命周期/归属测试及语义对照不是目标通过证据。
+
 ## 2026-10-21 本批55模板升级到10路有界任务
 
 `cow55_parallel.py start --jobs 10` 使用现有私有输入和已固定的
