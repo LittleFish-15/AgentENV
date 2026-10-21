@@ -35,6 +35,7 @@ pub mod helper {
 mod metrics;
 pub mod pack_planner;
 pub mod prefetch;
+pub mod raw_export;
 pub mod startup_manifest;
 pub mod startup_pack;
 pub mod snapshot {

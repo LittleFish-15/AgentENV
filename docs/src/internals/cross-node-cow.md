@@ -137,6 +137,46 @@ exact input hashes and policy scope.
 
 ## Required comparison
 
+### Preparing a local raw rootfs view
+
+`aenv-export-rootfs` reconstructs a raw ext4 image from committed local layers
+without a ublk device, a mount, an SDK call or a network backend:
+
+```sh
+cargo build --locked -p overlaybd --no-default-features --bin aenv-export-rootfs --release
+aenv-export-rootfs request.json /absolute/new-output-directory
+```
+
+The version-1 request contains `sourceImage`, `virtualBytes`, `maxInputBytes`,
+`maxWrittenBytes`, and a bottom-to-top `layers` array. Each layer supplies an
+absolute `path`, a `sha256:` `digest`, and its stored `size`. Unknown fields are
+rejected. `sourceImage` uses the Runtime's rootfs identity: SHA256 of compact
+JSON `[0,[{"digest":...,"size":...},...]]`, preserving layer order. Supplying a
+snapshot's modified rootfs view is not equivalent to supplying the original
+OCI source view; select and bind the intended view explicitly.
+
+The exporter verifies every stored input's complete digest/size, retains its
+read-only file handle, and uses the same tar/ZFile decoders and read-only stack
+primitive as the normal image path. No mutable upper, UB locator, remote URL,
+credential helper or fallback can be supplied in this request. Input metadata
+is checked again after export. It probes sparse extension on the destination
+filesystem before creating a large logical image. The new output directory
+contains `rootfs.ext4` and a successful `export.json`; partial output survives
+errors and is never silently overwritten.
+
+Zero pages are represented by holes. `virtualBytes` is the exact expected image
+length, not physical consumption. `maxWrittenBytes` limits nonzero-page bytes
+written by the exporter, not filesystem metadata or a filesystem quota. The
+report keeps logical length, written data and actual file allocation separate.
+Its ext4 used-space value is a best-effort superblock observation, not a full
+filesystem check or a memory-benefit measurement.
+
+Export does not shrink the filesystem, publish it into UB, create a binding or
+enable native snapshot restore. In particular, a sparse image with a large
+logical length must not be treated as a small UB allocation just because its
+disk allocation is small. Any later filesystem compaction needs independent
+validation and a new content digest while retaining the correct source identity.
+
 Use the same committed input, Guest resources, task trace and sampling points
 for original CoW, this branch with UB disabled, stored-layer UB, and native pmem.
 Start with one and then two Guests per node. Check common-read correctness,
