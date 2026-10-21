@@ -915,7 +915,7 @@ impl FirecrackerSandbox {
             )
             .await?;
         if self.launch.common().direct_rootfs.is_some() {
-            let output = Self::run_guest_command(
+            let output = Self::run_native_readiness_command(
                 envd_instance.clone(),
                 "/agentenv/dax-check".to_string(),
                 vec!["/.aenv-dax-probe".to_string()],
@@ -926,6 +926,41 @@ impl FirecrackerSandbox {
                 "experimental pmem rootfs did not prove DAX after pivot: {}",
                 output.stderr
             );
+            if self
+                .launch
+                .common()
+                .direct_rootfs
+                .as_ref()
+                .is_some_and(|binding| binding.version == 3)
+            {
+                // DAX reads alone do not establish instruction-fetch support
+                // for imported device PFNs. Run code from the immutable lower,
+                // not from the ordinary tools drive used to start envd.
+                let probe = "/.aenv-dax-exec";
+                let dax = Self::run_native_readiness_command(
+                    envd_instance.clone(),
+                    "/agentenv/dax-check".to_owned(),
+                    vec![probe.to_owned()],
+                )
+                .await?;
+                anyhow::ensure!(
+                    dax.exit_code == 0 && dax.stdout.starts_with("DAX_ACTIVE "),
+                    "native rootfs executable probe is not DAX-backed: {}",
+                    dax.stderr
+                );
+                let execution = Self::run_native_readiness_command(
+                    envd_instance.clone(),
+                    probe.to_owned(),
+                    Vec::new(),
+                )
+                .await?;
+                anyhow::ensure!(
+                    execution.exit_code == 73,
+                    "native rootfs instruction-fetch validation failed (exit {}): {}",
+                    execution.exit_code,
+                    execution.stderr
+                );
+            }
         }
         if let Some(tools) = &self.tools_ublk_device {
             let _ = UblkDeviceManager::global()
@@ -1025,6 +1060,21 @@ impl FirecrackerSandbox {
             .with_root_user()
             .create_dir_all(path)
             .await
+    }
+
+    async fn run_native_readiness_command(
+        envd: EnvdInstance,
+        command: String,
+        args: Vec<String>,
+    ) -> Result<crate::sandbox::process::ProcessOutput> {
+        // A failed instruction fetch can terminate or stall a Guest. Bound
+        // this handshake so normal start-failure cleanup can stop that VM.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Self::run_guest_command(envd, command, args),
+        )
+        .await
+        .context("native rootfs readiness command exceeded 10 seconds")?
     }
 
     async fn run_guest_command(

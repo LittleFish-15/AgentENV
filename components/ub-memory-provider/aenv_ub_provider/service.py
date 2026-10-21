@@ -146,6 +146,16 @@ def ordinary_linux():
         raise ValueError('Provider requires an ordinary UID and zero capabilities')
 
 
+def freeze_admission(provider):
+    # Share the exact lock used by acquire. Merely checking active here and
+    # setting retiring later in stop() leaves a new-reader race: stop then
+    # raises outside the recoverable control-request path and exits the owner.
+    with provider.condition:
+        if provider.active:
+            raise RuntimeError('Local Guest or inherited child leases still active')
+        provider.retiring = True
+
+
 def serve(config, selected, manifest):
     import fcntl
     ordinary_linux()
@@ -219,9 +229,7 @@ def serve(config, selected, manifest):
                         release_receipts(request, manifest)
                     elif request != {'operation': 'retire', 'peerReceipts': []}:
                         raise ValueError('Importer retirement only releases its own mappings')
-                    with provider.condition:
-                        if provider.active:
-                            raise RuntimeError('Local Guest or inherited child leases still active')
+                    freeze_admission(provider)
                 except Exception as error:
                     contract.send_json(stream, {'state': 'refused', 'reason': str(error)[:1000]})
                     continue

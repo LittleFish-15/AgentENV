@@ -92,6 +92,14 @@ identity while replacing node-local sockets and binary pins. Immutable base
 images and UB publications must remain externally retained for the lifetime of
 referencing snapshots; this option does not provide distributed garbage
 collection, repository backups, or native Guest RAM private CoW.
+Version-3 images must also contain the static executable `/.aenv-dax-exec`
+(mode 0555), built from `components/firecracker-native-pmem/guest-exec-probe.S`
+for the Guest architecture before sealing/publishing the image. The Runtime
+checks that this file remains DAX-backed and executes it, requiring exit 73,
+on both cold boot and restore. This checks instruction fetch from the common
+lower rather than execution from the ordinary tools drive. A successful
+data-read probe alone cannot establish this property. Do not copy the probe to
+the private upper as a workaround: the DAX check must apply to the executed file.
 The default and omitted legacy `lowerFilesystem` field select EROFS. A binding
 uses one filesystem type for all its lowers; relocation preserves that choice.
 Prepare ext4 with 4KiB blocks, no inline data and no journal requiring replay.

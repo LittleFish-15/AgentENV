@@ -119,6 +119,10 @@ exact input hashes and policy scope.
    remain externally retained dependencies: repository-owned pmem backups and
    automatic generation reference counting are not implemented. Missing bases
    fail restoration. Native RAM CoW is a separate unresolved capability.
+   Version-3 readiness additionally requires a DAX-backed `/.aenv-dax-exec`
+   built from the supplied minimal static assembly source, returning exit 73.
+   This is necessary because imported-PFN data reads do not prove Guest code
+   execution support; the normal tools drive must not satisfy this check.
 3. Each native image may span up to 32 SDK backing units. Ordered FD/length
    metadata, complete SCM_RIGHTS delivery and exact coverage are checked. The
    verifier and FC share the same readonly segment mapper. Larger images fail;
