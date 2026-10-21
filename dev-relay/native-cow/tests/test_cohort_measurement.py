@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 from unittest import mock
 import unittest
+import types
 
 HERE = Path(__file__).resolve().parent
 
@@ -140,6 +141,31 @@ class ReportTests(unittest.TestCase):
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_changed_runtime_cannot_recover_own_old_batch(self):
+        api = types.SimpleNamespace(unit='own-unit', pid=100, ticks='200', config_sha='config')
+        context = {'node': 'node-a', 'variant': 'native', 'unit': api.unit, 'runtimePid': api.pid,
+                   'runtimeTicks': api.ticks, 'configSha256': api.config_sha, 'bootId': 'boot'}
+        for field, value in [('runtimePid', 101), ('runtimeTicks', '201'), ('configSha256', 'changed')]:
+            changed = dict(context)
+            changed[field] = value
+            with self.subTest(field=field), mock.patch.object(Path, 'read_text', return_value='boot'):
+                with self.assertRaisesRegex(RuntimeError, 'Recovery boot, Runtime'):
+                    DRIVER.recovery_context({'runtimeContext': changed}, api, 'node-a', 'native')
+
+    def test_changed_boot_cannot_recover(self):
+        api = types.SimpleNamespace(unit='own-unit', pid=100, ticks='200', config_sha='config')
+        context = {'node': 'node-a', 'variant': 'native', 'unit': api.unit, 'runtimePid': api.pid,
+                   'runtimeTicks': api.ticks, 'configSha256': api.config_sha, 'bootId': 'old-boot'}
+        with mock.patch.object(Path, 'read_text', return_value='new-boot'):
+            with self.assertRaisesRegex(RuntimeError, 'Recovery boot, Runtime'):
+                DRIVER.recovery_context({'runtimeContext': context}, api, 'node-a', 'native')
+
+    def test_missing_recovery_context_is_not_guessed(self):
+        api = types.SimpleNamespace(unit='own-unit', pid=100, ticks='200', config_sha='config')
+        with mock.patch.object(Path, 'read_text', return_value='boot'):
+            with self.assertRaisesRegex(RuntimeError, 'Recovery boot, Runtime'):
+                DRIVER.recovery_context({}, api, 'node-a', 'native')
+
     def test_native_snapshot_requires_binding_content(self):
         base = Path('/fixture')
         binding = {'layers': [{'sha256': 'sha256:' + 'a' * 64, 'bytes': 4096}]}

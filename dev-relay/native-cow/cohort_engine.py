@@ -27,6 +27,22 @@ def quiescent(state):
             and state.get('outcomeUncertain') is False)
 
 
+def acknowledged_identity(kind, status, reply):
+    """Persist only bounded identities, never API tokens or opaque responses."""
+    try:
+        if kind == 'create' and status == 201 and isinstance(reply, dict):
+            return {'sandboxIds': [identifier(reply.get('sandboxID'))]}
+        if kind == 'fork' and status == 201 and isinstance(reply, list) and len(reply) == 1:
+            row = reply[0]
+            if isinstance(row, dict) and row.get('error') is None and isinstance(row.get('sandbox'), dict):
+                return {'sandboxIds': [identifier(row['sandbox'].get('sandboxID'))]}
+        if kind == 'capture' and status in (200, 201) and isinstance(reply, dict):
+            return {'snapshotId': identifier(reply.get('snapshotID'))}
+    except RuntimeError:
+        pass
+    return None
+
+
 class Cohort:
     def __init__(self, api, state, persist, observe, execute, capacity, snapshot, *, run_id=None):
         require(quiescent(state), 'Previous batch is not quiescent; no new run allowed')
@@ -65,6 +81,10 @@ class Cohort:
         start = time.monotonic()
         method = 'DELETE' if kind == 'delete' else 'POST'
         status, reply = self.api.call(method, route, body, timeout=timeout)
+        ack = acknowledged_identity(kind, status, reply)
+        if ack is not None:
+            request.update(ack=ack, responseHttpStatus=status)
+            self.save()
         # Decoder validates every result before the intent is cleared. It may
         # register known children even if the rest of a multi-result is invalid.
         result = decode(status, reply)
@@ -151,6 +171,79 @@ class Cohort:
         self.state['samples'].append(sample)
         self.save()
 
+    @classmethod
+    def recovery(cls, api, state, persist):
+        require(state.get('version') == 1 and re.fullmatch('[0-9a-f]{32}', state.get('runId', '')),
+                'No recognized existing batch to reconcile')
+        require(isinstance(state.get('sandboxIds'), list) and len(state['sandboxIds']) <= 3
+                and len(set(state['sandboxIds'])) == len(state['sandboxIds'])
+                and isinstance(state.get('openRequests'), list) and len(state['openRequests']) <= 16
+                and isinstance(state.get('snapshots'), list) and len(state['snapshots']) <= 1
+                and isinstance(state.get('operations'), list), 'Malformed or oversized existing batch')
+        for sid in state['sandboxIds'] + state['snapshots']:
+            identifier(sid)
+        instance = cls.__new__(cls)
+        instance.api, instance.persist = api, persist
+        instance.state, instance.run_id = copy.deepcopy(state), state['runId']
+        return instance
+
+    def recover_owned(self):
+        # Only an actual response persisted before interruption can resolve a
+        # POST. Empty inventory and client timeout are never acknowledgments.
+        for request in list(self.state['openRequests']):
+            ack = request.get('ack')
+            if ack is None:
+                continue
+            kind, status = request.get('kind'), request.get('responseHttpStatus')
+            try:
+                if kind in ('create', 'fork'):
+                    require(status == 201 and set(ack) == {'sandboxIds'}
+                            and isinstance(ack['sandboxIds'], list) and len(ack['sandboxIds']) == 1,
+                            'Malformed creation acknowledgment')
+                    sid = identifier(ack['sandboxIds'][0])
+                    present = self.owned(sid)
+                    if present is not None and sid not in self.state['sandboxIds']:
+                        require(len(self.state['sandboxIds']) < 3, 'Recovery child limit exceeded')
+                        self.state['sandboxIds'].append(sid)
+                elif kind == 'capture':
+                    require(status in (200, 201) and set(ack) == {'snapshotId'}, 'Malformed capture acknowledgment')
+                    snapshot_id = identifier(ack['snapshotId'])
+                    require(not self.state['snapshots'] or self.state['snapshots'] == [snapshot_id],
+                            'Capture acknowledgment differs from recorded snapshot')
+                    self.state['snapshots'] = [snapshot_id]
+                else:
+                    continue
+                self.state['openRequests'].remove(request)
+                self.state['operations'].append({**request, 'reconciledBy': 'DURABLE_API_RESPONSE',
+                                                 'reconciledNs': time.time_ns()})
+                self.save()
+            except Exception as error:
+                self.state.setdefault('reconciliationErrors', []).append({'requestId': request.get('id'),
+                                                                          'errorType': type(error).__name__})
+                self.save()
+        self.cleanup()
+        return self.state
+
+    def cleanup(self):
+        for sid in list(reversed(self.state['sandboxIds'])):
+            try:
+                self.delete(sid)
+            except Exception as error:
+                self.state.setdefault('cleanupErrors', []).append({
+                    'sandboxId': sid, 'type': type(error).__name__})
+                self.save()
+        if not self.state['sandboxIds'] and not self.state['openRequests']:
+            try:
+                require(self.api.call('GET', '/v2/sandboxes?limit=1') == (200, []),
+                        'Final running/paused inventory is not empty')
+                self.state['phase'] = 'quiesced'
+            except Exception as error:
+                self.state['phase'] = 'inventory_unconfirmed'
+                self.state['inventoryError'] = type(error).__name__
+        else:
+            self.state['phase'] = 'needs_reconciliation'
+        self.save()
+
     def run(self, image):
         """One cold parent, one capture/restore and one Fork, then two children.
 
@@ -194,23 +287,5 @@ class Cohort:
                                      'reason': str(error)[:800] if isinstance(error, RuntimeError)
                                      else 'Inspect local operation logs and preserved journal'}
         finally:
-            for sid in list(reversed(self.state['sandboxIds'])):
-                try:
-                    self.delete(sid)
-                except Exception as error:
-                    self.state.setdefault('cleanupErrors', []).append({
-                        'sandboxId': sid, 'type': type(error).__name__})
-                    self.save()
-            # Empty inventory does not resolve an uncertain late POST.
-            if not self.state['sandboxIds'] and not self.state['openRequests']:
-                try:
-                    require(self.api.call('GET', '/v2/sandboxes?limit=1') == (200, []),
-                            'Final running/paused inventory is not empty')
-                    self.state['phase'] = 'quiesced'
-                except Exception as error:
-                    self.state['phase'] = 'inventory_unconfirmed'
-                    self.state['inventoryError'] = type(error).__name__
-            else:
-                self.state['phase'] = 'needs_reconciliation'
-            self.save()
+            self.cleanup()
         return self.state

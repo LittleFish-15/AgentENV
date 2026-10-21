@@ -76,6 +76,13 @@ existing rollout journal. Complete automatic rollout resumption is not yet
 implemented; exact phase recovery must use its retained receipts. A timed-out
 SSH/API operation may still be active remotely.
 
+An interrupted cohort can use the same pinned `native_cohort.py` with
+`--node NODE --variant original|native --cleanup --run`. This requires the same
+recorded boot/Runtime/configuration and coordinates through the same locks. It
+does not create another batch. It can reconcile a stored successful response or
+confirm deletion via GET 404, but it leaves unacknowledged POSTs pending. Its
+separate recovery report preserves the original measurements; see COHORT.md.
+
 For an interrupted old-generation handoff, the already supplied
 `legacy_provider_handoff.py resume-a --run` reconciles its recorded nonce and
 receipts without resending an uncertain deletion. For a new Runtime that is

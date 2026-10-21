@@ -42,6 +42,18 @@ timeout does not prove a late create/Fork cannot complete. Such a run keeps its
 pending request and refuses another run; do not erase the journal to retry.
 An unresolved DELETE is checked for GET 404 but never sent twice by cleanup.
 
+For an interrupted batch, the same entry supports
+`--node NODE --variant original|native --cleanup --run`. It requires the recorded
+boot, Runtime PID/start time, configuration, node and private report directory
+to still match. It holds the same coordination locks and issues no new create,
+capture, restore or Fork. A persisted successful API response can identify an
+already-created resource; only that exact identity is reconciled. Without that
+response evidence an uncertain POST stays pending, even when inventory is empty.
+Known owned Guests are cleaned; a still-pending DELETE is not sent again.
+The original measurement report is preserved, and a separate `recovery-*.json`
+records the outcome. Snapshots remain retained. This cleanup mode is not a
+restart of the workload or automatic continuation of the whole rollout.
+
 Successful completion means `COHORT_FUNCTIONAL_PASS_SNAPSHOTS_RETAINED`, not a
 memory-sharing acceptance. The explicit capture remains in the repository;
 any Fork-created snapshots also remain governed by Runtime semantics. Provider

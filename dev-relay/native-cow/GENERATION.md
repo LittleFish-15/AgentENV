@@ -1,7 +1,12 @@
 # Real rootfs generation and legacy experiment handoff
 
 This phase uses production provider sources from core
-`6cdac56ed70284e89693e7bda0470a43ad9bd0b5`. The C++ SDK adapter is identical to
+`099201ee8aea64dd0a8380befeca1b7108b8338a`. The coordinated Runtime/FC build stays
+at `6cdac56ed70284e89693e7bda0470a43ad9bd0b5`: the newer core commit changes only
+the Python provider control reply handling, its tests and documentation. It does
+not change the Runtime/FC ABI, Rust source or C++ adapter. Prepared receipts
+identify both `coreCommit` (Runtime) and `providerCoreCommit` explicitly.
+The C++ SDK adapter is identical to
 the source previously compiled and executed in the B native-pmem experiment.
 The new scripts themselves have not run on either target host.
 
@@ -84,6 +89,12 @@ are preserved for inspection; there is no blind process/socket replacement.
 Keep the new providers running while committed native snapshots or paused/running
 Guests need the base. Runtime rollback preserves these provider publications.
 There is no automatic distributed snapshot garbage collection or reboot recovery.
+
+If a control client disconnects while receiving a refusal, the provider keeps
+serving. If cleanup and the durable release receipt have completed, losing the
+completion reply preserves the released state. Actual cleanup failures remain
+unresolved. The coordinator must inspect those recorded outcomes instead of
+repeating retirement merely because a reply was lost.
 
 The new provider wrapper's `retire --node ... --run` requires a quiescent cohort,
 an empty running/paused API inventory and no retained records in this isolated

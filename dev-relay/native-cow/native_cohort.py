@@ -24,7 +24,7 @@ ROOT = Path('/home/jwk/agent')
 CORE = '6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
 ORIGINAL = 'ae9c62693839ce7effa2b45df31c0039ae4f9fbc'
 SOURCE = 'sha256:cf786498f77bf4ba6235156ab8540d0b9335e874e70b95efbeb53168e0dce68d'
-MODULE_PINS = {'cohort_engine': '1be6d713340e631755d2f2c200c75822228feeaa3e4470312aa81296db214a83', 'ram_observer': '0b8ea355e4e0dd6ad8422968e63ff5dd9b640166cd29406096480589c6cc80af', 'public_workload': 'dfd483df3307a3a677dfc2bb1f4559b76aea3fb8ad4cc200832d572fb6a44490'}
+MODULE_PINS = {'cohort_engine': 'b0c3d818e45eebdcc909ee859fb63a002c10ac264eb9e2a87fb36babf782b45d', 'ram_observer': '0b8ea355e4e0dd6ad8422968e63ff5dd9b640166cd29406096480589c6cc80af', 'public_workload': 'dfd483df3307a3a677dfc2bb1f4559b76aea3fb8ad4cc200832d572fb6a44490'}
 
 
 def need(ok, reason):
@@ -254,6 +254,52 @@ class Workload:
             self.credentials.unlink()
 
 
+def recovery_context(state, api, node, variant):
+    context = state.get('runtimeContext', {})
+    expected = {'node': node, 'variant': variant, 'unit': api.unit,
+                'runtimePid': api.pid, 'runtimeTicks': api.ticks, 'configSha256': api.config_sha,
+                'bootId': Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+    need(isinstance(context, dict) and all(context.get(k) == v for k, v in expected.items()),
+         'Recovery boot, Runtime, configuration or node differs; preserve the journal')
+    path = Path(context.get('reportDirectory', ''))
+    need(path.parent == ROOT / 'relay/reports'
+         and re.fullmatch('cohort-' + node + '-' + variant + r'-[0-9a-f]{12}', path.name)
+         and path.resolve(strict=True) == path and path.stat().st_uid == 1204,
+         'Recovery report directory differs')
+    return context, path
+
+
+def recover_existing(engine, api, state, state_path, node, variant):
+    context, work = recovery_context(state, api, node, variant)
+    previous = load(work / 'report.json')
+    need(previous.get('cohort', {}).get('runId') == state.get('runId')
+         and previous.get('node') == node and previous.get('variant') == variant,
+         'Previous cohort report does not identify this journal')
+    # Keep the previous measurement report byte-for-byte. Recovery evidence is
+    # a separate artifact and cannot masquerade as another workload run.
+    output = work / ('recovery-' + uuid.uuid4().hex + '.json')
+    def persist(value):
+        save(state_path, value)
+        save(output, {'status': 'RECOVERY_IN_PROGRESS', 'runtimeContext': context,
+                      'cohort': value, 'SDK_called': False, 'newGuestRequests': 0,
+                      'originalMeasurementReportPreserved': True})
+    recovered = engine.Cohort.recovery(api, state, persist).recover_owned()
+    credentials = work / 'cli-config/aenv/credentials'
+    if credentials.exists():
+        expected = 'url = "http://127.0.0.1:' + str(api.port) + '"\napi_key = ' + json.dumps(api.key) + '\n'
+        need(read(credentials, 4096).decode() == expected, 'Unexpected retained CLI credentials preserved')
+        credentials.unlink()
+    report = {'status': 'COHORT_RECOVERED_QUIESCENT_SNAPSHOTS_RETAINED' if engine.quiescent(recovered)
+              else 'COHORT_RECOVERY_PENDING_NO_REISSUED_CREATE',
+              'node': node, 'variant': variant, 'runtimeContext': context, 'cohort': recovered,
+              'originalMeasurementReportPreserved': True, 'SDK_called': False, 'newGuestRequests': 0,
+              'temporaryCredentialsRemoved': not credentials.exists(), 'recoveryReport': str(output),
+              'newPerformanceMeasurements': False}
+    save(output, report)
+    print(json.dumps(report, indent=2))
+    return 0 if engine.quiescent(recovered) else 1
+
+
 def run(args):
     import fcntl
     need(sys.platform == 'linux' and os.geteuid() == 1204 and os.uname().machine == 'aarch64'
@@ -311,10 +357,12 @@ def run(args):
         state_path = journal_dir / 'cohort-state.json'
         state = load(state_path) if state_path.exists() else {
             'version': 1, 'phase': 'prepared', 'openRequests': [], 'sandboxIds': [], 'outcomeUncertain': False}
-        need(engine.quiescent(state), 'Previous cohort unresolved; preserve it')
-        need(args.attempt == 1 and not state.get('runId'), 'This entry runs one attempt; do not blindly repeat a previous cohort')
         api = Api(base, unit, port)
         need(api.call('GET', '/health')[0] == 204, 'Runtime health failed')
+        if args.cleanup:
+            return recover_existing(engine, api, state, state_path, args.node, args.variant)
+        need(engine.quiescent(state), 'Previous cohort unresolved; preserve it')
+        need(args.attempt == 1 and not state.get('runId'), 'This entry runs one attempt; do not blindly repeat a previous cohort')
         disk = os.statvfs(ROOT)
         need(disk.f_bavail * disk.f_frsize >= 8 * 1024**3, 'Need 8GiB free workspace space for this capture/Fork cohort')
         work = ROOT / 'relay/reports' / ('cohort-' + args.node + '-' + args.variant + '-' + uuid.uuid4().hex[:12])
@@ -331,6 +379,9 @@ def run(args):
                     'UBPhysicalChargedBytes': None, 'privateUpperResidentBytes': None}
         need(all(evidence['binarySha256'][name] == installation.get('binaries', {}).get(name)
                  for name in ('server', 'aenv')), 'Installed executable differs from its preparation receipt')
+        state['runtimeContext'] = {key: evidence[key] for key in (
+            'node', 'variant', 'runtimePid', 'runtimeTicks', 'configSha256', 'bootId', 'reportDirectory')}
+        state['runtimeContext']['unit'] = unit
         workload = Workload(api, work, workload_source)
         def persist(value):
             save(state_path, value)
@@ -361,12 +412,14 @@ def main():
     parser.add_argument('--node', choices=('node-a', 'node-b'), required=True)
     parser.add_argument('--variant', choices=('original', 'native'), required=True)
     parser.add_argument('--attempt', type=int, default=1)
+    parser.add_argument('--cleanup', action='store_true', help='Reconcile/clean the existing batch; never create or capture')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
     if not args.run:
         print(json.dumps({'status': 'PLAN_ONLY', 'node': args.node, 'variant': args.variant,
-                          'coldParents': 1, 'captureCalls': 1, 'restoreCalls': 1, 'forkCalls': 1,
-                          'workloadChildren': 2, 'snapshotsRetained': True,
+                          'coldParents': 0 if args.cleanup else 1, 'captureCalls': 0 if args.cleanup else 1,
+                          'restoreCalls': 0 if args.cleanup else 1, 'forkCalls': 0 if args.cleanup else 1,
+                          'workloadChildren': 0 if args.cleanup else 2, 'snapshotsRetained': True,
                           'memfileCrossNodeCowImplemented': False}))
         return 0
     need(bool(MODULE_PINS), 'Unpublished draft; pinned modules required')

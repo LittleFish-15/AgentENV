@@ -64,6 +64,63 @@ def fixture(api=None, observe=None, execute=None, capacity=None, snapshot=None):
 
 
 class Tests(unittest.TestCase):
+    def recovery(self, request, guests=None, ids=None):
+        api, cohort = fixture()
+        api.guests = guests or {}
+        cohort.state['openRequests'] = [request]
+        cohort.state['sandboxIds'] = ids or []
+        cohort.save()
+        recovered = C.Cohort.recovery(api, cohort.state, lambda s: api.saved.append(copy.deepcopy(s)))
+        return api, recovered.recover_owned()
+
+    def test_recovery_uses_durable_create_response_without_new_post(self):
+        api, result = self.recovery({'id': 'r1', 'kind': 'create', 'route': '/sandboxes-cold',
+                                    'responseHttpStatus': 201, 'ack': {'sandboxIds': ['guest-owned']}},
+                                   {'guest-owned': {'sandboxID': 'guest-owned', 'metadata': {'cow_batch': RUN}}})
+        self.assertTrue(C.quiescent(result))
+        self.assertFalse(any(c[0] == 'POST' for c in api.calls))
+        self.assertEqual([c[1] for c in api.calls if c[0] == 'DELETE'], ['/sandboxes/guest-owned'])
+
+    def test_recovery_never_resolves_unacknowledged_post_from_empty_inventory(self):
+        api, result = self.recovery({'id': 'r1', 'kind': 'create', 'route': '/sandboxes-cold'})
+        self.assertTrue(result['outcomeUncertain'])
+        self.assertFalse(any(c[0] in ('POST', 'DELETE') for c in api.calls))
+        self.assertEqual(result['phase'], 'needs_reconciliation')
+
+    def test_recovery_foreign_response_id_never_deleted(self):
+        api, result = self.recovery({'id': 'r1', 'kind': 'fork', 'route': '/sandboxes/source/fork',
+                                    'responseHttpStatus': 201, 'ack': {'sandboxIds': ['foreign']}},
+                                   {'foreign': {'sandboxID': 'foreign', 'metadata': {'cow_batch': 'different'}}})
+        self.assertTrue(result['outcomeUncertain'])
+        self.assertFalse(any(c[0] in ('POST', 'DELETE') for c in api.calls))
+        self.assertTrue(result['reconciliationErrors'])
+
+    def test_recovery_retains_acknowledged_capture_without_new_capture(self):
+        api, result = self.recovery({'id': 'r1', 'kind': 'capture', 'route': '/sandboxes/parent/snapshots',
+                                    'responseHttpStatus': 201, 'ack': {'snapshotId': 'snapshot-own'}})
+        self.assertTrue(C.quiescent(result))
+        self.assertEqual(result['snapshots'], ['snapshot-own'])
+        self.assertFalse(any(c[0] == 'POST' for c in api.calls))
+
+    def test_recovery_confirms_delete_by_404_without_second_delete(self):
+        api, result = self.recovery({'id': 'r1', 'kind': 'delete', 'route': '/sandboxes/guest-owned'}, ids=['guest-owned'])
+        self.assertTrue(C.quiescent(result))
+        self.assertFalse(any(c[0] in ('POST', 'DELETE') for c in api.calls))
+        self.assertEqual(result['operations'][0]['reconciledBy'], 'GET_404')
+
+    def test_recovery_does_not_repeat_pending_delete_of_still_visible_guest(self):
+        api, result = self.recovery({'id': 'r1', 'kind': 'delete', 'route': '/sandboxes/guest-owned'},
+                                   {'guest-owned': {'sandboxID': 'guest-owned', 'metadata': {'cow_batch': RUN}}},
+                                   ['guest-owned'])
+        self.assertTrue(result['outcomeUncertain'])
+        self.assertFalse(any(c[0] in ('POST', 'DELETE') for c in api.calls))
+
+    def test_acknowledgment_filters_tokens_and_unrecognized_results(self):
+        self.assertEqual(C.acknowledged_identity('create', 201, {'sandboxID': 'owned', 'envdAccessToken': 'PRIVATE'}),
+                         {'sandboxIds': ['owned']})
+        self.assertIsNone(C.acknowledged_identity('create', 500, {'sandboxID': 'owned'}))
+        self.assertIsNone(C.acknowledged_identity('fork', 201, [{'error': {'message': 'failed'}}]))
+
     def test_complete_lifecycle_no_parent_during_samples(self):
         api, cohort = fixture()
         result = cohort.run('ocidir://fixture')
