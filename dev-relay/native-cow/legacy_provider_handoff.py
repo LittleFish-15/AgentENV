@@ -27,7 +27,7 @@ A_PROVIDER=ROOT/'r/pm-a-v1/native-session/provider'
 B_PROVIDER=ROOT/'r/pm-b-v1/pair-v1/provider'
 OLD_SHA='7dd6d01e04adb7506b35ccca850d57f6cf21d086cb3615f4f6b109cf041e3640'
 OLD_SCRIPT_SHA='ac0d70cf685fc9c87e73901703e29d34dd91dc0473b3d2814a27c2efba2cab2b'
-NEXT_ENTRY_SHA='3ae0a58a4e51e056cecf61f7cd60a362ed82ac317c8c22e3a1262887c6bcfb36'
+NEXT_ENTRY_SHA='610f6bc89828592255f714dad605ab945ef88f2ebb26419acfe9e8a1d6488a82'
 
 
 def need(ok,reason):

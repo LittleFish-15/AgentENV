@@ -43,6 +43,86 @@ def acknowledged_identity(kind, status, reply):
     return None
 
 
+def release_captures(api, state, persist, record):
+    """Explicitly remove only this journal's captured IDs through the API.
+
+    `record(id)` returns the current committed record's SHA or None when absent.
+    A prior uncertain DELETE is only checked for absence, never reissued.
+    Unknown creates/captures/Forks always block this operation.
+    """
+    require(state.get('version') == 1 and not state.get('sandboxIds'), 'Owned Guests must be released first')
+    snapshots = state.get('snapshots')
+    requests = state.get('openRequests')
+    require(isinstance(snapshots, list) and len(snapshots) <= 1 and isinstance(requests, list)
+            and all(r.get('kind') == 'delete_capture' and r.get('snapshotId') in snapshots for r in requests),
+            'Unresolved non-release requests block capture deletion')
+    evidence = state.get('snapshotEvidence', [])
+    def save():
+        state['outcomeUncertain'] = bool(state['openRequests'])
+        persist(state)
+    def empty():
+        require(api.call('GET', '/v2/sandboxes?limit=1') == (200, []), 'Running/paused inventory must be empty')
+    try:
+        empty()
+        for sid in list(snapshots):
+            require(str(uuid.UUID(sid)) == sid, 'Capture deletion requires a literal canonical UUID, never an alias')
+            rows = [e for e in evidence if e.get('snapshotId') == sid]
+            require(len(rows) == 1 and re.fullmatch('[0-9a-f]{64}', rows[0].get('committedRecordSha256', '')),
+                    'Original committed capture hash missing; retain the snapshot')
+            expected = rows[0]['committedRecordSha256']
+            route = '/templates/' + sid
+            prior = [r for r in requests if r.get('snapshotId') == sid]
+            require(len(prior) <= 1 and all(r.get('route') == route and r.get('recordSha256') == expected for r in prior),
+                    'Pending capture release differs from the captured record')
+            current = record(sid)
+            if current is not None:
+                require(current == expected, 'Committed capture changed; no deletion requested')
+            if prior:
+                require(current is None and api.call('GET', route)[0] == 404,
+                        'Previous capture DELETE is unconfirmed; no second DELETE requested')
+                request = prior[0]
+                method = 'RECONCILED_GET_404_AND_RECORD_ABSENT'
+            elif current is None:
+                require(api.call('GET', route)[0] == 404, 'Missing local record disagrees with API')
+                request = None
+                method = 'ALREADY_ABSENT_CONFIRMED'
+            else:
+                # Recheck both the empty service and the pinned record directly
+                # before recording the single mutation intent.
+                empty()
+                require(record(sid) == expected, 'Capture changed before release intent')
+                request = {'id': uuid.uuid4().hex, 'kind': 'delete_capture', 'route': route,
+                           'snapshotId': sid, 'recordSha256': expected, 'startedNs': time.time_ns()}
+                requests.append(request)
+                state['phase'] = 'releasing_captures'
+                save()
+                status, _ = api.call('DELETE', route, timeout=120)
+                require(status == 204, 'Capture DELETE not confirmed; preserve intent')
+                require(api.call('GET', route)[0] == 404 and record(sid) is None,
+                        'Capture remains or local/API outcome differs')
+                method = 'DELETE_204_GET_404_AND_RECORD_ABSENT'
+            snapshots.remove(sid)
+            if request is not None:
+                requests.remove(request)
+                state['operations'].append({**request, 'confirmedBy': method, 'finishedNs': time.time_ns()})
+            state.setdefault('releasedSnapshots', []).append({'snapshotId': sid, 'recordSha256': expected,
+                                                               'confirmedBy': method})
+            save()
+        empty()
+        state['phase'] = 'quiesced'
+        state['captureReleaseComplete'] = True
+        save()
+    except Exception as error:
+        state['captureReleaseComplete'] = False
+        state['captureReleaseError'] = {'type': type(error).__name__,
+                                        'reason': str(error)[:600] if isinstance(error, RuntimeError)
+                                        else 'Inspect preserved release intent and record'}
+        if requests:
+            state['phase'] = 'needs_reconciliation'
+        save()
+    return state
+
+
 class Cohort:
     def __init__(self, api, state, persist, observe, execute, capacity, snapshot, *, run_id=None,
                  residency_gate=None, mutation_guard=None):

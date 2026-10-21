@@ -1,6 +1,8 @@
 """Configuration and pre-SDK guards; never load SDK or call target systems."""
 import ast
 import contextlib
+import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -17,6 +19,76 @@ m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 
 class Provider(unittest.TestCase):
+    def released(self,node):
+        manifest_sha='sha256:'+hashlib.sha256(json.dumps(self.owner,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+        value={'state':'released','format':'native-raw-v1','mode':'pmem',
+               'role':'publish' if node=='node-a' else 'import','ownerId':self.owner['ownerId'],
+               'manifestSha256':manifest_sha,'finalize_acknowledged':True,
+               'base_post_sha256_verified':True,'post_verification_errors':[],
+               'objects':[] if node=='node-b' else [{'replica':self.owner['replicas'][0],
+                  'creation_confirmed':True,'delete_acknowledged':True}]}
+        if node=='node-b':value['imports']=[{'replica':self.owner['replicas'][0],'mapped':True}]
+        return value
+
+    def test_exact_completed_owner_and_importer_release_evidence(self):
+        for node in ('node-a','node-b'):
+            receipt=m.released_state(node,self.released(node),self.owner,self.binding)
+            self.assertEqual(receipt['ownerId'],self.owner['ownerId'])
+            self.assertEqual(receipt['state'],'released')
+
+    def test_partial_release_or_bad_integrity_cannot_be_reconciled(self):
+        for key,value in [('state','unresolved_preserved'),('finalize_acknowledged',False),
+                          ('base_post_sha256_verified',False),('ownerId','e'*32)]:
+            row=self.released('node-a');row[key]=value
+            with self.subTest(key=key),self.assertRaises(RuntimeError):
+                m.released_state('node-a',row,self.owner,self.binding)
+        row=self.released('node-a');row['objects'][0]['delete_acknowledged']=False
+        with self.assertRaisesRegex(RuntimeError,'deletion not acknowledged'):
+            m.released_state('node-a',row,self.owner,self.binding)
+
+    def test_importer_with_allocation_record_cannot_issue_peer_receipt(self):
+        row=self.released('node-b');row['objects']=[{}]
+        with self.assertRaisesRegex(RuntimeError,'contains an allocation'):
+            m.released_state('node-b',row,self.owner,self.binding)
+
+    def test_missing_peer_receipt_rebuilt_only_from_complete_journal(self):
+        values={'/session/binding/binding.json':self.binding,'/session/provider/replicas.json':self.owner,
+                '/session/provider/owner.json':self.released('node-b')}
+        class P(PurePosixPath):
+            def exists(self):return str(self) in values
+        written=[]
+        def put(path,value):values[str(path)]=copy.deepcopy(value);written.append(str(path))
+        with patch.object(m,'load',side_effect=lambda p:copy.deepcopy(values[str(p)])),patch.object(m,'put_json',side_effect=put), \
+                patch.object(m.os,'open',return_value=9),patch.object(m.os,'close'),patch.object(m.os,'fsync'), \
+                patch.object(m.os,'O_DIRECTORY',0,create=True),patch.object(m.os,'O_CLOEXEC',0,create=True):
+            result=m.retirement_result('node-b',P('/session'),P('/session/provider'),False)
+            again=m.retirement_result('node-b',P('/session'),P('/session/provider'),False)
+        self.assertEqual(written,['/session/provider/release.json'])
+        self.assertTrue(result['peerReceiptReconstructed'])
+        self.assertFalse(again['peerReceiptReconstructed'])
+        self.assertFalse(result['newRetireRequestSent'])
+        self.assertFalse(result['SDK_called_by_this_wrapper'])
+
+    def test_previous_retire_intent_prevents_a_second_control_request(self):
+        class P(PurePosixPath):
+            def exists(self):return self.name=='retire-intent.json'
+        deployment=P('/home/jwk/agent/deployments/agentenv-native-6cdac56')
+        def load(path):
+            if path.name=='cohort-state.json':return {'phase':'quiesced','openRequests':[],'sandboxIds':[],'outcomeUncertain':False}
+            if path.name=='owner.json':return {'state':'serving'}
+            return {'node':'node-b','apiPort':18084}
+        config=('home_path='+json.dumps(str(deployment/'state'))+'\n[snapshot]\nrepository_backend="posix_fs"\n').encode()
+        with patch.object(m,'ordinary'),patch.object(m,'DEPLOYMENT',deployment), \
+                patch.object(m,'prepared',return_value=(P('/session'),P('/session/provider'),{})), \
+                patch.object(m,'load',load),patch.object(m,'read',return_value=config), \
+                patch.dict(sys.modules,{'fcntl':types.SimpleNamespace(LOCK_EX=1,LOCK_NB=2,flock=lambda *a:None),
+                                        'aenv_ub_provider':types.SimpleNamespace(contract=object())}), \
+                patch.object(m.os,'open',return_value=100),patch.object(m.os,'close'), \
+                patch.object(m.os,'O_NOFOLLOW',0,create=True),patch.object(m.os,'O_CLOEXEC',0,create=True), \
+                patch.object(m.http.client,'HTTPConnection',side_effect=AssertionError('No second request')):
+            with self.assertRaisesRegex(RuntimeError,'already recorded'):
+                m.retire(types.SimpleNamespace(node='node-b',peer_receipt=None))
+
     def setUp(self):
         self.binding={'version':3,'sourceImage':m.SOURCE,'lowerFilesystem':'ext4',
                       'layers':[{'objectId':'image-'+'a'*64,'generation':'a'*32,'sha256':'sha256:'+'a'*64,

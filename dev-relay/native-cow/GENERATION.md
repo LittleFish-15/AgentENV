@@ -96,6 +96,17 @@ completion reply preserves the released state. Actual cleanup failures remain
 unresolved. The coordinator must inspect those recorded outcomes instead of
 repeating retirement merely because a reply was lost.
 
+The wrapper records and fsyncs a one-shot retirement intent before connecting to
+the control socket. A prior intent with no complete released owner journal is
+not sent again. Completed journals are validated against the exact manifest,
+role, object/import record, finalization acknowledgment and post-release base
+integrity. This allows confirmation after a lost reply without another SDK
+operation. A missing B peer receipt can be reconstructed only from that complete
+exact-generation evidence; incomplete or mismatched journals remain blocked.
+Publisher peer receipts are validated before recording a new retirement intent.
+An explicit refusal after the intent still requires review; this is not an
+automatic retry loop or distributed failure detector.
+
 The new provider wrapper's `retire --node ... --run` requires a quiescent cohort,
 an empty running/paused API inventory and no retained records in this isolated
 POSIX snapshot repository. It refuses before contacting the provider when

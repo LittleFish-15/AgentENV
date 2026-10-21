@@ -310,6 +310,56 @@ def retained_snapshot_records(records):
     return False
 
 
+def released_state(node,owner,manifest,binding):
+    validate_owner(manifest,binding)
+    manifest_sha='sha256:'+hashlib.sha256(json.dumps(manifest,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+    need(owner.get('state')=='released' and owner.get('ownerId')==manifest['ownerId']
+         and owner.get('manifestSha256')==manifest_sha and owner.get('format')=='native-raw-v1'
+         and owner.get('mode')=='pmem' and owner.get('role')==('publish' if node=='node-a' else 'import')
+         and owner.get('finalize_acknowledged') is True and owner.get('base_post_sha256_verified') is True
+         and owner.get('post_verification_errors')==[],
+         'Released generation identity, finalization or integrity evidence incomplete')
+    if node=='node-a':
+        rows=owner.get('objects')
+        need(isinstance(rows,list) and len(rows)==1 and rows[0].get('replica')==manifest['replicas'][0]
+             and rows[0].get('creation_confirmed') is True and rows[0].get('delete_acknowledged') is True,
+             'Publisher deletion not acknowledged for this exact object')
+    else:
+        rows=owner.get('imports')
+        need(owner.get('objects')==[] and isinstance(rows,list) and len(rows)==1
+             and rows[0].get('replica')==manifest['replicas'][0] and rows[0].get('mapped') is True,
+             'Importer release record differs or contains an allocation')
+    return {'version':1,'ownerId':manifest['ownerId'],'readerId':'node-b-v4',
+            'manifestSha256':manifest_sha,'state':'released'}
+
+
+def retirement_result(node,session,work,request_sent):
+    binding=load(session/'binding/binding.json');manifest=load(work/'replicas.json')
+    before=load(work/'owner.json')
+    receipt=released_state(node,before,manifest,binding)
+    rebuilt=False
+    if node=='node-b':
+        path=work/'release.json'
+        if not path.exists():
+            # Cleanup can complete before the process is interrupted while
+            # publishing its deterministic peer receipt. Reconstruct metadata
+            # only from complete, exact-generation SDK release evidence.
+            try:put_json(path,receipt);rebuilt=True
+            except FileExistsError:pass
+            if rebuilt:
+                directory_fd=os.open(work,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+                try:os.fsync(directory_fd)
+                finally:os.close(directory_fd)
+        need(load(path)==receipt,'Peer release receipt differs from the completed generation')
+    need(load(work/'owner.json')==before,'Owner journal changed during release reconciliation')
+    return {'status':'REAL_ROOTFS_GENERATION_RELEASED' if request_sent is True else 'REAL_ROOTFS_GENERATION_RELEASE_CONFIRMED_FROM_JOURNAL',
+            'node':node,'ownerJournal':str(work/'owner.json'),
+            'releaseReceipt':str(work/'release.json') if node=='node-b' else None,
+            'newRetireRequestSent':request_sent,'peerReceiptReconstructed':rebuilt,
+            'SDK_cleanup_called_by_provider':True,'SDK_called_by_this_wrapper':False,
+            'snapshotRecordsObservedEmpty':True}
+
+
 def retire(args):
     ordinary(args.node);session,work,_=prepared(args.node)
     import fcntl
@@ -333,6 +383,12 @@ def retire(args):
         if records.exists():
             need(records.resolve(strict=True)==records and records.is_dir(),'Repository path differs')
             need(not retained_snapshot_records(records),'Retained snapshot records require this base; keep publication alive')
+        current=load(work/'owner.json')
+        if current.get('state')=='released':
+            return retirement_result(args.node,session,work,False)
+        need(current.get('state')=='serving','Prior retirement or SDK state is unresolved; no second retire request')
+        intent=session/'retire-intent.json'
+        need(not intent.exists(),'A retirement call was already recorded; inspect its owner journal, do not resend')
         key=read(DEPLOYMENT/'config/api-key',1024).decode().strip()
         need(re.fullmatch('e2b_[0-9a-f]{48}',key),'API key format differs; value withheld')
         connection=http.client.HTTPConnection('127.0.0.1',definition['apiPort'],timeout=15)
@@ -347,15 +403,32 @@ def retire(args):
             need(args.peer_receipt is not None,'Owner retirement requires actual new B release receipt')
             read(args.peer_receipt);receipts=[str(args.peer_receipt.resolve(strict=True))]
         else:need(args.peer_receipt is None,'B only releases its own imports')
-        with socket.socket(socket.AF_UNIX) as stream:
-            stream.settimeout(600);stream.connect(str(work/'control.sock'));contract.same_uid(stream)
-            contract.send_json(stream,{'operation':'retire','peerReceipts':receipts});reply=contract.receive_json(stream)
+        manifest=load(work/'replicas.json')
+        validate_owner(manifest,load(session/'binding/binding.json'))
+        manifest_sha='sha256:'+hashlib.sha256(json.dumps(manifest,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+        need(current.get('ownerId')==manifest['ownerId'] and current.get('manifestSha256')==manifest_sha,
+             'Serving generation identity differs before retirement')
+        if args.node=='node-a':
+            from aenv_ub_provider import service as provider_service
+            provider_service.release_receipts({'operation':'retire','peerReceipts':receipts},manifest)
+        put_json(intent,{'version':1,'node':args.node,'ownerId':manifest['ownerId'],'manifestSha256':manifest_sha,
+                         'state':'call_recorded_before_control_connect'})
+        directory_fd=os.open(session,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+        try:os.fsync(directory_fd)
+        finally:os.close(directory_fd)
+        request_sent=False
+        try:
+            with socket.socket(socket.AF_UNIX) as stream:
+                stream.settimeout(600);stream.connect(str(work/'control.sock'));contract.same_uid(stream)
+                request_sent=None
+                contract.send_json(stream,{'operation':'retire','peerReceipts':receipts});request_sent=True
+                reply=contract.receive_json(stream)
+        except (OSError,EOFError,ValueError):
+            if load(work/'owner.json').get('state')=='released':
+                return retirement_result(args.node,session,work,request_sent)
+            raise
         need(reply=={'state':'released'},'Provider retirement refused or incomplete; retain all journals')
-        owner=load(work/'owner.json')
-        need(owner.get('state')=='released' and owner.get('finalize_acknowledged') is True,'Provider finalization not confirmed')
-        return {'status':'REAL_ROOTFS_GENERATION_RELEASED','node':args.node,'ownerJournal':str(work/'owner.json'),
-                'releaseReceipt':str(work/'release.json') if args.node=='node-b' else None,
-                'SDK_cleanup_called_by_provider':True,'snapshotRecordsObservedEmpty':True}
+        return retirement_result(args.node,session,work,True)
     finally:os.close(lock)
 
 

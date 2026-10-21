@@ -15,7 +15,12 @@ cd /home/jwk/agent
 python3 -I -B native_rollout.py run-a --run
 ```
 
-Keep that terminal open. It downloads twelve public helpers at an immutable
+The first user-run step checks the required existing authenticated A-to-B SSH
+route and ordinary Linux/Python identity, before creating the rollout journal or
+starting a build. This connectivity has **not** been verified during authoring.
+Failure stops without SDK or service changes; the entry does not provision SSH
+keys or weaken host-key checking. Once that prerequisite passes, keep the
+terminal open. It downloads twelve public helpers at an immutable
 GitHub commit and verifies their hashes. Existing files with different contents
 are preserved and stop the run. It uses the already configured A-to-B SSH trust,
 requiring batch authentication and strict host-key checking. It does not create
@@ -95,7 +100,8 @@ receipts without resending an uncertain deletion. For a new Runtime that is
 quiescent, `prepare_native_service_v4.py rollback-plan --node NODE` prints the
 scoped rollback block described in DEPLOYMENT.md. It preserves snapshots and
 the UB provider. Provider retirement is separate and refuses retained snapshot
-records; this cohort intentionally retains captures. Do not terminate a live
+records; this cohort retains captures by default. Explicit bounded capture
+release and provider retirement are documented in CLEANUP.md. Do not terminate a live
 provider to reclaim its base while those references remain.
 
 ## Remaining gaps

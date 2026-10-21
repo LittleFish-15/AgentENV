@@ -69,12 +69,22 @@ The original measurement report is preserved, and a separate `recovery-*.json`
 records the outcome. Snapshots remain retained. This cleanup mode is not a
 restart of the workload or automatic continuation of the whole rollout.
 
+Add `--release-captures` only when you intend to discard this batch's retained
+capture. The entry requires empty running/paused inventory, no unresolved
+create/capture/Fork, a literal recorded snapshot UUID and the exact original
+committed-record SHA. It requests `DELETE /templates/UUID` once, then requires
+both GET 404 and absence of that committed record. A lost response is reconciled
+by those two absence checks without another DELETE. Changed records, missing
+original evidence and unrelated templates are preserved. No repository directory
+is removed by the script. This explicit mode keeps the original measurement
+report and records deletion in a separate recovery artifact. See CLEANUP.md.
+
 Successful completion means `COHORT_FUNCTIONAL_PASS_SNAPSHOTS_RETAINED`, not a
 memory-sharing acceptance. The explicit capture remains in the repository;
 any Fork-created snapshots also remain governed by Runtime semantics. Provider
 retirement refuses retained catalog records. Runtime rollback preserves them.
-No script in this revision deletes retained snapshots or implements distributed
-snapshot garbage collection. Empty UUID `.lock` files left by a removed POSIX
+The explicit capture-release mode is scoped to this batch; distributed snapshot
+garbage collection is not implemented. Empty UUID `.lock` files left by a removed POSIX
 record are not themselves references; malformed/unknown entries still block
 retirement.
 

@@ -24,7 +24,7 @@ ROOT = Path('/home/jwk/agent')
 CORE = '6cdac56ed70284e89693e7bda0470a43ad9bd0b5'
 ORIGINAL = 'ae9c62693839ce7effa2b45df31c0039ae4f9fbc'
 SOURCE = 'sha256:cf786498f77bf4ba6235156ab8540d0b9335e874e70b95efbeb53168e0dce68d'
-MODULE_PINS = {'cohort_engine': '9b8357278749ec888abf69c4d48fa503c7779bcf0618ad55894bbb27f5d26d46', 'ram_observer': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_sync': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
+MODULE_PINS = {'cohort_engine': '5d0cd8d4cf45b8301532517af832710c3928458f20c1cc64b0991500ddb1b89d', 'ram_observer': '2aeeb8e9b4b875972bf8d6a41e98344c6709b7ccce472e25003b9ff09d16e112', 'public_workload': '1b54baaca2721d1c9cca5017f7faa88ea21ae146c50a47dcf7a51ef592feebbb', 'cohort_sync': 'ceb0befc906c4feb5b106bbc34eeb3d83ad6aa05c372e4f05c7bbab09a943303'}
 
 
 def need(ok, reason):
@@ -125,6 +125,7 @@ class Api:
         self.stable()
         allowed = path in ('/health', '/sandboxes-cold', '/v2/sandboxes', '/v2/sandboxes?limit=1')
         allowed = allowed or re.fullmatch(r'/sandboxes/[A-Za-z0-9_-]{1,128}(?:/snapshots|/fork)?', path)
+        allowed = allowed or (method in ('GET', 'DELETE') and re.fullmatch(r'/templates/[0-9a-f-]{36}', path))
         need(allowed and method in ('GET', 'POST', 'DELETE'), 'Route outside cohort scope')
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout)
         try:
@@ -314,7 +315,7 @@ def recovery_context(state, api, node, variant):
     return context, path
 
 
-def recover_existing(engine, api, state, state_path, node, variant):
+def recover_existing(engine, api, state, state_path, node, variant, release_captures=False):
     context, work = recovery_context(state, api, node, variant)
     previous = load(work / 'report.json')
     need(previous.get('cohort', {}).get('runId') == state.get('runId')
@@ -329,6 +330,16 @@ def recover_existing(engine, api, state, state_path, node, variant):
                       'cohort': value, 'SDK_called': False, 'newGuestRequests': 0,
                       'originalMeasurementReportPreserved': True})
     recovered = engine.Cohort.recovery(api, state, persist).recover_owned()
+    if release_captures:
+        def committed_record(sid):
+            path = api.base / 'state/snapshot-store/repository/catalog/records' / (sid + '.json')
+            try:
+                raw = read(path)
+            except FileNotFoundError:
+                return None
+            need(json.loads(raw).get('id') == sid, 'Capture record identity differs')
+            return hashlib.sha256(raw).hexdigest()
+        recovered = engine.release_captures(api, recovered, persist, committed_record)
     credentials = work / 'cli-config/aenv/credentials'
     if credentials.exists():
         expected = 'url = "http://127.0.0.1:' + str(api.port) + '"\napi_key = ' + json.dumps(api.key) + '\n'
@@ -340,9 +351,13 @@ def recover_existing(engine, api, state, state_path, node, variant):
               'originalMeasurementReportPreserved': True, 'SDK_called': False, 'newGuestRequests': 0,
               'temporaryCredentialsRemoved': not credentials.exists(), 'recoveryReport': str(output),
               'newPerformanceMeasurements': False}
+    if release_captures:
+        report['status'] = ('COHORT_OWNED_CAPTURES_RELEASED_NO_NEW_GUESTS' if recovered.get('captureReleaseComplete') is True
+                            and engine.quiescent(recovered) else 'COHORT_CAPTURE_RELEASE_PENDING_OR_REFUSED')
+        report['capturesReleaseRequested'] = True
     save(output, report)
     print(json.dumps(report, indent=2))
-    return 0 if engine.quiescent(recovered) else 1
+    return 0 if engine.quiescent(recovered) and (not release_captures or recovered.get('captureReleaseComplete') is True) else 1
 
 
 def run(args):
@@ -405,7 +420,7 @@ def run(args):
         api = Api(base, unit, port)
         need(api.call('GET', '/health')[0] == 204, 'Runtime health failed')
         if args.cleanup:
-            return recover_existing(engine, api, state, state_path, args.node, args.variant)
+            return recover_existing(engine, api, state, state_path, args.node, args.variant, args.release_captures)
         need(engine.quiescent(state), 'Previous cohort unresolved; preserve it')
         need(args.attempt == 1 and not state.get('runId'), 'This entry runs one attempt; do not blindly repeat a previous cohort')
         disk = os.statvfs(ROOT)
@@ -457,6 +472,7 @@ def main():
     parser.add_argument('--variant', choices=('original', 'native'), required=True)
     parser.add_argument('--attempt', type=int, default=1)
     parser.add_argument('--cleanup', action='store_true', help='Reconcile/clean the existing batch; never create or capture')
+    parser.add_argument('--release-captures', action='store_true', help='With --cleanup, release only pinned captures owned by this batch')
     parser.add_argument('--pair-epoch', help='Coordinator-owned post-workload hold epoch')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
@@ -464,12 +480,15 @@ def main():
         print(json.dumps({'status': 'PLAN_ONLY', 'node': args.node, 'variant': args.variant,
                           'coldParents': 0 if args.cleanup else 1, 'captureCalls': 0 if args.cleanup else 1,
                           'restoreCalls': 0 if args.cleanup else 1, 'forkCalls': 0 if args.cleanup else 1,
-                          'workloadChildren': 0 if args.cleanup else 2, 'snapshotsRetained': True,
+                          'workloadChildren': 0 if args.cleanup else 2,
+                          'ownedCapturesReleaseRequested': args.release_captures,
+                          'snapshotsRetainedByDefault': True,
                           'memfileCrossNodeCowImplemented': False}))
         return 0
     need(bool(MODULE_PINS), 'Unpublished draft; pinned modules required')
     need(args.pair_epoch is None or re.fullmatch('[0-9a-f]{32}', args.pair_epoch), 'Invalid pair epoch')
     need(not (args.cleanup and args.pair_epoch), 'Cleanup does not join a new pair hold')
+    need(not args.release_captures or args.cleanup, 'Capture release requires explicit --cleanup')
     return run(args)
 
 

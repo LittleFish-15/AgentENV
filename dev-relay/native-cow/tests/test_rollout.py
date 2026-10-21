@@ -23,6 +23,15 @@ sync_spec.loader.exec_module(SYNC)
 
 
 class Tests(unittest.TestCase):
+    def test_failed_transport_stops_before_download_or_preparation(self):
+        with mock.patch.object(m, 'ordinary'), mock.patch.object(m, 'SELF', Path(m.__file__).resolve()), \
+                mock.patch.object(m, 'transport_readiness', side_effect=RuntimeError('No existing SSH trust')), \
+                mock.patch.object(m, 'download') as download, mock.patch.object(m, 'Steps') as steps:
+            with self.assertRaisesRegex(RuntimeError, 'SSH trust'):
+                m.run_a()
+        download.assert_not_called()
+        steps.assert_not_called()
+
     def test_failed_provider_is_terminal_before_service_poll(self):
         with mock.patch.object(m, 'ordinary'), mock.patch.object(m, 'load', return_value={'state': 'unresolved_preserved'}), \
                 mock.patch.object(m.subprocess, 'run') as run:
@@ -214,6 +223,7 @@ class Tests(unittest.TestCase):
                                 'PUBLIC_PINS': {'public.py': 'p'}, 'Steps': Steps}.items():
                 stack.enter_context(mock.patch.object(m, name, value))
             stack.enter_context(mock.patch.object(m, 'ordinary'))
+            stack.enter_context(mock.patch.object(m, 'transport_readiness', side_effect=lambda: events.append('transport-ready')))
             stack.enter_context(mock.patch.object(m, 'download', side_effect=lambda: events.append('download')))
             stack.enter_context(mock.patch.object(m, 'load', return_value={'rootfsReady': True}))
             stack.enter_context(mock.patch.object(m, 'sha', return_value='a' * 64))
