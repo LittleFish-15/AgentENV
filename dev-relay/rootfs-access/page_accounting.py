@@ -10,12 +10,13 @@ def pages(offset,length,page_bytes):
     need(type(page_bytes) is int and page_bytes>0,'Invalid page size')
     return range(offset//page_bytes,(offset+length-1)//page_bytes+1)
 
-def read_sets(stream,status,bindings,windows,files,patch_sha,page_bytes=4096):
+def read_sets(stream,status,bindings,windows,files,patch_sha,page_bytes=4096,window_semantics='contained'):
     """bindings: source image.json -> template/sandbox/lower/upper inode sets.
 
     files is keyed by (dev,inode), with the immutable lower's path and size.
     Only a complete prefix attested by a post-window status is consumed.
     """
+    need(window_semantics in ('contained','completion'),'Invalid window semantics')
     need(windows and all(type(v[0]) is int and type(v[1]) is int and 0<v[0]<v[1] for v in windows.values()),'Invalid workload windows')
     need({v['sandbox_id'] for v in bindings.values()}==set(windows),'Bindings/window scopes differ')
     need(status['dropped_records']==status['errors']==status['unsupported_context_calls']==0,'Observer reports incomplete evidence')
@@ -35,8 +36,12 @@ def read_sets(stream,status,bindings,windows,files,patch_sha,page_bytes=4096):
             need(row['end_ns']<low or row['start_ns']>high,'Unbound source read during workload')
             audit['unknown_sources_outside_window']+=1;continue
         sid=source['sandbox_id'];start,end=windows[sid]
-        if row['end_ns']<start or row['start_ns']>end:audit['outside_window']+=1;continue
-        if row['start_ns']<start or row['end_ns']>end:audit['boundary_crossing']+=1;continue
+        if window_semantics=='completion':
+            if not start<=row['end_ns']<=end:audit['outside_window']+=1;continue
+            if row['start_ns']<start:audit['boundary_crossing']+=1
+        else:
+            if row['end_ns']<start or row['start_ns']>end:audit['outside_window']+=1;continue
+            if row['start_ns']<start or row['end_ns']>end:audit['boundary_crossing']+=1;continue
         key=(row['dev'],row['inode'])
         if key in source['upper_keys']:audit['upper_reads']+=1;continue
         need(key in source['lower_keys'] and key in files and row['allowed_lower'] is True,'Read is not bound to a verified lower or upper')
@@ -44,7 +49,8 @@ def read_sets(stream,status,bindings,windows,files,patch_sha,page_bytes=4096):
         if row['direct_io']:audit['direct_lower_reads']+=1;continue
         for page in pages(row['offset'],row['bytes'],page_bytes):observed[sid].add((key[0],key[1],page))
     # Caller must preserve the raw log/status; later records are outside this checkpoint.
-    need(audit['boundary_crossing']==0,'A read crossed a workload boundary; complete-window claim requires review')
+    if window_semantics=='contained':need(audit['boundary_crossing']==0,'A read crossed a workload boundary; complete-window claim requires review')
+    audit['window_semantics']=window_semantics
     return observed,audit
 
 def pair_statistics(a,b,resident,page_bytes=4096):
