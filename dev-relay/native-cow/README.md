@@ -1,24 +1,31 @@
 # Native CoW experimental relay
 
-Latest: A_native_parent_once_v2.py --run. The installed native Runtime and its
-post-disconnect health remain prerequisites. It verifies that the prior v1 run
-stopped before any create or snapshot request; prior reports remain unchanged.
+Latest: A_export_real_rootfs_v1.py --run, ordinary node-A user.
 
-The device budget is derived from the pinned Runtime configuration and source:
-the configured existing tools disk is an ordinary file (no tools ublk), fresh
-Guest RAM is not restored through ublk, the cold rootfs needs at most one new
-ublk device, and capture restacks that same device while writing memory to a
-layer. No extra drives or resize are requested; startup prewarm is disabled.
-The script requires one possible new rootfs device plus two spare slots, for
-three total free slots. Changed config or nonregular/missing tools invalidates
-this budget. Capacity is checked again immediately before the only POST.
-This is headroom, not a reservation against concurrent allocators.
+Uses the existing pinned offline source archive and dependency cache. Overlays
+three exact source files from core commit 734ba2e45216b1c80e2f35236fdd6916c9fef396
+into a new build directory. Reuses Cargo target cache only; deployed binaries
+and services remain unchanged. No network dependency installation.
 
-It reuses the existing verified offline PyPika OCI input, runs one 512 MiB
-Guest, imports the workload, captures a parent and deletes only its own Guest.
-No automatic create retry, old-device cleanup, daemon restart, driver limit,
-Host permission or SDK change is performed. UB binding remains disabled for
-this service lifecycle/input preparation step. No memory savings are claimed.
-Core/main remain unchanged. No credentials, active UB manifests or binaries.
+Runs four sparse-output tests and the exact binary's three native tests through
+a minimal harness (registry versions/checksums constrained to frozen Cargo.lock).
+Builds only the rootfs exporter. Runs native Clippy when installed.
 
-SHA256: 9af039c72f256230c1c371666771326f2f965f07cc4d83f6e4e7d7cb6a9de0a9
+Finds the original PyPika source configuration and requires its 12 ordered layer
+identities to match the captured 13-layer catalog prefix and original receipt.
+Never silently drops the captured upper or treats it as the original OCI view.
+Verifies every local committed layer hash, then exports the immutable logical
+ext4 view directly through OverlayBD's local decoders, without ublk, mounts,
+Guest, SDK, mutable upper, remote fallback, or service operations.
+
+Requires 16 GiB free disk initially; data writes limited to 4 GiB, stored inputs
+to 2 GiB, expected logical size exactly 64 GiB. Sparse filesystem support is
+checked. These are data/headroom guards, not a filesystem quota. Full logical
+hashing reads 64 GiB and is preparation cost, not a cold-cache experiment.
+Partial outputs and old receipts are preserved; no automatic retry or cleanup.
+
+Success is RAW_ROOTFS_EXPORTED, not UB publication or end-to-end CoW acceptance.
+The sparse 64 GiB view needs separate verified filesystem compaction before any
+UB allocation. Never truncate it to allocated bytes or count it as memory savings.
+
+SHA256: 424ddd4cb3edc36f52b79081fedbfda67fed569578df0d7a323824611d94e048
