@@ -14,9 +14,10 @@ python3 -I -B native_cohort.py --node node-a --variant original --run
 python3 -I -B native_cohort.py --node node-a --variant native --run
 ```
 
-The B commands use `--node node-b`. These are individual cohort entries; the
-cross-node coordinator is not yet supplied by this revision. Do not describe
-four independently executed cohorts as a synchronized two-node experiment.
+The B commands use `--node node-b`. These are individual cohort entries;
+ROLLOUT.md supplies their A-side preparation/transfer/run coordinator. Its node
+runs execute concurrently but have no atomic workload or measurement barrier.
+Do not describe them as a synchronized two-node experiment.
 
 Before either variant, the coordinated deployment's `rootfs-inputs.json` must
 identify the received original image. The original run uses the existing

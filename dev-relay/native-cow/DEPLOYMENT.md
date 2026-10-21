@@ -72,9 +72,10 @@ The immutable input transport and real-rootfs provider transition entries are
 described in ROOTFS_INPUTS.md and GENERATION.md. The bounded local
 capture/restore/Fork batch, public workload and explicit-gap report are described
 in COHORT.md. They are implemented and fixture-tested, not target-executed.
-The complete bootstrap, synchronized two-node coordination, privileged sampler
-and Host lower access observer integration are still outstanding. Do not label
-the commands above as a completed one-command CoW experiment.
+ROLLOUT.md describes the new A-side bootstrap candidate and its two scoped root
+blocks. Atomic two-node measurement coordination, privileged sampling and Host
+lower access observer integration are still outstanding. Do not label these
+entries as a fully accepted cross-node RAM/rootfs CoW implementation.
 
 Local validation: 6 deployment contract checks, 7 generated rollback checks
 against an in-memory OS model, and 5 bundle integrity/layout tests passed. They
