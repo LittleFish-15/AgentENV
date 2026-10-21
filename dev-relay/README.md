@@ -2,6 +2,36 @@
 
 此目录集中存放本轮个人实验环境使用的协调入口和控制测试，方便从功能分支获取。允许含实验节点、账号、路径及已验证产物身份等环境绑定信息；不存凭据、二进制、完整日志或实验数据。
 
+## 2026-10-21 原版55模板准备（正式110Guest回放尚未开始）
+
+`cow55_build.py` 接受另行中转且固定SHA的私有 `cow55_inputs.json`，沿用同事
+`aenv pull --memory 4096` 对应的 `/v3/templates` + `/v2/templates/{id}/builds/{id}`
+API，CPU省略并记录服务实际默认。无自定义warm/start/ready命令；用既有regctl
+在宿主按原代理/TLS设置获取镜像，再给隔离Runtime提供已验hash的local OCI。
+不部署Docker/registry、不改变网络、服务、权限，不修改另一条干净核心分支。
+
+55项按已审查私有选集；镜像tag先全部解析为精确ARM64 manifest digest，
+总压缩输入<=256GiB、单镜像<=8GiB才开始下载/构建。每一步保留512GiB文件系统
+余量，并要求至少32GiB主机MemAvailable。它们是检查阈值，不是硬配额；模板
+构建VM一次最多1个、4GiB，尚未授权此入口启动110个测试Guest或调用UB。
+
+A普通用户：`python3 -I -B cow55_build.py start` 后台启动；`status`查看报告。
+进程为新session、无终端输入，实际存活仍受主机登录会话策略影响；若进程退出
+保留回执，不能以PID存在代替已完成。`resume`在独占锁下续跑，不确定create和
+已失败build停止待审查，已知build仅继续poll不重发POST，ready模板只复核。
+后台状态更新持久化；原服务身份变化、已有测试Guest、未知同名模板均停止。
+
+准备使用原版模板构建临时VM，成功ready遵循源码先stop构建VM再发布的顺序；
+记录该证据边界，不假称做过独立进程资源审计。所有模板/OCI输入保留给后续
+110Guest回放，不做全局cleanup或删除失败模板。服务启动/暂停/root动作均无。
+完成标记 `COW55_ALL_TEMPLATES_READY_NO_REPLAY_STARTED` 仅表示55模板就绪。
+`COW55_TEMPLATE_WORKER_LAUNCHED`只表示启动提交，不是构建或回放成功。
+
+现有已校验的 `cow_parent_424b012.py` 仅复用安全文件/网络环境/诊断函数，
+不调用其单PyPika main，也不沿用其512MiB镜像预算或旧pending。
+模板状态放独立 `relay/cow55-template-build-node-a.json`；不要手工删除该文件。
+本地控制测试：`python3 -B -m unittest discover -s dev-relay -p test_cow55_build.py`。
+
 ## 2026-10-20 当前步骤：跨节点固定模板元数据准备
 
 A 全16层真实 Guest UB 批次已经完成；下文旧安装/恢复段作为历史操作保留，
