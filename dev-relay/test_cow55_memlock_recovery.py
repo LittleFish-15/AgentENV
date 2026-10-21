@@ -1,4 +1,5 @@
-import ast, hashlib, importlib.util, json, unittest
+import ast, hashlib, importlib.util, json, unittest, tempfile, os
+from unittest.mock import patch
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -38,5 +39,20 @@ class Recovery(unittest.TestCase):
         self.assertNotIn('exec(',root.ROOT_SOURCE)
         self.assertNotIn('prlimit(',root.ROOT_SOURCE)
         self.assertIn('Fresh daemon not verified',root.ROOT_SOURCE)
+    def test_published_receipt_readable_but_not_publicly_writable(self):
+        tree=ast.parse(root.ROOT_SOURCE)
+        save=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='save')
+        mkdir=os.mkdir
+        # Windows sandbox fixtures must inherit the workspace ACL; production
+        # root receipt mode is checked independently below.
+        with patch.object(os,'mkdir',side_effect=lambda p,mode=0o777,**kw:mkdir(p,0o755 if os.name=='nt' else mode,**kw)), tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            path=Path(tmp)/'receipt.json';value={'status':'fixture_nonsecret'}
+            scope={'RECEIPT':path,'result':value,'json':json,'os':os}
+            exec(compile(ast.Module(body=[save],type_ignores=[]),'<save-function-test>','exec'),scope)
+            with patch.object(os,'chmod',wraps=os.chmod) as chmod:
+                scope['save']()
+            chmod.assert_called_once_with(path.with_suffix('.tmp'),0o644)
+            self.assertEqual(json.loads(path.read_text()),value)
+            self.assertFalse(path.with_suffix('.tmp').exists())
 
 if __name__=='__main__':unittest.main()
