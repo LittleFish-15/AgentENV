@@ -2,6 +2,41 @@
 
 此目录集中存放本轮个人实验环境使用的协调入口和控制测试，方便从功能分支获取。允许含实验节点、账号、路径及已验证产物身份等环境绑定信息；不存凭据、二进制、完整日志或实验数据。
 
+## 2026-10-21 本批55模板升级到10路有界任务
+
+`cow55_parallel.py start --jobs 10` 使用现有私有输入和已固定的
+`cow55_build_edf502d.py`；不重新解析tag，不重建READY模板，不操作服务或UB。
+这是最多10个完整模板任务（准备镜像、构建、核验），不是10份争抢原回执的脚本。
+
+交接等待原协调器进入已知BUILDING的只读poll阶段，且没有活跃子进程。
+仅对UID/PID/start_ticks/精确脚本命令行匹配的普通协调器短暂SIGSTOP复核，
+再SIGINT让其已有finally持久化退出，SIGCONT释放。原regctl下载自然结束，
+已提交后端构建继续；不向Runtime、Guest、systemd或其他用户进程发信号。
+独立watchdog先握手就绪，父进程死亡/连接关闭/10秒超时会SIGCONT同一目标；
+路径/身份/阶段不符则不交接。不使用SIGTERM/SIGKILL，不强制终止无法退出的任务。
+30分钟找不到可交接窗口则停止控制器，原任务保持运行。
+
+取得原batch唯一flock后才有新的状态写者，原回执先备份。每个任务用私有case副本，
+由一个加锁Journal原子写整份回执，避免线程之间覆盖更新。已知在建任务优先
+占用并发名额，不能在其之外再额外启动10个。失败停止接收新任务，已提交任务
+有界等待/保存状态；不确定create和失败build仍阻止盲目续跑。
+
+下载使用按SHA256摘要加锁的共享OCI blob缓存：先查本批已有镜像目录并验证，
+成功则硬链接复用；只有确实缺失的blob才通过已有regctl blob get下载。每摘要
+每个worker至多一个下载尝试，失败不会被别的任务隐式重试。校验后才发布，
+目标存在冲突就保留停止，不覆盖或删除。每个镜像保留独立index，不共享可变
+index.json。网络故障后的显式resume可能重传未完成内容，不能承诺零重复网络字节。
+
+最后核对55项全READY、55唯一templateID、templateID=buildID、4GiB资源、
+每项Managed层库存完整、原服务身份及空公开沙箱列表，才置final_merge_verified。
+状态成功仍为COW55_ALL_TEMPLATES_READY_NO_REPLAY_STARTED，不是110Guest回放完成。
+10路按至少64GiB主机MemAvailable检查，磁盘保留512GiB，原8GiB/256GiB压缩
+输入检查保留，均非硬配额。统计记录该批准备期间并行预热，不能称冷cache实验。
+
+切换后用新脚本status/resume，勿另起原脚本start/resume。后台存活仍受Host登录
+会话策略影响；不把启动回执当交接成功。测试`test_cow55_parallel.py`含真实本地
+线程/文件缓存合并以及信号/目标API替身；不等于远端Linux交接或10路实机通过。
+
 ## 2026-10-21 原版55模板准备（正式110Guest回放尚未开始）
 
 `cow55_build.py` 接受另行中转且固定SHA的私有 `cow55_inputs.json`，沿用同事
