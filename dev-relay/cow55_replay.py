@@ -196,6 +196,44 @@ class Api:
             return r.status,json.loads(raw) if raw else None
         finally:c.close()
 
+def repaired_build(build,old_raw,repair):
+    """Validate a root-owned repair receipt without rewriting the historical build."""
+    old=json.loads(old_raw)
+    need(repair.get('revision')=='cow55-original-memlock-repair-v1' and repair.get('status')=='A_ORIGINAL_MEMLOCK_RESTART_VERIFIED','Repair not verified')
+    need(repair.get('unit')=='jwk-aenv-ae9c626-node-a.service' and repair.get('new_limit_bytes')==2147483648,'Unexpected repair scope')
+    need(repair.get('previous_run_id')==old.get('run_id')=='323ff7550463486f89ebf66264d39257','Wrong failed run')
+    need(old.get('status')=='STOPPED_COW55_REPLAY' and old.get('replay_completed_guests')==0,'Previous run was not admission-only')
+    need(repair.get('previous_pending_sha256')==hashlib.sha256(old_raw).hexdigest(),'Previous receipt changed')
+    need(repair.get('original_before')==build['original_identity'],'Historical runtime differs')
+    after=repair.get('original_after');need(isinstance(after,list) and len(after)==2 and after!=build['original_identity'],'No confirmed new runtime')
+    result=dict(build);result['original_identity']=after
+    return result
+
+def prepare_after_repair(build):
+    receipt=Path('/run/cow55-original-memlock-repair.json')
+    need(receipt.resolve(strict=True)==receipt,'Redirected root repair receipt')
+    meta=receipt.stat();need(stat.S_ISREG(meta.st_mode) and meta.st_uid==0 and not meta.st_mode&0o022 and meta.st_size<65536,'Untrusted repair receipt')
+    repair=json.loads(receipt.read_bytes());old_raw=H.read(PENDING,2*1024**2)
+    updated=repaired_build(build,old_raw,repair)
+    need(tuple(updated['original_identity'])==H.runtime_pid(),'Repaired runtime changed')
+    need(hashlib.sha256(H.read(BASE/'config/runtime.toml',65536)).hexdigest()==repair['runtime_config_sha256'],'Runtime config changed')
+    api=Api(updated['original_identity']);need(api.call('GET','/v2/sandboxes?limit=1')==(200,[]),'Original inventory not empty')
+    need(not R.find_firecrackers(api.identity[0]),'Existing Firecracker descendants')
+    ids={'01a15d10-ed49-72a2-bb83-6763a755ff4c','01a15d10-ef15-7ab0-9a5a-19a0b147cce7'}
+    for job in json.loads(old_raw)['jobs']:
+        if job.get('sandbox_id'):ids.add(job['sandbox_id'])
+        ids.update(re.findall(r'sandbox ([0-9a-f-]{36}) operation Start failed',job.get('error','')))
+    need(len(ids)==14,'Previous request identity inventory differs')
+    for sid in sorted(ids):need(api.call('GET','/sandboxes/'+sid)[0]==404,'Previous sandbox still exists')
+    backup=PENDING.with_name('cow55-replay-node-a.previous-323ff755.json')
+    need(not backup.exists(),'Previous run already archived; do not repeat')
+    need(H.read(PENDING,2*1024**2)==old_raw,'Previous run changed during review')
+    os.link(PENDING,backup);PENDING.unlink()
+    return updated,{'previous_run_id':repair['previous_run_id'],'previous_receipt':str(backup),
+        'repair_receipt':str(receipt),'original_before':repair['original_before'],'original_after':repair['original_after'],
+        'previous_14_sandbox_ids_http404':True,'old_runtime_restarted':True,
+        'historical_template_build_receipt_modified':False}
+
 class Cohort:
     def __init__(self,work,build,inputs):
         self.work=work;self.api=Api(build['original_identity']);self.lock=threading.RLock();self.send_lock=threading.Lock();self.stop=threading.Event()
@@ -338,7 +376,8 @@ class Cohort:
             self.persist()
             # Two genuine cohort Guests validate the command channel before 108 more.
             for job in self.jobs[:2]:self.create(job)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:list(pool.map(self.create,self.jobs[2:]))
+            # Bound creation pressure independently from the 110-Guest replay concurrency.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(self.create,self.jobs[2:]))
             need(len(self.created)==110 and not self.stop.is_set(),'Incomplete cohort; no replay')
             pids=R.find_firecrackers(self.api.identity[0]);need(len(pids)==110,'Expected exactly 110 scoped Firecrackers')
             pairs=[{'template_id':self.jobs[i]['template_id'],'catalog_sha256':self.jobs[i]['catalog_sha256'],
@@ -416,7 +455,7 @@ class Cohort:
 
 def main():
     global B,H,R
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=('run','status'));a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=('run','status','run-after-memlock-repair'));a=p.parse_args()
     need(os.getuid()==os.geteuid()==1204 and os.uname().nodename=='server1','A ordinary jwk required');os.umask(0o077)
     caps=dict(s.split(':',1) for s in Path('/proc/self/status').read_text().splitlines() if ':' in s);need(all(int(caps[k].strip(),16)==0 for k in ('CapEff','CapPrm','CapAmb')),'Capability-free owner required')
     B,_=load(ROOT/'cow55_build_edf502d.py',BUILDER_SHA,'cohort_builder');B.load_helper();H=B.H
@@ -425,14 +464,21 @@ def main():
     import fcntl
     fd=os.open(H.safe(LOCK),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
     try:
-        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);need(not PENDING.exists(),'Replay receipt exists; no blind repeat')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if a.mode=='run':need(not PENDING.exists(),'Replay receipt exists; no blind repeat')
+        else:need(PENDING.exists(),'Expected failed replay receipt absent')
         B.inputs(ROOT/'cow55_inputs.json');inputs=B.read_json(ROOT/'cow55_inputs.json');build=B.read_json(B.STATE)
         need(B.read_json(BASE/'installation.json').get('commit')=='ae9c62693839ce7effa2b45df31c0039ae4f9fbc','Original installation source differs')
         need(build['status']=='COW55_ALL_TEMPLATES_READY_NO_REPLAY_STARTED' and build.get('final_merge_verified') and build['worker_finished'],'55-template preparation not complete')
         need(build['input_sha256']==B.INPUT_SHA,'Prepared cohort input differs')
         need(len(build['cases'])==55 and len({c['template_id'] for c in build['cases']})==55,'Template set differs')
         for case in build['cases']:B.verify_ready(case)
-        work=Path(tempfile.mkdtemp(prefix='node-a-cow55-replay-',dir=ROOT/'relay/reports'));return Cohort(work,build,inputs).run(collector_source,reader_source)
+        recovery=None
+        if a.mode=='run-after-memlock-repair':build,recovery=prepare_after_repair(build)
+        work=Path(tempfile.mkdtemp(prefix='node-a-cow55-replay-',dir=ROOT/'relay/reports'));cohort=Cohort(work,build,inputs)
+        cohort.report['admission_parallelism']=2
+        if recovery:cohort.report['previous_attempt_resolution']=recovery
+        return cohort.run(collector_source,reader_source)
     finally:os.close(fd)
 
 if __name__=='__main__':

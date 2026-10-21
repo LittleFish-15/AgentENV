@@ -1,3 +1,9 @@
+## Original 55-template memlock recovery
+
+`cow55_memlock_repair.py` is an ordinary-user printer for a reviewed inline root operation, not a root executable. The operation is bound to the failed admission run and original Runtime/daemon identities. It requires empty public inventory, no Firecracker descendants and absence of the two late failed requests. It adds only an ephemeral, root-owned `LimitMEMLOCK=2147483648` override to the original unit, restarts that unit once, verifies both fresh Runtime and daemon limits, and preserves the template store, runtime configuration and failed replay receipt. The override is a limit, not a reservation or a global physical-memory quota; it disappears on reboot. It does not change capabilities, users, UB or the modified service. Stop and return the report on any failed check; do not repeat the repair.
+
+After `A_ORIGINAL_MEMLOCK_RESTART_VERIFIED`, `cow55_replay.py run-after-memlock-repair` validates the root-owned receipt and unchanged previous pending bytes, checks all 14 request IDs are absent, archives that pending receipt and runs a fresh cohort with the same 55 prepared templates. The historical build receipt is not rewritten to pretend it used the new Runtime PID. Admission is limited to two concurrent restores; replay still uses the full 110-Guest barrier/concurrency. No image downloads or template builds occur. The 64 MiB limit and 65,520 KiB daemon VmPin are field observations; the 2 GiB repair and new replay require separate target validation.
+
 # 临时开发与人工中转工具
 
 此目录集中存放本轮个人实验环境使用的协调入口和控制测试，方便从功能分支获取。允许含实验节点、账号、路径及已验证产物身份等环境绑定信息；不存凭据、二进制、完整日志或实验数据。
