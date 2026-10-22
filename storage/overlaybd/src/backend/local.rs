@@ -627,6 +627,8 @@ impl VirtualFile for LocalFile {
         Box::pin(async move {
             #[cfg(feature = "rootfs-read-trace")]
             let started = crate::rootfs_access_trace::now_ns();
+            #[cfg(feature = "rootfs-read-trace")]
+            let observation = crate::rootfs_access_trace::begin_read(ctx.read_source());
             let result = self.inner.read_at_via(ctx.ring(), offset, len).await;
             #[cfg(feature = "rootfs-read-trace")]
             if let (Some(source), Ok(data)) = (ctx.read_source(), &result) {
@@ -640,6 +642,8 @@ impl VirtualFile for LocalFile {
                     started,
                 );
             }
+            #[cfg(feature = "rootfs-read-trace")]
+            crate::rootfs_access_trace::finish_read(observation, result.is_ok());
             result
         })
     }
@@ -654,6 +658,8 @@ impl VirtualFile for LocalFile {
         Box::pin(async move {
             #[cfg(feature = "rootfs-read-trace")]
             let started = crate::rootfs_access_trace::now_ns();
+            #[cfg(feature = "rootfs-read-trace")]
+            let observation = crate::rootfs_access_trace::begin_read(ctx.read_source());
             let result = self.inner.read_at_into_via(ctx.ring(), offset, dst).await;
             #[cfg(feature = "rootfs-read-trace")]
             if let (Some(source), Ok(data)) = (ctx.read_source(), &result) {
@@ -667,6 +673,8 @@ impl VirtualFile for LocalFile {
                     started,
                 );
             }
+            #[cfg(feature = "rootfs-read-trace")]
+            crate::rootfs_access_trace::finish_read(observation, result.is_ok());
             result
         })
     }

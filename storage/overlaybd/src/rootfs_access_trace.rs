@@ -127,6 +127,9 @@ mod linux {
         direct_reads: u64,
         content_reads: u64,
         repository_fallback_reads: u64,
+        active_reads: u64,
+        completed_reads: u64,
+        failed_or_cancelled_reads: u64,
     }
     struct Sink {
         state: Mutex<State>,
@@ -248,6 +251,9 @@ mod linux {
                 direct_reads: 0,
                 content_reads: 0,
                 repository_fallback_reads: 0,
+                active_reads: 0,
+                completed_reads: 0,
+                failed_or_cancelled_reads: 0,
             }),
             allowed,
             allowed_contents,
@@ -275,10 +281,67 @@ mod linux {
             })
             .as_ref()
     }
+
+    /// Covers the underlying context read, its record write, and cancellation.
+    /// A cancelled blocking read can outlive its future; mark the generation
+    /// incomplete rather than treating an empty active count as a drain proof.
+    pub struct ReadGuard {
+        sink: Arc<Sink>,
+        successful: bool,
+    }
+    impl ReadGuard {
+        fn begin(sink: Arc<Sink>) -> Self {
+            sink.state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .active_reads += 1;
+            Self {
+                sink,
+                successful: false,
+            }
+        }
+    }
+    impl Drop for ReadGuard {
+        fn drop(&mut self) {
+            let mut state = self.sink.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.active_reads -= 1;
+            state.completed_reads += 1;
+            if !self.successful {
+                state.failed_or_cancelled_reads += 1;
+                state.errors += 1;
+            }
+        }
+    }
+    pub fn begin_read(source: Option<&Path>) -> Option<ReadGuard> {
+        if !source.is_some_and(rootfs_source) {
+            return None;
+        }
+        sink().map(|sink| ReadGuard::begin(Arc::clone(sink)))
+    }
+    pub fn finish_read(guard: Option<ReadGuard>, successful: bool) {
+        if let Some(mut guard) = guard {
+            guard.successful = successful;
+            // Drop runs before the context read returns to its caller.
+        }
+    }
     impl Sink {
         fn publish_status(&self) -> std::io::Result<()> {
             let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            let value=format!("{{\"version\":2,\"pid\":{},\"mono_ns\":{},\"records_written\":{},\"bytes_written\":{},\"dropped_records\":{},\"errors\":{},\"unsupported_context_calls\":{},\"direct_reads\":{},\"content_reads\":{},\"repository_fallback_reads\":{}}}\n",std::process::id(),now_ns(),s.sequence,s.bytes,s.dropped,s.errors,s.unsupported,s.direct_reads,s.content_reads,s.repository_fallback_reads);
+            let observed_at = now_ns();
+            let drained = if observed_at > 0
+                && s.active_reads == 0
+                && s.errors == 0
+                && s.dropped == 0
+                && s.unsupported == 0
+                && s.repository_fallback_reads == 0
+            {
+                observed_at.to_string()
+            } else {
+                "null".into()
+            };
+            // The same lock protects record bytes, counts, read admission and
+            // completion. A time sampled before this lock alone is insufficient.
+            let value=format!("{{\"version\":2,\"pid\":{},\"mono_ns\":{},\"records_written\":{},\"bytes_written\":{},\"dropped_records\":{},\"errors\":{},\"unsupported_context_calls\":{},\"direct_reads\":{},\"content_reads\":{},\"repository_fallback_reads\":{},\"read_tracking_version\":1,\"active_reads\":{},\"completed_reads\":{},\"failed_or_cancelled_reads\":{},\"drained_through_ns\":{}}}\n",std::process::id(),observed_at,s.sequence,s.bytes,s.dropped,s.errors,s.unsupported,s.direct_reads,s.content_reads,s.repository_fallback_reads,s.active_reads,s.completed_reads,s.failed_or_cancelled_reads,drained);
             let temporary = self.status.with_extension("tmp");
             let result = (|| {
                 let mut f = OpenOptions::new()
@@ -475,6 +538,9 @@ mod linux {
                     direct_reads: 0,
                     content_reads: 0,
                     repository_fallback_reads: 0,
+                    active_reads: 0,
+                    completed_reads: 0,
+                    failed_or_cancelled_reads: 0,
                 }),
                 allowed: HashSet::from([(m.dev(), m.ino(), m.len())]),
                 allowed_contents: HashSet::new(),
@@ -483,6 +549,101 @@ mod linux {
                 max_records: 100,
             };
             (dir, file, path, sink)
+        }
+        #[test]
+        fn drain_requires_read_and_record_completion_not_just_a_new_timestamp() {
+            let (dir, file, path, sink) = fixture();
+            let sink = Arc::new(sink);
+            let guard = ReadGuard::begin(Arc::clone(&sink));
+            record_into(
+                &sink,
+                Path::new("/one/overlaybd/image.json"),
+                &file,
+                &path,
+                (0, 4),
+                false,
+                now_ns(),
+            );
+            sink.publish_status().unwrap();
+            let pending: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).unwrap())
+                    .unwrap();
+            assert_eq!(pending["active_reads"], 1);
+            assert_eq!(pending["records_written"], 1);
+            assert!(pending["drained_through_ns"].is_null());
+            finish_read(Some(guard), true);
+            sink.publish_status().unwrap();
+            let done: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).unwrap())
+                    .unwrap();
+            assert_eq!(done["active_reads"], 0);
+            assert_eq!(done["completed_reads"], 1);
+            assert_eq!(done["failed_or_cancelled_reads"], 0);
+            assert_eq!(done["drained_through_ns"], done["mono_ns"]);
+            assert_eq!(
+                done["bytes_written"].as_u64().unwrap(),
+                std::fs::metadata(dir.path().join("trace")).unwrap().len()
+            );
+        }
+        #[test]
+        fn dropped_or_failed_future_cannot_be_mistaken_for_drained_io() {
+            for failed_return in [false, true] {
+                let (dir, _, _, sink) = fixture();
+                let sink = Arc::new(sink);
+                let guard = ReadGuard::begin(Arc::clone(&sink));
+                if failed_return {
+                    finish_read(Some(guard), false);
+                } else {
+                    drop(guard);
+                }
+                sink.publish_status().unwrap();
+                let status: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).unwrap())
+                        .unwrap();
+                assert_eq!(status["active_reads"], 0);
+                assert_eq!(status["errors"], 1);
+                assert_eq!(status["failed_or_cancelled_reads"], 1);
+                assert!(status["drained_through_ns"].is_null());
+            }
+        }
+        #[test]
+        fn another_thread_pending_record_blocks_drain_until_guard_finishes() {
+            let (dir, file, path, sink) = fixture();
+            let sink = Arc::new(sink);
+            let worker_sink = Arc::clone(&sink);
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let guard = ReadGuard::begin(Arc::clone(&worker_sink));
+                let started = now_ns();
+                ready_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                record_into(
+                    &worker_sink,
+                    Path::new("/one/overlaybd/image.json"),
+                    &file,
+                    &path,
+                    (0, 4),
+                    false,
+                    started,
+                );
+                finish_read(Some(guard), true);
+            });
+            ready_rx.recv().unwrap();
+            sink.publish_status().unwrap();
+            let pending: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).unwrap())
+                    .unwrap();
+            assert_eq!(pending["records_written"], 0);
+            assert!(pending["drained_through_ns"].is_null());
+            finish_tx.send(()).unwrap();
+            worker.join().unwrap();
+            sink.publish_status().unwrap();
+            let done: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).unwrap())
+                    .unwrap();
+            assert_eq!(done["records_written"], 1);
+            assert!(done["drained_through_ns"].as_u64().unwrap() > 0);
         }
         #[test]
         fn records_ranges_and_sources_without_payload() {
@@ -571,7 +732,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{fallback, now_ns, record, record_content};
+pub use linux::{begin_read, fallback, finish_read, now_ns, record, record_content};
 
 #[cfg(test)]
 mod tests {

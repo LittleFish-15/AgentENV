@@ -263,6 +263,17 @@ Identical hashes, shared object names, read traffic, SDK coverage and process RS
 alone do not establish this result. The branch contains no laboratory deployment
 or relay scripts, private data, credentials or measured benchmark claims.
 
+The optional rootfs read observer tracks context-aware local and UB leaf reads
+from before their I/O until after their record is written. A failed or cancelled
+future marks the generation incomplete, including when blocking work may outlive
+the future. Under the record mutex, status may publish `drained_through_ns` only
+when no tracked reads remain and no errors, drops, unsupported contexts or
+repository fallbacks have occurred. This is a completion proof for instrumented
+leaf reads, not proof that every Guest file access reached that path. Consumers
+must bind the exact byte/count prefix, require a checkpoint after all task ends,
+and keep missing tracking fields unknown for older observer builds. Guest page
+cache hits and uninstrumented paths must not be invented from these counters.
+
 ## Selecting more than one native rootfs
 
 `AENV_DIRECT_ROOTFS_BINDING` accepts the existing single binding or a JSON

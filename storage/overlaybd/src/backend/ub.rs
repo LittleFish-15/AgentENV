@@ -233,6 +233,8 @@ impl VirtualFile for UbLayerFile {
         Box::pin(async move {
             #[cfg(feature = "rootfs-read-trace")]
             let started = crate::rootfs_access_trace::now_ns();
+            #[cfg(feature = "rootfs-read-trace")]
+            let observation = crate::rootfs_access_trace::begin_read(ctx.read_source());
             let result = self.read_range(offset, len).await;
             #[cfg(feature = "rootfs-read-trace")]
             if let (Some(source), Ok((data, from_ub))) = (ctx.read_source(), &result) {
@@ -246,6 +248,8 @@ impl VirtualFile for UbLayerFile {
                     started,
                 );
             }
+            #[cfg(feature = "rootfs-read-trace")]
+            crate::rootfs_access_trace::finish_read(observation, result.is_ok());
             #[cfg(not(feature = "rootfs-read-trace"))]
             let _ = ctx;
             result.map(|(bytes, _)| bytes)
