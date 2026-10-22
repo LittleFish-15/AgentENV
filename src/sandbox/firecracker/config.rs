@@ -392,17 +392,12 @@ impl FirecrackerSandboxConfig {
                 std::env::var_os("AENV_UB_ROOTFS_REPLICAS").is_none(),
                 "choose native rootfs backing or stored-layer UB replicas, not both"
             );
-            let binding: super::direct_backing::RootfsBinding =
-                super::direct_backing::read_binding(Path::new(&path))?;
-            binding.validate()?;
-            anyhow::ensure!(
-                binding.source_image
-                    == super::direct_backing::memory_identity(
-                        &fs::read(&user_image_config.image_config_path)?,
-                        0
-                    )?,
-                "pmem rootfs binding belongs to another requested image"
-            );
+            let source_image = super::direct_backing::memory_identity(
+                &fs::read(&user_image_config.image_config_path)?,
+                0,
+            )?;
+            let binding =
+                super::direct_backing::rootfs_binding_for_source(Path::new(&path), &source_image)?;
             common.direct_rootfs = Some(binding);
         }
         common.ublk_config = Some(UblkConfig::overlaybd_with_runtime_upper_mode(

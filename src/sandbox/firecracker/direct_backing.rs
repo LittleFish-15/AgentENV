@@ -179,6 +179,56 @@ pub struct RootfsBinding {
     pub device_runtime: Option<DeviceRuntime>,
 }
 
+/// One node can serve several immutable rootfs images. Selection always uses
+/// the requested source identity, never the first entry or a default image.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RootfsBindingCatalog {
+    pub catalog_version: u32,
+    pub bindings: Vec<RootfsBinding>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RootfsBindingDocument {
+    Single(RootfsBinding),
+    Catalog(RootfsBindingCatalog),
+}
+
+impl RootfsBindingDocument {
+    pub fn select(self, source_image: &str) -> Result<RootfsBinding> {
+        let bindings = match self {
+            Self::Single(binding) => vec![binding],
+            Self::Catalog(catalog) => {
+                ensure!(
+                    catalog.catalog_version == 1
+                        && !catalog.bindings.is_empty()
+                        && catalog.bindings.len() <= 32,
+                    "rootfs catalog requires version 1 and 1..32 images"
+                );
+                catalog.bindings
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        for binding in &bindings {
+            binding.validate()?;
+            ensure!(
+                !binding.source_image.is_empty() && seen.insert(&binding.source_image),
+                "empty or duplicate rootfs source identity in bindings"
+            );
+        }
+        bindings
+            .into_iter()
+            .find(|binding| binding.source_image == source_image)
+            .context("no native rootfs binding for the requested source image")
+    }
+}
+
+pub fn rootfs_binding_for_source(path: &Path, source_image: &str) -> Result<RootfsBinding> {
+    let document: RootfsBindingDocument = read_binding(path)?;
+    document.select(source_image)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DeviceRuntime {
@@ -319,7 +369,7 @@ impl RootfsBinding {
     ) -> Result<Self> {
         let path = std::env::var_os("AENV_DIRECT_ROOTFS_BINDING")
             .context("snapshot requires explicit node-local pmem content bindings")?;
-        let binding: Self = read_binding(Path::new(&path))?;
+        let binding = rootfs_binding_for_source(Path::new(&path), &expected.source_image)?;
         binding.validate_restore_identity(expected)?;
         Ok(binding)
     }
@@ -789,6 +839,99 @@ mod tests {
             bytes: PMEM_ALIGNMENT,
             socket: "/run/user/1000/backing.sock".into(),
         }
+    }
+    fn catalog_binding(source: &str) -> RootfsBinding {
+        RootfsBinding {
+            version: 3,
+            source_image: source.into(),
+            layers: vec![spec()],
+            max_pmem_bytes: PMEM_ALIGNMENT,
+            lower_filesystem: RootfsFilesystem::Ext4,
+            device_runtime: Some(DeviceRuntime {
+                verifier: "/opt/verifier".into(),
+                verifier_sha256: format!("sha256:{}", "b".repeat(64)),
+                firecracker_sha256: format!("sha256:{}", "c".repeat(64)),
+                verification_timeout_secs: 60,
+            }),
+        }
+    }
+    fn catalog_document(bindings: Vec<RootfsBinding>) -> RootfsBindingDocument {
+        RootfsBindingDocument::Catalog(RootfsBindingCatalog {
+            catalog_version: 1,
+            bindings,
+        })
+    }
+    #[test]
+    fn catalog_selects_each_image_and_keeps_single_binding_compatible() {
+        let bindings = (0..4)
+            .map(|index| catalog_binding(&format!("source-{index}")))
+            .collect::<Vec<_>>();
+        let encoded = serde_json::to_vec(&RootfsBindingCatalog {
+            catalog_version: 1,
+            bindings: bindings.clone(),
+        })
+        .unwrap();
+        for binding in bindings {
+            let document: RootfsBindingDocument = serde_json::from_slice(&encoded).unwrap();
+            let selected = document.select(&binding.source_image).unwrap();
+            assert_eq!(selected.source_image, binding.source_image);
+            let single: RootfsBindingDocument =
+                serde_json::from_slice(&serde_json::to_vec(&binding).unwrap()).unwrap();
+            assert!(single.select(&binding.source_image).is_ok());
+        }
+    }
+    #[test]
+    fn catalog_unknown_image_never_falls_back_to_first_entry() {
+        let binding = catalog_binding("known");
+        assert!(catalog_document(vec![binding.clone()])
+            .select("missing")
+            .is_err());
+        assert!(RootfsBindingDocument::Single(binding)
+            .select("missing")
+            .is_err());
+    }
+    #[test]
+    fn catalog_rejects_duplicate_or_invalid_unselected_images() {
+        let binding = catalog_binding("first");
+        assert!(catalog_document(vec![binding.clone(), binding.clone()])
+            .select("first")
+            .is_err());
+        let mut invalid = catalog_binding("other");
+        invalid.layers[0].bytes = 0;
+        assert!(catalog_document(vec![binding, invalid])
+            .select("first")
+            .is_err());
+    }
+    #[test]
+    fn catalog_rejects_unknown_fields_version_and_unbounded_entries() {
+        assert!(serde_json::from_str::<RootfsBindingDocument>(
+            r#"{"catalogVersion":1,"bindings":[],"fallback":true}"#
+        )
+        .is_err());
+        assert!(catalog_document(vec![]).select("first").is_err());
+        assert!(RootfsBindingDocument::Catalog(RootfsBindingCatalog {
+            catalog_version: 2,
+            bindings: vec![catalog_binding("first")],
+        })
+        .select("first")
+        .is_err());
+        assert!(catalog_document(vec![catalog_binding("first"); 33])
+            .select("first")
+            .is_err());
+    }
+    #[test]
+    fn catalog_restore_still_binds_exact_snapshot_content() {
+        let binding = catalog_binding("first");
+        let expected = binding.snapshot_identity().unwrap();
+        let mut relocated = binding;
+        relocated.layers[0].socket = "/run/peer/provider.sock".into();
+        let selected = catalog_document(vec![catalog_binding("other"), relocated])
+            .select(&expected.source_image)
+            .unwrap();
+        selected.validate_restore_identity(&expected).unwrap();
+        let mut changed = selected;
+        changed.layers[0].sha256 = format!("sha256:{}", "d".repeat(64));
+        assert!(changed.validate_restore_identity(&expected).is_err());
     }
     #[test]
     fn snapshot_content_identity_rebinds_nodes_but_rejects_changed_base() {

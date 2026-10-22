@@ -214,3 +214,17 @@ Do not emit a numeric net saving without complete, comparable physical accounts.
 Identical hashes, shared object names, read traffic, SDK coverage and process RSS
 alone do not establish this result. The branch contains no laboratory deployment
 or relay scripts, private data, credentials or measured benchmark claims.
+
+## Selecting more than one native rootfs
+
+`AENV_DIRECT_ROOTFS_BINDING` accepts the existing single binding or a JSON
+catalog with `catalogVersion` set to `1` and a `bindings` array of complete
+binding objects, not paths or names. Catalogs support up to
+32 distinct source-image identities. Cold creation selects the exact ordered
+source-layer identity; restore selects the snapshot's source identity and then
+checks its content hashes, lengths, layer order and filesystem. All entries are
+validated before selection. Missing, duplicated or invalid identities are hard
+errors, and selection never falls back to a different image. The selected
+binding, rather than the whole node catalog, is stored in runtime snapshot
+configuration. This does not add native Guest RAM private CoW or distributed
+base reference counting.
