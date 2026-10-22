@@ -100,23 +100,6 @@ class OfficialOnly(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise RuntimeError('Unexpected redirect while downloading pinned public source')
 
-def download():
-    need(PUBLIC_PINS, 'Unpublished rollout draft')
-    client = urllib.request.build_opener(OfficialOnly())
-    for name, pin in PUBLIC_PINS.items():
-        need(re.fullmatch(r'[A-Za-z0-9_]+\.py', name), 'Invalid public file name')
-        path = HELPERS / name
-        if path.exists():
-            need(sha(path) == pin, 'Existing helper differs: ' + name)
-            continue
-        url = ('https://raw.githubusercontent.com/LittleFish-15/AgentENV/' + PUBLIC_COMMIT +
-               '/dev-relay/lazy-four/' + name)
-        with client.open(url, timeout=60) as response:
-            need(response.status == 200, 'Public download failed')
-            data = response.read(8 * 1024**2 + 1)
-        need(len(data) <= 8 * 1024**2, 'Public file too large')
-        install_bytes(path, data, pin)
-
 def remote_command(arguments):
     return SSH + [shlex.join([PYTHON, '-I', '-B', str(SELF), *arguments, '--run'])]
 
@@ -351,6 +334,57 @@ def run_dual(steps, scenario):
     need(released and all(value.get('status') == 'LAZY_FOUR_REPLAY_COMPLETED_OWNED_GUESTS_RELEASED'
                          and value.get('workerExitCode') == 0 for value in (a, b)), 'Dual replay or cleanup did not complete')
     return a, b
+def fetch_public(relative, commit, pin, limit=8 * 1024**2):
+    """Use only official pinned endpoints, existing proxy policy and TLS checks."""
+    import base64
+    import urllib.error
+    need(re.fullmatch('[0-9a-f]{40}', commit) and re.fullmatch('[0-9a-f]{64}', pin), 'Invalid immutable download identity')
+    need(re.fullmatch(r'dev-relay/[A-Za-z0-9_./-]+\.py', relative) and '..' not in relative.split('/'), 'Invalid public path')
+    endpoints = [
+        ('api', 'https://api.github.com/repos/LittleFish-15/AgentENV/contents/' + relative + '?ref=' + commit),
+        ('raw', 'https://raw.githubusercontent.com/LittleFish-15/AgentENV/' + commit + '/' + relative)]
+    client = urllib.request.build_opener(OfficialOnly())
+    errors = []
+    for attempt in range(2):
+        for kind, url in endpoints:
+            request = urllib.request.Request(url, headers={'User-Agent': 'AgentENV-pinned-public-download',
+                                                         'Accept': 'application/vnd.github+json' if kind == 'api' else '*/*'})
+            try:
+                with client.open(request, timeout=20) as response:
+                    need(response.status == 200, 'Public download failed')
+                    encoded = response.read(2 * limit + 8193 if kind == 'api' else limit + 1)
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                errors.append({'endpoint': kind, 'attempt': attempt + 1, 'errorType': type(error).__name__,
+                               'httpStatus': getattr(error, 'code', None)})
+                continue
+            if kind == 'api':
+                need(len(encoded) <= 2 * limit + 8192, 'Oversized API envelope')
+                value = json.loads(encoded)
+                need(value.get('type') == 'file' and value.get('path') == relative and value.get('encoding') == 'base64',
+                     'Unexpected GitHub contents response')
+                raw = base64.b64decode(''.join(value['content'].split()), validate=True)
+                need(value.get('size') == len(raw), 'GitHub content size differs')
+            else:
+                raw = encoded
+            need(len(raw) <= limit and hashlib.sha256(raw).hexdigest() == pin, 'Public payload checksum differs')
+            return raw
+        if attempt == 0:
+            print('RETRY_PUBLIC_DOWNLOAD ' + relative, flush=True)
+            time.sleep(2)
+    raise RuntimeError('Official GitHub download unavailable through current network/proxy; configuration unchanged: ' + json.dumps(errors))
+
+
+def download():
+    need(PUBLIC_PINS, 'Unpublished rollout draft')
+    for name, pin in PUBLIC_PINS.items():
+        need(re.fullmatch(r'[A-Za-z0-9_]+\.py', name), 'Invalid public helper name')
+        path = HELPERS / name
+        if path.exists():
+            need(sha(path) == pin, 'Existing helper differs: ' + name)
+            continue
+        data = fetch_public('dev-relay/lazy-four/' + name, PUBLIC_COMMIT, pin)
+        install_bytes(path, data, pin)
+
 
 ROOT=Path('/home/jwk/agent')
 HELPERS=ROOT/'lazy-four'
