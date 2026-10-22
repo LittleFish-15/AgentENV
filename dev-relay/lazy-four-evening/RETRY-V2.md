@@ -59,7 +59,7 @@ binary. Whole-lower residency is not per-Guest accessed/resident intersection.
 SDK coverage subtraction remains a budget model, not measured physical savings.
 Full physical net savings stays NA without complete nonoverlapping physical data.
 
-Local validation: 38 Python checks, including the actual coordinator control flow
+Local validation: 40 Python checks, including the actual coordinator control flow
 with modeled external nodes/processes, cleanup ordering/refusal, embedded hash
 closure, reuse identity, root receipt trust, proxy deadlines and metric readers.
 Windows filesystem/ownership tests model Linux-specific operations. No target
