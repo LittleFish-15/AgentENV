@@ -1,6 +1,6 @@
 # 从native快照归档到全新UB代际
 
-固定核心ba4a5c18f84acebe816ede7f49b9b020bc477986。新增`publish-retained-snapshot`与`import-retained-snapshot`，将已归档的pmem基础镜像接到原有发布/导入/lease/退役实现。它们默认只读校验；显式`--run`才新建私有准备目录并运行前台provider。没有改变NC属性、SDK适配器、KVM或Guest RAM私有化能力。
+固定核心bd6d72a55066d07ceeda8db765658900ed85988b。新增`publish-retained-snapshot`与`import-retained-snapshot`，将已归档的pmem基础镜像接到原有发布/导入/lease/退役实现。它们默认只读校验；显式`--run`才新建私有准备目录并运行前台provider。没有改变NC属性、SDK适配器、KVM或Guest RAM私有化能力。
 
 ## 适用前提
 
@@ -10,7 +10,7 @@ Runtime仍使用本夜已固定的5e6621c源码，已含归档持久化/恢复�
 
 ## 安装与调用
 
-`native_retained_install.py`内嵌固定核心的provider Python源和68项单元测试，不含SDK二进制、私有镜像、业务轨迹或真实对象清单。直接运行默认只打印计划；普通Linux用户加`--directory <全新绝对路径> --install`才安装并执行模型测试。成功为`NATIVE_RETAINED_PROVIDER_INSTALLED_TESTED_NO_SDK`，保留`installation.json`与`tests.log`。不覆盖已有目录，不调用SDK，不创建Guest或修改服务。
+`native_retained_install.py`内嵌固定核心的provider Python源和75项单元测试，不含SDK二进制、私有镜像、业务轨迹或真实对象清单。直接运行默认只打印计划；普通Linux用户加`--directory <全新绝对路径> --install`才安装并执行模型测试。成功为`NATIVE_RETAINED_PROVIDER_INSTALLED_TESTED_NO_SDK`，保留`installation.json`与`tests.log`。不覆盖已有目录，不调用SDK，不创建Guest或修改服务。
 
 安装后的`provider_entry.py`每次先核验全部源文件SHA；`--help`列出命令。A发布者按核心README传入归档目录、native快照清单、设备运行时pins、现有SDK适配器及其SHA、已有region、明确logical/coverage预算和B的reader身份。默认校验不写文件；加`--run`后形成`binding.json`、`image-catalog.json`、`provider.json`、`preparation.json`，并在子目录`provider`启动新代际。前台不返回是正常服务状态，应保持进程；不是完成释放。
 
@@ -28,7 +28,7 @@ A服务进入serving后，协调者私下传递`provider/replicas.json`与其**�
 
 ## 已验证与未验证
 
-68项core Python检查通过，其中9项覆盖真实归档/配置文件、无副作用默认CLI、错误身份/损坏内容/预算拒绝、生命周期调用一次、失败保留、无释放回执不成功、importer不携带owner路径。安装包另有3项本地检查，实际解包后68测试及入口`--help`通过，篡改源码会拒绝启动。Linux路径/SDK调用使用模型或未执行，不是目标UB验收。
+75项core Python检查通过，其中9项覆盖真实归档/配置文件、无副作用默认CLI、错误身份/损坏内容/预算拒绝、生命周期调用一次、失败保留、无释放回执不成功、importer不携带owner路径。安装包另有3项本地检查，实际解包后75测试及入口`--help`通过，篡改源码会拒绝启动。Linux路径/SDK调用使用模型或未执行，不是目标UB验收。
 
 **仍未完成：** 四业务模板普通rootfs到native制品的完整准备与部署，native Guest冷启动/capture/并发Fork/跨节点restore的现场协调验收，分布式失联回收，以及memfile真正私有CoW。此交付补的是归档重发布和导入接口，不能覆盖这些剩余项。
 
@@ -41,3 +41,13 @@ A服务进入serving后，协调者私下传递`provider/replicas.json`与其**�
 输出的 `binding.json` 为 `catalogVersion:1` 多source目录，可用于支持该目录格式的Runtime。B要求发布清单恰好覆盖选集的内容并集，拒绝缺失、额外或重复内容/对象名；用内容身份重建各模板顺序，不依赖owner全局列表顺序。一个provider/socket/SDK代际承担整组模板，沿用全部lease及peer释放语义。
 
 新增5项集合检查包含四模板聚合、内容去重、反向发布顺序导入、source冲突、合计预算和非法发布集拒绝、默认不调用SDK。它们是本地文件/协议测试，仍未执行目标SDK或Guest。这只聚合已经存在的native归档；普通四模板快照仍需实际native准备、首次capture及完整业务控制器。
+
+## 首次冷启动之前的已准备镜像入口
+
+`publish-prebuilt-set --image-set PRIVATE_IMAGES_JSON` 直接接受已完成准备的raw镜像，不要求事先存在native快照。选集为 `{"version":1,"images":[{"sourceConfig":"绝对配置路径","paths":["绝对raw镜像路径"],"filesystem":"ext4"}]}`。它完整hash原始镜像、按原sourceConfig计算source身份、生成v3绑定并保留snapshotSources；不导出、不压缩、不挂载文件系统、不声称原始/转换镜像文件树已经等价。首次native Guest capture成功时，Runtime才能将这些原始镜像保存成自包含archiveVersion1制品。
+
+B使用 `import-prebuilt-set --binding-catalog PRIVATE_OWNER_BINDING --binding-catalog-sha256 sha256:HASH`，同时提供原有publisher manifest+SHA、reader、B设备runtime和预算。导入精确内容并集，丢弃A本地snapshotSources；恢复A已归档快照时，Runtime自行hydrate仓库制品。如果B单独cold start而未提供本地源，它的capture不能称为自包含native归档。这一入口不传输VMstate或仓库制品。
+
+所有generation命令默认校验结果现在包含 `planSha256`，可在显式启动时传 `--expected-plan-sha256`。核心重新校验完整输入、重新计算计划身份，改变raw内容、绑定或预算都会拒绝执行；然后才进入SDK。受限服务组件自动传递这个身份。
+
+新增7项本地检查覆盖首次四模板发布、共享raw去重、B无owner路径、错误binding/replica拒绝、mutable source/预算拒绝、默认无写、raw被修改后不能执行旧计划。75项核心测试通过，不是Guest或硬件验收。完整native Runtime/冷启动/capture/归档传输/restore-Fork场景控制器仍未接合。

@@ -1,6 +1,6 @@
 # Native归档provider的受限服务入口
 
-这是核心ba4a5c18发布/导入CLI的**服务启动组件**，不是四模板完整DAX测试控制器。需要已经存在且验证通过的native归档快照。原有ordinary四模板快照不能直接作为输入；当前四模板raw准备是否完成，未获得足够现场回执，不能假定成功或重新导出。
+这是核心bd6d72a5发布/导入CLI的**服务启动组件**，不是四模板完整DAX测试控制器。归档恢复模式需要已经存在且验证通过的native归档快照；首次发布模式可使用已准备的raw镜像选集（见末节）。原有ordinary四模板快照不能直接作为输入；当前四模板raw准备是否完成，未获得足够现场回执，不能假定成功或重新导出。
 
 `native_retained_service.py`只使用已安装并测试通过的`native_retained_install.py`产物，固定其全部源码和入口SHA。A负责发布，B负责导入；只处理jwk UID1204/GID1205、既有ubsmd组984、两台既定ARM64节点。SDK适配器必须与该节点已释放v1实验保留的适配器完全相同，不重复编译。
 
@@ -48,7 +48,7 @@ root终端持续等待是前台provider服务状态，不能当成卡死。停�
 
 这个组件不启动AgentENV、不转换ordinary模板、不生成native快照、不恢复/Fork Guest，也不运行四模板业务。现有四模板native准备器已经包含导出、压缩及DAX执行标记，早先单镜像全零UUID问题也已有finisher；需要核实际准备回执才能选择复用，不能重复64GiB复制或把三文件抽样称为全文件树等价。
 
-本地12项参数、命令、身份、互斥、一次激活和失败语义检查通过；Linux systemd/SDK IPC实际运行未验收。memfile私有CoW和Guest共享文件页的硬件门槛未由该入口解决。普通rootfs对照仍用c56082c的一体入口，不把本组件混入其结果。
+本地14项参数、命令、身份、互斥、一次激活和失败语义检查通过；Linux systemd/SDK IPC实际运行未验收。memfile私有CoW和Guest共享文件页的硬件门槛未由该入口解决。普通rootfs对照仍用c56082c的一体入口，不把本组件混入其结果。
 
 ## 多快照选集与输入固定
 
@@ -57,3 +57,11 @@ root终端持续等待是前台provider服务状态，不能当成卡死。停�
 准备阶段检查每个归档与新output/plan目录分离，将选集文件、所有manifest、deviceRuntime、B publisherManifest的SHA记录在plan.inputPins中。校验结束、root激活和持有SDK互斥后的实际启动均检查这些pins；发生变化不运行。核心仍在执行时重新验证原始镜像的内容SHA，而非仅依赖这些元数据pins。
 
 一次unit启动执行一次 `publish-retained-set` 或 `import-retained-set`，没有为四模板开四个相互争抢SDK锁的provider。集合接口仍不会启动Runtime/Guest，不能将这份服务组件当作完整四模板DAX业务测试入口。
+
+## 首次发布模式
+
+A请求可用 `imageSet` 替代manifest/snapshotSet，不设置artifactRoot；其格式见NATIVE-RETAINED-ENTRY。B请求用 `bindingCatalog` 和 `bindingCatalogSha256` 替代manifest/snapshotSet，仍设置publisherManifest与其SHA。四种输入模式只能选一种，不混用；A只发布prebuilt，B只导入binding。
+
+准备阶段核原始镜像/源配置为本用户工作目录内真实普通文件，输出与原始输入目录分开；不写入或重新生成raw镜像。设备runtime、选集及源配置固定文件SHA，raw镜像完整hash由核心校验。prepare结果必须有完整 `planSha256`；serve取得SDK锁后再次验证，带 `--expected-plan-sha256` 启动核心，防止实际运行内容不同于已准备计划。
+
+这些模式让首次native发布与后续归档重发布使用同一受限服务和退役合同。仍没有AgentENV/Guest服务部署、四模板任务回放或结果比较；不能直接把此组件的成功输出当成跨节点CoW收益。
