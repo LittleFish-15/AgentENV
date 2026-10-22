@@ -2,6 +2,7 @@ use overlaybd::config::load_image_config as load_overlaybd_image_config;
 use overlaybd::dense_export;
 use overlaybd::layer_metadata::read_overlaybd_layer_uuid;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
@@ -90,7 +91,13 @@ impl PosixFsArtifactStore {
                     .map_err(|e| {
                         RepositoryError::backend("persist exact native pmem archive", e)
                     })?;
+                    // A synced file does not make its directory entry durable.
+                    // Commit the immutable child and directory before exposing
+                    // a manifest which refers to this archived base.
+                    finalize_hard_linked_file(&destination)?;
+                    sync_dir(destination.parent().expect("native archive parent"))?;
                 }
+                sync_dir(&committed_layout.path(""))?;
             }
         }
         self.persist_firecracker_manifest(
@@ -148,12 +155,20 @@ impl PosixFsArtifactStore {
         }
         let bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|error| RepositoryError::backend("serialize firecracker manifest", error))?;
-        fs::write(&destination, bytes).map_err(|error| {
-            RepositoryError::backend(
-                format!("write firecracker manifest '{}'", destination.display()),
-                error,
-            )
+        let parent = destination
+            .parent()
+            .ok_or_else(|| RepositoryError::InvalidRequest {
+                reason: "firecracker manifest needs an artifact directory".into(),
+            })?;
+        let mut temp = NamedTempFile::new_in(parent)
+            .map_err(|e| RepositoryError::backend("create staged firecracker manifest", e))?;
+        temp.write_all(&bytes)
+            .and_then(|()| temp.as_file().sync_all())
+            .map_err(|e| RepositoryError::backend("write and sync firecracker manifest", e))?;
+        temp.persist(&destination).map_err(|e| {
+            RepositoryError::backend("publish complete firecracker manifest", e.error)
         })?;
+        sync_dir(parent)?;
         Ok(())
     }
 
@@ -788,7 +803,7 @@ pub(crate) struct CollectedBuiltArtifacts {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -968,6 +983,88 @@ mod tests {
                 panic!("expected managed rootfs layer")
             }
         }
+    }
+
+    fn with_native_archive(
+        directory: &std::path::Path,
+        mut manifest: crate::sandbox::SandboxSnapshotManifest,
+    ) -> crate::sandbox::SandboxSnapshotManifest {
+        use crate::sandbox::manifest::{NativeRootfsLayer, NativeRootfsSnapshot};
+        let source = directory.join("pmem-base.img");
+        fs::write(&source, vec![37_u8; 2 * 1024 * 1024]).expect("write pmem base");
+        let identity = FileDigest::describe_blocking(&source).expect("describe pmem base");
+        manifest.native_rootfs = Some(NativeRootfsSnapshot {
+            version: 1,
+            source_image: format!("sha256:{}", "1".repeat(64)),
+            filesystem: "ext4".into(),
+            layers: vec![NativeRootfsLayer {
+                sha256: identity.sha256,
+                bytes: identity.size,
+            }],
+            archive_version: Some(1),
+            archive_paths: vec![source],
+        });
+        manifest
+    }
+
+    #[test]
+    fn native_archive_is_independent_read_only_and_manifest_has_no_local_paths() {
+        let root = TempDir::new().expect("tempdir");
+        let store = test_store(root.path());
+        let id = SnapshotId::generate();
+        let local = root.path().join("local");
+        let (_, _, manifest) = write_mock_built_artifacts(&local).expect("mock artifacts");
+        let manifest = with_native_archive(&local, manifest);
+        store
+            .import_built_artifacts(&id, &manifest)
+            .expect("publish artifacts");
+        let native = manifest.native_rootfs.as_ref().unwrap();
+        let destination = store
+            .committed_layout(&id)
+            .path(&native.archive_names().unwrap()[0].to_string_lossy());
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o222,
+            0
+        );
+        assert_ne!(
+            fs::metadata(&destination).unwrap().ino(),
+            fs::metadata(&native.archive_paths[0]).unwrap().ino()
+        );
+        fs::write(&native.archive_paths[0], vec![99_u8; 2 * 1024 * 1024]).unwrap();
+        crate::sandbox::native_archive::verify_path(
+            &destination,
+            &native.layers[0].sha256,
+            native.layers[0].bytes,
+        )
+        .unwrap();
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                store
+                    .committed_layout(&id)
+                    .path(SNAPSHOT_ARTIFACT_LAYOUT.firecracker_manifest),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["nativeRootfs"]["archiveVersion"], 1);
+        assert!(persisted["nativeRootfs"].get("archivePaths").is_none());
+    }
+
+    #[test]
+    fn invalid_native_archive_never_publishes_a_manifest() {
+        let root = TempDir::new().expect("tempdir");
+        let store = test_store(root.path());
+        let id = SnapshotId::generate();
+        let local = root.path().join("local");
+        let (_, _, manifest) = write_mock_built_artifacts(&local).expect("mock artifacts");
+        let manifest = with_native_archive(&local, manifest);
+        let source = &manifest.native_rootfs.as_ref().unwrap().archive_paths[0];
+        fs::write(source, vec![99_u8; 2 * 1024 * 1024]).unwrap();
+        assert!(store.import_built_artifacts(&id, &manifest).is_err());
+        assert!(!store
+            .committed_layout(&id)
+            .path(SNAPSHOT_ARTIFACT_LAYOUT.firecracker_manifest)
+            .exists());
     }
 
     #[test]

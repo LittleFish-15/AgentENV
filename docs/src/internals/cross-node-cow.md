@@ -164,6 +164,13 @@ and committed record. Existing snapshot-prefix deletion handles these files too.
 Archives are per snapshot, not a new distributed CAS or automatic reference-count
 service. Disk storage can be duplicated across snapshots.
 
+POSIX publication makes each copied base read-only and syncs its contents and
+directory entry before publishing the manifest. The manifest is written and
+synced in a temporary file, atomically renamed, then its parent is synced before
+catalog commit. Failed archive validation cannot publish a new manifest. These
+ordering guarantees still depend on the filesystem honoring sync and rename;
+they are not a hardware power-loss test or automatic UB-generation recovery.
+
 `archiveVersion: 1` in the portable native manifest declares this contract.
 Node-local paths and open file descriptions are not serialized. Both repository
 resolvers hydrate and verify the files; opened source descriptors remain held by
