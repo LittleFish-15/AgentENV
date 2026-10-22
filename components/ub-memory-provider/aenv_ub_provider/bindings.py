@@ -67,12 +67,8 @@ def relocate(binding_path, socket_path, runtime, output, snapshot_sources=None):
     return binding
 
 
-def retained_snapshot(manifest_path, artifact_root, socket_path, max_bytes, runtime, output):
-    """Prepare a new publication catalog from repository-owned immutable bases.
-
-    Does not allocate UB or start a service. The normal publisher and Runtime
-    still acquire a fresh generation and independently verify its contents.
-    """
+def retained_metadata(manifest_path, max_bytes):
+    """Validate portable archive identity without opening provider or image data."""
     manifest = read_json(manifest_path)
     native = manifest.get('nativeRootfs') if isinstance(manifest, dict) else None
     expected = {'version', 'sourceImage', 'filesystem', 'layers', 'archiveVersion'}
@@ -83,10 +79,6 @@ def retained_snapshot(manifest_path, artifact_root, socket_path, max_bytes, runt
             or not isinstance(native['layers'], list) or not 1 <= len(native['layers']) <= 8
             or type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError('Expected an archived native snapshot manifest and explicit capacity')
-    contract.validate_device_runtime(runtime)
-    root = Path(artifact_root).resolve(strict=True)
-    if not root.is_dir():
-        raise ValueError('Snapshot artifact root must be a directory')
     total = 0
     identities = set()
     for layer in native['layers']:
@@ -102,6 +94,16 @@ def retained_snapshot(manifest_path, artifact_root, socket_path, max_bytes, runt
         total += layer['bytes']
     if total > max_bytes:
         raise ValueError('Native archive exceeds declared capacity')
+    return native
+
+
+def retained_snapshot_plan(manifest_path, artifact_root, socket_path, max_bytes, runtime):
+    """Verify every retained base and return a plan without creating files or SDK state."""
+    native = retained_metadata(manifest_path, max_bytes)
+    contract.validate_device_runtime(runtime)
+    root = Path(artifact_root).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError('Snapshot artifact root must be a directory')
     entries = []
     for index, layer in enumerate(native['layers']):
         name = f"{index:02}-{layer['sha256'][7:]}.img"
@@ -116,8 +118,14 @@ def retained_snapshot(manifest_path, artifact_root, socket_path, max_bytes, runt
     binding = {'version': 3, 'sourceImage': native['sourceImage'], 'layers': [x['backing'] for x in entries],
                'maxPmemBytes': max_bytes, 'deviceRuntime': runtime, 'lowerFilesystem': native['filesystem'],
                'snapshotSources': [x['path'] for x in entries]}
+    return binding, {'version': 1, 'objects': entries}
+
+
+def retained_snapshot(manifest_path, artifact_root, socket_path, max_bytes, runtime, output):
+    """Prepare a fresh binding/catalog; publication remains explicit."""
+    binding, catalog = retained_snapshot_plan(manifest_path, artifact_root, socket_path, max_bytes, runtime)
     output = Path(output)
     output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
     atomic_json(output / 'binding.json', binding)
-    atomic_json(output / 'image-catalog.json', {'version': 1, 'objects': entries})
+    atomic_json(output / 'image-catalog.json', catalog)
     return binding

@@ -126,6 +126,63 @@ memory savings. Native pmem explicitly rejects `privateCow: true` acquisitions.
 
 ## Retirement and failure
 
+### Republish repository-owned native bases
+
+`publish-retained-snapshot` connects an `archiveVersion: 1` snapshot directly to
+the normal foreground pmem publisher. Without `--run`, it verifies the archive
+bytes, pinned SDK adapter, device runtime and aligned logical budget without
+creating an output directory or calling the SDK:
+
+```sh
+aenv-ub-provider publish-retained-snapshot \
+  --manifest SNAPSHOT_MANIFEST --artifact-root SNAPSHOT_ARTIFACT_DIRECTORY \
+  --device-runtime DEVICE_RUNTIME_JSON --output NEW_PRIVATE_DIRECTORY \
+  --adapter SDK_ADAPTER --adapter-sha256 sha256:ADAPTER_DIGEST \
+  --region EXISTING_REGION --max-bytes LOGICAL_BUDGET --coverage-bytes COVERAGE_GUARD \
+  --reader node-b
+```
+
+Adding `--run` creates `binding.json`, `image-catalog.json`, `provider.json` and
+an immutable preparation receipt, then serves a **new** generation under
+`NEW_PRIVATE_DIRECTORY/provider`. The command remains in the foreground until
+explicit retirement. Its serving message and `provider/owner.json` identify
+readiness. Use the binding with the matching Runtime only after that state is
+confirmed; the Runtime still validates every native FD and content identity.
+
+Deliver `provider/replicas.json` privately to the configured importer, along
+with its exact file SHA256. On the importer:
+
+```sh
+aenv-ub-provider import-retained-snapshot \
+  --manifest SNAPSHOT_MANIFEST --publisher-manifest TRANSFERRED_REPLICAS_JSON \
+  --publisher-manifest-sha256 sha256:TRANSFERRED_FILE_DIGEST --reader node-b \
+  --device-runtime NODE_LOCAL_DEVICE_RUNTIME_JSON --output NEW_PRIVATE_DIRECTORY \
+  --adapter SDK_ADAPTER --adapter-sha256 sha256:ADAPTER_DIGEST \
+  --region EXISTING_REGION --max-bytes LOGICAL_BUDGET --coverage-bytes COVERAGE_GUARD
+```
+
+The default is again read-only validation. `--run` uses the existing import
+path, which maps and verifies the published objects and never allocates owner
+objects. Snapshot content, order, sizes, allocation names and reader identity
+must agree before SDK startup. The emitted node-local binding omits publisher
+source paths: restoring an archived snapshot hydrates and pins its repository
+artifacts through the existing Runtime resolver. This is not an archive download
+or cold-template conversion command.
+
+Both commands reject existing output directories. Their `execution.json` records
+intent before dispatch and preserves failed/unknown outcomes. It reports release
+only after the exact generation's owner journal, finalize/deletion acknowledgments
+and, for an importer, its release receipt agree. The immutable `preparation.json`
+is not the current SDK execution status. An interruption never authorizes retry
+or reclamation. Enforce one active importer per reader identity, keep the normal
+SDK coordination policy, and follow the retirement order below. The coverage
+guard remains a post-map check, not a service-enforced physical quota.
+
+These commands automate preparing and serving fresh pmem generations from a
+retained snapshot. They do not transfer artifacts, start AgentENV, restore/fork
+Guests, infer remote death, or implement writable Guest RAM CoW. Native Guest
+DAX and memory savings still need separate hardware acceptance.
+
 First freeze new imports and stop all Guest/readers for the generation. Retire
 each importer only after its local inherited leases have closed:
 

@@ -34,7 +34,10 @@ def names(values):
 
 
 def load_config(path):
-    config = read_json(path)
+    return validate_config(read_json(path))
+
+
+def validate_config(config):
     common = {'version', 'mode', 'role', 'workDir', 'adapter', 'adapterSha256', 'region',
               'logicalBudgetBytes', 'maxCoverageBytes'}
     role = config.get('role')
@@ -320,7 +323,39 @@ def main():
     archived.add_argument('--max-bytes', type=int, required=True)
     archived.add_argument('--device-runtime', required=True)
     archived.add_argument('--output', required=True)
+    for name in ('publish-retained-snapshot', 'import-retained-snapshot'):
+        command = commands.add_parser(name)
+        command.add_argument('--manifest', required=True)
+        command.add_argument('--device-runtime', required=True)
+        command.add_argument('--output', required=True)
+        command.add_argument('--adapter', required=True)
+        command.add_argument('--adapter-sha256', required=True)
+        command.add_argument('--region', required=True)
+        command.add_argument('--max-bytes', type=int, required=True)
+        command.add_argument('--coverage-bytes', type=int, required=True)
+        command.add_argument('--run', action='store_true', help='Create fresh preparation and serve via the existing SDK lifecycle')
+        if name.startswith('publish-'):
+            command.add_argument('--artifact-root', required=True)
+            command.add_argument('--reader', action='append', default=[])
+        else:
+            command.add_argument('--publisher-manifest', required=True)
+            command.add_argument('--publisher-manifest-sha256', required=True)
+            command.add_argument('--reader', required=True)
     args = parser.parse_args()
+    if args.command in ('publish-retained-snapshot', 'import-retained-snapshot'):
+        from . import retained
+        runtime = read_json(args.device_runtime)
+        common = (runtime, args.output, args.adapter, args.adapter_sha256, args.region, args.max_bytes, args.coverage_bytes)
+        if args.command.startswith('publish-'):
+            plan = retained.plan_publish(args.manifest, args.artifact_root, *common, args.reader)
+        else:
+            plan = retained.plan_import(args.manifest, args.publisher_manifest, args.publisher_manifest_sha256, args.reader, *common)
+        print(json.dumps({'state': 'retained_generation_validated_no_sdk', 'role': plan['role'],
+                          'alignedLogicalBytes': plan['alignedLogicalBytes'], 'physicalHardQuota': False,
+                          'GuestCreated': False, 'memfilePrivateCowImplemented': False}), flush=True)
+        if args.run:
+            retained.execute(plan)
+        return 0
     if args.command == 'bind-retained-snapshot':
         value = bindings.retained_snapshot(args.manifest, args.artifact_root, args.socket, args.max_bytes,
                                           read_json(args.device_runtime), args.output)

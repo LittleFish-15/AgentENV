@@ -188,6 +188,17 @@ the new UB FDs and never substitutes these local files as shared Guest RAM.
 Relocating an archive-enabled cold binding requires explicit matching local
 `--snapshot-source` paths, rather than retaining another node's paths.
 
+For an explicit fresh generation, `publish-retained-snapshot` validates the
+retained bytes and creates a node-local binding/catalog/config before entering
+the existing pmem publisher. `import-retained-snapshot` checks the exact transferred
+publisher-manifest SHA256 against the snapshot identities and registered reader,
+then emits the importer binding and enters the existing map-only lifecycle.
+Both commands default to validation without writes or SDK calls; `--run` is
+required to create and serve a new generation. Existing output directories are
+preserved, failures are journaled without retry, and retirement still requires
+all explicit reader receipts. This connects retained artifacts to publication;
+it is not automatic distributed recovery or a completed Guest restore test.
+
 This closes source-byte retention for opted-in captures, not automatic SDK
 republishing, distributed failover or hardware acceptance. Snapshot archival and
 restoration perform complete file verification and may populate file cache; their
