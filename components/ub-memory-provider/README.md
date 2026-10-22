@@ -52,6 +52,12 @@ Only immutable committed lowers are published. Mutable uppers remain private.
 the stored-layer AgentENV hint. The broker copies bounded chunks into its local
 consumers; it does not promise direct Guest physical sharing.
 
+For a bounded **demand-filled** UB cache, use the separate `aenv-ub-lazy`
+entry point and [lazy rootfs cache guide](../../docs/src/internals/lazy-rootfs-cache.md).
+It retains the stored-layer read protocol, allocates one explicitly sized cache
+pool, and fills verified chunks only on reads. It is not lazy pmem/DAX: native
+device FD handoff remains restricted to completely populated images.
+
 ## Import on another node
 
 Transfer only `replicas.json` through an approved transport. The import config

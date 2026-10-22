@@ -4,6 +4,11 @@ This branch is an opt-in implementation candidate. It is not an end-to-end
 validated implementation of globally shared Guest RAM and rootfs. Existing
 sandbox behavior is retained when the new environment variables are absent.
 
+The separate [lazy rootfs cache](lazy-rootfs-cache.md) adds demand filling and
+bounded, pinned eviction to the stored-layer path. It does not add a missing-page
+handler to native pmem/DAX, and its preallocated cache capacity must be counted
+as a cost rather than equated with the bytes filled by the workload.
+
 ## Two different sharing paths
 
 ```mermaid
