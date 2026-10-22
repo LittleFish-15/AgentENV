@@ -15,7 +15,7 @@ def render(source,output,synthetic_preview=False):
     if len(raw)>128*1024**2:raise ValueError('Oversized source report')
     report=json.loads(raw);t=report.get('cache_timeseries',report)
     status=report.get('validation',{}).get('status','STATUS_NOT_PROVIDED')
-    accepted=status=='COW4_GLOBAL_CACHE_MEASURED_GUESTS_RELEASED_ORIGINAL_RESTORED'
+    accepted=status in ('COW4_GLOBAL_CACHE_MEASURED_GUESTS_RELEASED_ORIGINAL_RESTORED','COW4_POST_DROP_BASELINE_MEASURED_GUESTS_RELEASED_ORIGINAL_RESTORED')
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     host=t['host_rows'];files=t['file_rows'];templates=t['template_rows'];bases=t['baselines']
     if not host or not files:raise ValueError('No measured host/file timeline to plot')
@@ -66,9 +66,21 @@ def render(source,output,synthetic_preview=False):
             ax.plot([r['seconds_since_phase_baseline'] for r in fr],values(fr,key),'.-',color=color,label=label,markersize=4)
         ax.axhline(0,color='#64748b',linewidth=.6);ax.set_title(phase.replace('_',' ').title());ax.set_xlabel('Seconds from this phase baseline')
         ax.legend(fontsize=8,loc='best')
-    axes[0].set_ylabel('Change in MiB');fig.suptitle('Cold-start changes: idle control versus replay',fontsize=14)
+    axes[0].set_ylabel('Change in MiB');fig.suptitle('Post-drop baseline changes: idle control versus replay',fontsize=14)
     fig.tight_layout(rect=(0,.08,1,.95))
     save(fig,'cache-delta-comparison','Host-wide Cached includes unrelated activity. Residual is not an exact accounting identity. Missing values remain gaps; no control-mean subtraction.')
+    if any('initial_lower_resident_bytes' in r for r in files):
+        fig,axes=plt.subplots(1,2,figsize=(13,5))
+        for ax,phase in zip(axes,('idle_control','replay')):
+            rows=[r for r in files if r['phase']==phase]
+            for key,label,color in [('initial_pages_still_resident_bytes','Initial-set pages currently resident','#64748b'),
+                ('initial_pages_no_longer_resident_bytes','Initial-set pages currently absent','#b91c1c'),
+                ('resident_outside_initial_page_set_bytes','Resident pages outside initial set','#007f86'),
+                ('net_lower_resident_change_bytes','Net lower residency change','#2563eb')]:
+                ax.plot([r['seconds_since_phase_baseline'] for r in rows],values(rows,key),'.-',label=label,color=color)
+            ax.set_title(phase.replace('_',' ').title());ax.set_xlabel('Seconds from phase baseline');ax.set_ylabel('MiB');ax.legend(fontsize=8)
+        fig.suptitle('Measured residual baseline: page-set reconciliation',fontsize=14);fig.tight_layout(rect=(0,.08,1,.95))
+        save(fig,'cache-baseline-components','Net change = resident outside initial set - initial-set pages currently absent. A page reloaded between observations cannot be distinguished from continuous residency.')
     tids=sorted({r['template_id'] for r in templates});nrows=(len(tids)+1)//2
     if tids:
         fig,axs=plt.subplots(nrows,2,figsize=(13,4*nrows),squeeze=False)

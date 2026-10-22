@@ -93,6 +93,7 @@ class GlobalFourRun(FourRun):
         return 'idle_control' if self.experiment_phase=='idle_control' else super().phase(sids)
     def before_frame_write(self,frame):
         frame['experiment_phase']=self.experiment_phase
+        BASELINE.enrich(frame,self.cache_baselines[self.experiment_phase]['lower_probe'],COLD.TEMPLATE_KEYS)
         frame['known_other_file_cache']=auxiliary_cache(self,frame)
         frame['host_after_auxiliary_scan']=global_host_row(self.experiment_phase)
         self.timeline.check()
@@ -108,14 +109,17 @@ class GlobalFourRun(FourRun):
         self.c.report.setdefault('global_cold_checkpoints',[]).append({'phase':phase,'file':str(output),
             'resident_bytes_after':after['whole_lower_resident_bytes'],'root_drop':event})
         self.c.persist()
-        ENGINE.need(result['zero_resident_at_each_file_observation'],
-                    'Global drop left target lower pages resident; no cold-replay claim; inspect checkpoint')
+        result['baseline_classification']='ZERO_OBSERVED_POST_DROP_BASELINE' if result['zero_resident_at_each_file_observation'] else 'NONZERO_MEASURED_POST_DROP_BASELINE'
+        result['all_zero_cold_start_claimed']=False
+        ENGINE.H.save(output,result)
+        print('POST_DROP_BASELINE phase='+phase+' resident_bytes='+str(after['whole_lower_resident_bytes']),flush=True)
         # Baseline is observed after the full sequential lower sweep, not a
         # fictional instantaneous all-zero host state.
         self.start=time.monotonic_ns();self.experiment_phase=phase;self.timeline.phase=phase
         baseline={'phase':phase,'monotonic_ns':self.start,'unix':time.time(),
                   'host':global_host_row(phase),'lower_resident_bytes':after['whole_lower_resident_bytes'],
-                  'lower_probe':after,'known_other_file_cache':None}
+                  'lower_probe':after,'known_other_file_cache':None,
+                  'classification':result['baseline_classification'],'all_zero_cold_start_claimed':False}
         # Collect upper and other files consistently for delta reconciliation.
         upper_rows=[]
         for b in self.bound:
@@ -127,7 +131,7 @@ class GlobalFourRun(FourRun):
         return baseline
     def run(self):
         c=self.c;COLD.TEMPLATE_KEYS={tid:{(f['dev'],f['inode']) for f in rows} for tid,rows in self.plan['template_lowers'].items()}
-        c.report['cold_scope']='Two host-wide clean-file page-cache drops; target lower zero checks are sequential. Guest and daemon userspace caches are not flushed.'
+        c.report['cold_scope']='Two host-wide page-cache drop requests with measured residual baselines. No all-zero cold-start claim. Guest and daemon userspace caches are not flushed.'
         c.report['cache_geometry']=COLD.environment(self.files)
         print('PHASE=owned_cold_cache_calibration',flush=True)
         c.report['cold_calibration']=COLD.calibrate(c.work)
@@ -178,7 +182,7 @@ _base_summarize=summarize
 
 def summarize(work,report,process):
     result=_base_summarize(work,report,process)
-    result['revision']='cow4-global-cache-v1'
+    result['revision']='cow4-global-cache-v2'
     result['cold_cache_validation']={'method':'two ordered sync plus drop_caches=1 operations',
         'scope':report.get('cold_scope'),'checkpoints':report.get('global_cold_checkpoints',[]),
         'calibration':report.get('cold_calibration'),'cache_geometry':report.get('cache_geometry'),

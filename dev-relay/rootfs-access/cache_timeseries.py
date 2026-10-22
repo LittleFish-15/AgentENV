@@ -57,6 +57,7 @@ def reduce(host,frames,baselines,labels):
         if not 0<=row['same_template_shared_resident_union_bytes']<=row['accessed_resident_union_bytes']<=full:
             raise ValueError('Invalid global cache set inclusion')
         file_rows.append(row)
+        row.update(frame.get('baseline_page_accounting',{}))
         for r in frame['templates']:
             template_rows.append({'phase':phase,'pair_phase':r['phase'],'sample_id':frame['sample_id'],
                 'template_id':r['template_id'],'trajectory':labels.get(r['template_id']),
@@ -64,7 +65,10 @@ def reduce(host,frames,baselines,labels):
                 **{key:r.get(key) for key in ('lower_layer_count','lower_file_bytes','lower_page_span_bytes',
                    'whole_lower_host_pagecache_bytes','sandbox1_accessed_and_resident_bytes','sandbox2_accessed_and_resident_bytes',
                    'shared_accessed_host_pagecache_bytes','accessed_resident_union_bytes','lower_resident_outside_pair_observed_access_bytes',
-                   'coarse_256k_common_cell_capacity_upper_bound_bytes')}})
+                   'coarse_256k_common_cell_capacity_upper_bound_bytes','initial_lower_resident_bytes',
+                   'initial_lower_pages_still_resident_bytes','initial_lower_pages_no_longer_resident_bytes',
+                   'lower_resident_outside_initial_page_set_bytes','common_read_resident_from_initial_page_set_bytes',
+                   'common_read_resident_outside_initial_page_set_bytes')}})
     return {'revision':'cow4-global-cache-timeline-v1','host_rows':host_rows,'file_rows':file_rows,
             'template_rows':template_rows,'baselines':baselines,
             'counts':{'host':len(host_rows),'file':len(file_rows),'template':len(template_rows)},
@@ -122,7 +126,8 @@ def read_size_profile(work,report,frames):
 def markdown(timeline):
     lines=['','## 整机清理与缓存时间序列','',
       '整机清理两次：8个沙箱空载60秒前、正式回放前；root执行sync后写drop_caches=1。不会清slab或在回放中重复清理。',
-      '这是host文件缓存冷起点；Guest/daemon用户态缓存未清。文件扫描非原子，清理后逐文件为零不等于全机瞬时为零。',
+      '这是执行清理请求后的实测基线，可能非零，不宣称全零冷起点。Guest/daemon用户态缓存未清，文件扫描非原子。',
+      '初始残留页集合B0单列；每轮区分B0中当前驻留、B0中当前不驻留、B0之外当前驻留。净变化=后者−B0中当前不驻留。相同页被回收再载入无法据离散位图判断，B0之外驻留也不自动证明由轨迹造成。',
       '主机每秒采样与文件约15秒扫描均保存实际时间；空载与回放使用各自T0，不把空载均值扣除后伪称精确归因。',
       '文件扫描前后Cached分别保留；未知差额=Cached增量−lower增量−已知其他文件缓存增量，是诊断残差而不是严格物理恒等式。',
       'memory lower、upper、实验文件仅为已列普通文件的缓存，不包含全部主机文件或memory设备缓存；不能与Guest RSS直接相加。','',

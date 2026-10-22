@@ -1,9 +1,28 @@
 # Four-template global page-cache comparison and time-series output
 
-Use `cow4_global_cache_once.py run --quiet-window-confirmed` as the ordinary
+Use `cow4_global_cache_once.py run --quiet-window-confirmed --accept-nonzero-baseline` as the ordinary
 operator on A. The explicit flag declares that the operator has arranged a
 window without other experiments on A. It is not automated proof of host
 quietness. The program never stops other services to obtain such a window.
+
+## V2: measured residual baseline after the first real attempt
+
+The first global run `5a6b79e3138840f6849ed94be3a3b536` stopped before replay
+because 3,989,504 bytes remained resident after the first completed drop. All
+eight Guests exited and the original service/config were restored. Requiring
+absolute zero was too strong for the intended change-over-time experiment.
+V2 explicitly accepts a measured nonzero baseline, **does not claim an all-zero
+cold start**, and keeps the previous attempt and its receipt unchanged. Before
+a new run it verifies the exact prior failure, zero replay actions, eight HTTP
+404s, exited scoped processes and the confirmed restored Runtime identity.
+It uses a new `cow4-global-cache-v2-node-a.pending.json` receipt.
+
+For each phase preserve the initial page set B0, then separately count B0 pages
+currently resident, B0 pages currently absent, and resident pages outside B0.
+Net change equals the last quantity minus B0 pages currently absent. Common
+read-resident pages are also split into B0 and non-B0 parts. No value is silently
+subtracted from the reported absolute cache size. A page recycled and reloaded
+between snapshots cannot be distinguished from uninterrupted residency.
 
 This supersedes the *execution plan* of the scoped-cold script, but preserves
 all prior evidence. It uses a new pending receipt and report directory. It
@@ -25,8 +44,8 @@ review, rather than deleting or silently replacing it.
    `/proc/sys/vm/drop_caches`. Record intent, before/after counts and timestamps.
    This is host-wide and can increase I/O/latency for every cache user on A.
    Do not assume a successful write emptied all caches.
-5. Check all target lower files with full mincore vectors. Require observed zero
-   residency or preserve the evidence and stop. Hold the eight Guests idle for
+5. Check all target lower files with full mincore vectors. Preserve actual
+   residual residency and classify the baseline as zero or nonzero. Hold the eight Guests idle for
    at least 60 seconds, sampling host counts, lower reads/residency and processes.
 6. Repeat the same root operation once before replay. The root state machine
    rejects missing/reversed/repeated phases, an incomplete control interval,
@@ -40,7 +59,7 @@ review, rather than deleting or silently replacing it.
    this run's Guests, restore exact original config/healthy service, and check
    observer exit and other services' identities. No third cache drop or retry.
 
-The root body ends with `COW4_GLOBAL_ROOT`. Keep both terminals open; no `done`
+The root body ends with `COW4_GLOBAL_V2_ROOT`. Keep both terminals open; no `done`
 input. Stop reports preserve evidence. Do not manually drop caches, restart
 services or delete pending receipts while the experiment is running.
 
@@ -93,6 +112,8 @@ plotting package installation on A is needed. On the analysis workstation,
    sandbox read-resident sets, union and intersection.
 4. `cache-granularity-check.png/svg`: exact common 4KiB pages versus the
    256KiB common-cell capacity upper bound.
+5. `cache-baseline-components.png/svg`: measured initial residual pages,
+   pages outside that initial set, and the resulting net residency change.
 
 PNG/SVG plots use actual timestamps and preserve missing-value gaps. No
 smoothing, data-point padding or synthetic experimental results are allowed.

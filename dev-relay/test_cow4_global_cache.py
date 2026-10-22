@@ -110,7 +110,8 @@ class GlobalTests(unittest.TestCase):
     def test_packet_uses_new_lifecycle_but_same_binary(self):
         code=(HERE/'cow4_global_cache_once.py').read_text(encoding='utf-8')
         self.assertIs(p.FourRun,p.GlobalFourRun)
-        self.assertIn('cow4-global-cache-node-a.pending.json',code)
+        self.assertIn('cow4-global-cache-v2-node-a.pending.json',code)
+        self.assertIn('--accept-nonzero-baseline',code)
         self.assertIn('--quiet-window-confirmed',code)
         self.assertIn("'operator_declared_quiet_window':args.quiet_window_confirmed",code)
         self.assertEqual(p.CANDIDATE_SHA,'eed36d01de13f83a8abdc13e93c21883a3a48273da83fa1c813e65e4655babcf')
