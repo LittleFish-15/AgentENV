@@ -56,3 +56,12 @@ UB按ownerId归组，owner覆盖只记录一次，保留各节点观察，不把
 默认不带`--run`仅打印计划，无Host访问或改动。夜间开发未连接两台机器、未启动SDK或Guest。脚本通过本地编译与模型/文件集成检查；Linux部署、KVM/DAX和真实收益留待用户现场验收。
 
 本地186项交付检查通过，包括单节点禁止B操作、双节点阶段顺序、capture失败进入收尾、未知状态不退役、唯一owner覆盖不重复计、4GiB RAM绑定和helper版本闭合。模型执行不能代替目标部署或硬件验收。
+
+
+## 固定下载入口
+
+- [A单节点启动脚本](A_run_native_single.sh)
+- [A协调两节点启动脚本](A_run_native_dual.sh)
+- [下载器源码](native_round_bootstrap.py)
+
+两个启动脚本都固定到主入口提交 `ac9f248b9dcacac0b32948c53669de96b0de4964`，entry SHA256为 `2ee6004d7be5621f2168903f7c2891d9e16395a38ff08cc266c8cd75e05e0aa6`。通过GitHub Git blob API下载3.67MB文件，检查长度、Git blob和SHA256，最多三次网络重试，不使用Contents API的内联大文件字段。只在A普通用户执行；现有不同代码或部分场景目录保留，不盲目覆盖／重跑。下载器另有3项本地检查，未在目标网络执行。
