@@ -74,7 +74,7 @@ def build_payload(candidate,definition_raw,installation_raw,node,build):
     base=base64.b64decode(m.BASE_SOURCE_B64,validate=True)
     need(sha(base)==m.BASE_SOURCE_SHA,'Embedded base differs')
     launcher=m.adapter(definition)
-    receipt.update(commit=CANDIDATE_CORE,binaries=definition['binaries'],
+    receipt.update(commit=CANDIDATE_CORE,runtimeSourceCommit=CANDIDATE_CORE,binaries=definition['binaries'],
                    launcher=str(D/'libexec/observed-v3/native_service.py'),launcher_sha256=sha(launcher),
                    launcher_dependencies={'native_base.py':sha(base),'native_prepare.py':sha(candidate)})
     files={'native_prepare.py':candidate,'native_base.py':base,'native_service.py':launcher,

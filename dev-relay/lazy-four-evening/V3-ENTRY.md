@@ -1,6 +1,6 @@
 # 四模板两节点 v3：统一构建、部署、对照、采集与收尾
 
-核心源码版本：`2f1550f826d858e9a230cd28a8386c2028ab225b`。协调发布使用Runtime/daemon编译源`6ab53dd2e1f33cb63cbad63eb62a3388494e382c`与提供者Python源`2f1550f`；两者之间Rust和SDK适配器未改，已有构建可以复用。入口包含20个按SHA固定的帮助模块和离线源包。已完成代码接合与本地97项检查；尚未在目标节点执行新版本构建、部署、SDK或Guest验收，不保证通过或正收益。
+核心源码版本：`2f1550f826d858e9a230cd28a8386c2028ab225b`。协调发布使用Runtime/daemon编译源`6ab53dd2e1f33cb63cbad63eb62a3388494e382c`与提供者Python源`2f1550f`；两者之间Rust和SDK适配器未改，已有构建可以复用。入口包含20个按SHA固定的帮助模块和离线源包。已完成代码接合与本地99项检查；尚未在目标节点执行新版本构建、部署、SDK或Guest验收，不保证通过或正收益。
 
 ## 实际测试范围
 
@@ -35,3 +35,5 @@ A统一结果目录：`/home/jwk/agent/r/lazy-four-rollout-v3`。完整报告位
 新版进程回执使用独立的`runtime-attestation-observed-v3.json`，首次启动不会把旧二进制的回执当作新版回执，也不会覆盖它。完整访问集合的穷尽值保留NA；数值交并仅指已验证日志前缀中的集合。
 
 提供者显式配置`maxConcurrentReads=4`（通用组件默认1，上限8）。它重叠独立元数据等待，每个读取仍持有有效pin直至映射读取结束并确认释放；退出前拒绝任何active read，未知回执不自动恢复或释放。现场会在SDK启动前执行改动相关的Python并发/生命周期/观测协议检查，使用模拟映射，不冒称UB穿刺。报告保留配置、实际流水线峰值与排队次数，SDK互斥的NC拷贝仍串行，不能承诺提速。
+
+回放准入核验隔离安装的installation.json及新server/daemon，CLI仍复用旧已核验字节。新receipt明确runtimeSourceCommit；旧receipt和旧bin不参与新版server/daemon来源判定。实际cohort来源校验代码与stage产物联测通过，混入旧daemon或旧来源字段会被拒绝。
