@@ -18,7 +18,7 @@ import types
 ROOT=Path('/home/jwk/agent')
 D=ROOT/'deployments/agentenv-lazy-four-32ce41c'
 OLD_PREPARE_PIN='5015655787a4600fdd83c3b6db4fa47a417be6be36dd6dad920c23e68351d7f6'
-CANDIDATE_PIN='dd6ba06fdb6cd36e9bdf8069aec8891d4ae9e7a18f18d4b89c17eca0af260dd5'
+CANDIDATE_PIN='1bbd5df3e3133896a226aa6bd0aac76895efe6356ec42ea2c94d33ed9ad6c875'
 CANDIDATE_CORE='6ab53dd2e1f33cb63cbad63eb62a3388494e382c'
 CORE='32ce41c0ac6436198860f888e07ef9793e58dc40'
 

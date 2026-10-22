@@ -38,7 +38,7 @@ def shared_ranges(sets,threshold):
 def observed_access(rows,bindings,cutoffs):
     """Bindings: source -> {guest, layers:{digest:fileBytes}}; one node per call.
 
-    Input must already be an attested complete observer trace. This function
+    Input must already be an identity-checked observer trace prefix. This function
     validates attributed records but cannot prove missing records did not exist.
     """
     result={v['guest']:defaultdict(list) for v in bindings.values()}
@@ -69,13 +69,14 @@ def ready_ranges(snapshot):
     need(sum(size(r) for r in out.values())==snapshot['readyBytes'],'Ready content count differs')
     return {key:merge(ranges) for key,ranges in out.items()}
 
-def summarize(access, resident, *, window_id, evidence_complete):
+def summarize(access, resident, *, window_id, sets_validated):
     """Compute logical overlap at an explicitly coordinated observation window.
 
-    Caller must establish trace completeness, identities and window alignment.
+    Caller must validate identities and the observation window. This function
+    computes only the supplied observed sets; it does not establish exhaustive IO.
     Whole lower residency cannot substitute for each Guest's access sets.
     """
-    need(isinstance(window_id,str) and window_id and evidence_complete is True,'Complete same-window evidence required')
+    need(isinstance(window_id,str) and window_id and sets_validated is True,'Validated same-window sets required')
     need(2<=len(access)<=32,'Need 2..32 actual Guest access sets')
     selected={g:{k:intersect(v,resident.get(k,[])) for k,v in by_key.items()} for g,by_key in access.items()}
     keys=set().union(*(set(v) for v in selected.values()))
@@ -94,4 +95,6 @@ def summarize(access, resident, *, window_id, evidence_complete):
             'sharedOverAccessedRatio':shared/union if union else None,
             'sharedOverFullReadyRatio':shared/full if full else None,
             'perGuestAccessedReadyBytes':{g:sum(size(r) for r in v.values()) for g,v in selected.items()},
-            'physicalNetSavingBytes':None,'guestFileCacheShared':None,'memfilePrivateCowShared':None}
+            'physicalNetSavingBytes':None,'guestFileCacheShared':None,'memfilePrivateCowShared':None,
+            'fullAccessCoverageAccepted':False,'fullAccessedResidentUnionBytes':None,
+            'fullSharedResidentBytes':None,'numericalValuesScope':'supplied observed prefix sets only'}
