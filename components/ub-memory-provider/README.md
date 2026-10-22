@@ -240,3 +240,34 @@ increase, service restart or deletion of previously existing objects.
 
 See [the implementation boundary](../../docs/src/internals/cross-node-cow.md)
 before deploying or interpreting results.
+
+
+## First native generation from prebuilt images
+
+`publish-prebuilt-set` starts the first publication before any native snapshot
+exists. It accepts `--image-set` with exact schema
+`{"version":1,"images":[{"sourceConfig":"ABSOLUTE_CONFIG_PATH","paths":["ABSOLUTE_RAW_IMAGE_PATH"],"filesystem":"ext4"}]}`.
+Use already prepared, trusted, aligned immutable DAX filesystem images. This
+command does not export, compact, mount, or establish filesystem equivalence.
+The source config supplies the committed source identity; mutable uppers are
+refused. Runtime still verifies visible Guest DAX and execution readiness.
+
+The remaining publication flags match `publish-retained-set`. Default behavior
+only validates; `--run` explicitly enters the standard provider lifecycle. Each
+v3 binding retains `snapshotSources`, so the first successful native capture can
+archive the complete bases. Identical whole raw images count once within the
+combined mapping budget, while distinct source bindings preserve layer order.
+There is no per-file deduplication across different raw images.
+
+`import-prebuilt-set` takes the publisher's private `binding.json` via
+`--binding-catalog` and its file SHA via `--binding-catalog-sha256`, plus the normal
+publisher replica manifest and SHA, reader, local runtime pins and budgets.
+It validates both documents and requires the exact content union. The importer
+never opens owner source paths or allocates owner objects. The resulting local
+bindings omit owner paths; restoring an archived snapshot hydrates and pins its
+local repository bases. A cold importer without local archive sources must not
+be reported as having produced a self-contained archived capture.
+
+These commands connect already prepared images to the first native generation;
+they neither create Guest snapshots nor transfer VM state or repository objects.
+True Guest RAM private CoW and hardware DAX acceptance remain separate gates.

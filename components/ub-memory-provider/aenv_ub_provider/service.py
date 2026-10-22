@@ -323,9 +323,17 @@ def main():
     archived.add_argument('--max-bytes', type=int, required=True)
     archived.add_argument('--device-runtime', required=True)
     archived.add_argument('--output', required=True)
-    for name in ('publish-retained-snapshot', 'import-retained-snapshot', 'publish-retained-set', 'import-retained-set'):
+    generation_commands = ('publish-retained-snapshot', 'import-retained-snapshot', 'publish-retained-set',
+                           'import-retained-set', 'publish-prebuilt-set', 'import-prebuilt-set')
+    for name in generation_commands:
         command = commands.add_parser(name)
-        command.add_argument('--snapshot-set' if name.endswith('-set') else '--manifest', required=True)
+        if name == 'publish-prebuilt-set':
+            command.add_argument('--image-set', required=True)
+        elif name == 'import-prebuilt-set':
+            command.add_argument('--binding-catalog', required=True)
+            command.add_argument('--binding-catalog-sha256', required=True)
+        else:
+            command.add_argument('--snapshot-set' if name.endswith('-set') else '--manifest', required=True)
         command.add_argument('--device-runtime', required=True)
         command.add_argument('--output', required=True)
         command.add_argument('--adapter', required=True)
@@ -333,6 +341,7 @@ def main():
         command.add_argument('--region', required=True)
         command.add_argument('--max-bytes', type=int, required=True)
         command.add_argument('--coverage-bytes', type=int, required=True)
+        command.add_argument('--expected-plan-sha256', help='Require the same fully validated plan before any SDK call')
         command.add_argument('--run', action='store_true', help='Create fresh preparation and serve via the existing SDK lifecycle')
         if name.startswith('publish-'):
             if not name.endswith('-set'):
@@ -343,11 +352,18 @@ def main():
             command.add_argument('--publisher-manifest-sha256', required=True)
             command.add_argument('--reader', required=True)
     args = parser.parse_args()
-    if args.command in ('publish-retained-snapshot', 'import-retained-snapshot', 'publish-retained-set', 'import-retained-set'):
+    if args.command in generation_commands:
         from . import retained
         runtime = read_json(args.device_runtime)
         common = (runtime, args.output, args.adapter, args.adapter_sha256, args.region, args.max_bytes, args.coverage_bytes)
-        if args.command == 'publish-retained-set':
+        if args.command == 'publish-prebuilt-set':
+            from . import prebuilt
+            plan = prebuilt.plan_publish(args.image_set, *common, args.reader)
+        elif args.command == 'import-prebuilt-set':
+            from . import prebuilt
+            plan = prebuilt.plan_import(args.binding_catalog, args.binding_catalog_sha256,
+                                       args.publisher_manifest, args.publisher_manifest_sha256, args.reader, *common)
+        elif args.command == 'publish-retained-set':
             plan = retained.plan_publish_set(args.snapshot_set, *common, args.reader)
         elif args.command == 'import-retained-set':
             plan = retained.plan_import_set(args.snapshot_set, args.publisher_manifest, args.publisher_manifest_sha256, args.reader, *common)
@@ -355,7 +371,11 @@ def main():
             plan = retained.plan_publish(args.manifest, args.artifact_root, *common, args.reader)
         else:
             plan = retained.plan_import(args.manifest, args.publisher_manifest, args.publisher_manifest_sha256, args.reader, *common)
-        print(json.dumps({'state': 'retained_generation_validated_no_sdk', 'role': plan['role'],
+        plan_sha256 = identity(plan)
+        if args.expected_plan_sha256 is not None and args.expected_plan_sha256 != plan_sha256:
+            raise ValueError('Validated native generation plan changed')
+        print(json.dumps({'state': 'retained_generation_validated_no_sdk', 'role': plan['role'], 'planSha256': plan_sha256,
+                          'inputKind': plan.get('inputKind', 'retained_native_snapshot'),
                           'alignedLogicalBytes': plan['alignedLogicalBytes'], 'physicalHardQuota': False,
                           'GuestCreated': False, 'memfilePrivateCowImplemented': False}), flush=True)
         if args.run:

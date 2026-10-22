@@ -133,9 +133,13 @@ def binding_catalog(values):
 
 
 def plan_publish_set(selection, runtime, output, adapter, adapter_sha256, region, logical_budget, coverage_budget, readers):
-    from . import service
     plans = [plan_publish(item['manifest'], item['artifactRoot'], runtime, output, adapter, adapter_sha256,
                           region, logical_budget, coverage_budget, readers) for item in snapshot_set(selection, True)]
+    return merge_publications(plans, logical_budget, coverage_budget)
+
+
+def merge_publications(plans, logical_budget, coverage_budget):
+    from . import service
     objects = {}
     for plan in plans:
         for entry in plan['catalog']['objects']:
@@ -157,9 +161,15 @@ def plan_publish_set(selection, runtime, output, adapter, adapter_sha256, region
 
 def plan_import_set(selection, publisher_path, publisher_sha256, reader, runtime, output,
                     adapter, adapter_sha256, region, logical_budget, coverage_budget):
+    natives = [bindings.retained_metadata(item['manifest'], logical_budget) for item in snapshot_set(selection, False)]
+    return import_contents(natives, publisher_path, publisher_sha256, reader, runtime, output,
+                           adapter, adapter_sha256, region, logical_budget, coverage_budget)
+
+
+def import_contents(natives, publisher_path, publisher_sha256, reader, runtime, output,
+                    adapter, adapter_sha256, region, logical_budget, coverage_budget):
     from . import service
     output, socket_path, config = common(output, adapter, adapter_sha256, region, logical_budget, coverage_budget)
-    natives = [bindings.retained_metadata(item['manifest'], logical_budget) for item in snapshot_set(selection, False)]
     contract.validate_device_runtime(runtime)
     with Path(publisher_path).open('rb') as stream:
         payload = stream.read(1024 * 1024 + 1)

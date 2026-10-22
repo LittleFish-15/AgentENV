@@ -7,6 +7,17 @@ from .io import atomic_json, read_json
 
 
 def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_filesystem='erofs', snapshot_references=False, retain_snapshot_bases=False):
+    binding, catalog = rootfs_plan(source, image_paths, socket_path, max_bytes, runtime, lower_filesystem,
+                                  snapshot_references, retain_snapshot_bases)
+    output = Path(output)
+    output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
+    atomic_json(output / 'binding.json', binding)
+    atomic_json(output / 'image-catalog.json', catalog)
+    return binding
+
+
+def rootfs_plan(source, image_paths, socket_path, max_bytes, runtime, lower_filesystem='erofs', snapshot_references=False, retain_snapshot_bases=False):
+    """Read prebuilt immutable inputs without publishing a directory or SDK object."""
     if lower_filesystem not in ('erofs', 'ext4'):
         raise ValueError('Native lower filesystem must be erofs or ext4')
     contract.validate_device_runtime(runtime)
@@ -26,11 +37,7 @@ def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_f
                'lowerFilesystem': lower_filesystem}
     if retain_snapshot_bases:
         binding['snapshotSources'] = [entry['path'] for entry in entries]
-    output = Path(output)
-    output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
-    atomic_json(output / 'binding.json', binding)
-    atomic_json(output / 'image-catalog.json', {'version': 1, 'objects': entries})
-    return binding
+    return binding, {'version': 1, 'objects': entries}
 
 
 def relocate(binding_path, socket_path, runtime, output, snapshot_sources=None):
