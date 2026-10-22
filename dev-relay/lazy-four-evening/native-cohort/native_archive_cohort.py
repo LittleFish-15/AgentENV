@@ -22,7 +22,7 @@ ROOT = Path('/home/jwk/agent')
 D = ROOT / 'deployments/agentenv-native-archive-v1'
 CORE = '5e6621c9c9d2e347959a61a46c7f6d99688eeb55'
 TREE = '1381de13dab785582ec8233b36a5b2d46f36b939'
-PINS = {'four_runtime': '00f753b661ccdb43ecba8e033d16bd18278670fcfb1527de53e93344c6221c59', 'cohort_engine': 'fbd1279eb5ae38c90d9ebed36e80d362f16da0ee1e5867288c2f3f9959a24336', 'four_lifecycle': 'e5f8f77dc441063724077d2aef22733742c477b477473b86b22f916960857f41', 'ram_observer': '272fde39fcdef6e690747b7b625e01bd02009d710956ec9168c77e495b2ac946', 'four_replay': '780779b6d3f2c6ea2b7c4a6115d193b9d4116b654251149bac1cc5e0d004d20e', 'four_sync': '2f2bb5782022d483c5eed9969ef7358e48587805f4d8023869d7b7660aa21ced', 'four_metrics': 'd1a3e80825db2f62234a6b81f8141a9442b34cf6de10680ddb4b933d8c728a20', 'host_metrics': '0d98546e829d1d547b1cceb101c455812d684b832441f5db775b50258dd5eed6', 'native_snapshot_transport': '4ad84394400e193128a140d07116f7ad57d08eb4a8ee635383027ab049854d79'}
+PINS = {'four_runtime': '00f753b661ccdb43ecba8e033d16bd18278670fcfb1527de53e93344c6221c59', 'cohort_engine': 'fbd1279eb5ae38c90d9ebed36e80d362f16da0ee1e5867288c2f3f9959a24336', 'four_lifecycle': 'c18ede7f9771f1d9eaba821b9740d40db40eabc39323c5f382e63faeeaeb9e05', 'ram_observer': '272fde39fcdef6e690747b7b625e01bd02009d710956ec9168c77e495b2ac946', 'four_replay': '780779b6d3f2c6ea2b7c4a6115d193b9d4116b654251149bac1cc5e0d004d20e', 'four_sync': '2f2bb5782022d483c5eed9969ef7358e48587805f4d8023869d7b7660aa21ced', 'four_metrics': 'd1a3e80825db2f62234a6b81f8141a9442b34cf6de10680ddb4b933d8c728a20', 'host_metrics': '0d98546e829d1d547b1cceb101c455812d684b832441f5db775b50258dd5eed6', 'native_snapshot_transport': '4ad84394400e193128a140d07116f7ad57d08eb4a8ee635383027ab049854d79'}
 GIB = 1024**3
 
 
@@ -50,7 +50,7 @@ def host_observation():
 def capacity(kind, batch=False):
     limit = int(Path('/sys/module/ublk_drv/parameters/ublks_max').read_text())
     count = len([p for p in Path('/sys/class/ublk-char').iterdir() if re.fullmatch(r'ublkc\d+', p.name)])
-    required = 14 if batch else (3 if kind == 'cold' else 4)
+    required = 26 if kind == 'fork-burst' else (14 if batch else (3 if kind == 'cold' else 4))
     need(0 < limit <= 4096 and count <= limit and limit - count >= required,
          'Insufficient ublk slots for the declared cohort; preserve existing devices')
     if batch:
@@ -120,10 +120,11 @@ class FieldBatch:
                  'Measured provider is not the Runtime bound native provider')
 
     def persist_case(self, index, value):
-        self.states[str(index)] = copy.deepcopy(value)
-        self.rt.save(self.work / ('case-' + str(index) + '.json'), value)
-        self.rt.save(self.work / 'state.json', {'runId': self.run_id, 'context': self.context, 'cases': self.states})
-        self.aggregate()
+        with self.mutex:
+            self.states[str(index)] = copy.deepcopy(value)
+            self.rt.save(self.work / ('case-' + str(index) + '.json'), value)
+            self.rt.save(self.work / 'state.json', {'runId': self.run_id, 'context': self.context, 'cases': self.states})
+            self.aggregate()
 
     def aggregate(self):
         states = list(self.states.values())
@@ -340,7 +341,7 @@ class FieldBatch:
         templates = self.templates_for_replay()
         for index, template in enumerate(templates['templates']):
             need(self.snapshot(index, template['nativeTemplateId']) == template['snapshotEvidence'], 'Retained template changed')
-        capacity('restore', batch=True)
+        capacity('fork-burst' if self.args.replica_mode=='restore-fork-parallel' else 'restore', batch=True)
         self.fresh()
         self.transport()
         report = {'status': 'NATIVE_FOUR_REPLAY_STARTING', 'scenario': self.args.scenario, 'node': self.node,
@@ -353,12 +354,12 @@ class FieldBatch:
                   'completeCounterfactualAccepted':False,'comparisonRequiresMatchedCommandResults':True,
                   'sampleFile': str(self.work / 'samples.jsonl'), 'jobs': self.jobs}
         try:
-            self.jobs.extend(self.lifecycle.restore_pairs(templates['templates'], fork=self.args.replica_mode=='restore-fork'))
+            self.jobs.extend(self.lifecycle.restore_pairs(templates['templates'], fork=self.args.replica_mode=='restore-fork', parallel=self.args.replica_mode=='restore-fork-parallel'))
             for index, job in enumerate(self.jobs):
                 case = self.selection[job['templateIndex']]
                 job.update(index=index, instanceId=case['case']['instance_id'], replaySha256=case['case']['replay_sha256'],
                            originalTemplateId=case['original']['template_id'], state='READY', stepsCompleted=0, failedCommands=0,
-                           resources=case['original']['resources'])
+                           resources=case['original']['resources'],expectedSteps=case['executedStepCount'])
                 result = self.command(job, 'test "$(id -u)" = 0 && /agentenv/bin/busybox timeout -s TERM -k 1 5 /bin/bash -l -c true', 'admission')
                 need(result['returnCode'] == 0, 'Guest admission probe failed')
             ids = [j['sandboxId'] for j in self.jobs]
@@ -431,7 +432,7 @@ def main():
     parser.add_argument('--completed-epoch')
     parser.add_argument('--release-captures', action='store_true')
     parser.add_argument('--provider-plan',type=Path)
-    parser.add_argument('--replica-mode',choices=('restore-pair','restore-fork'),default='restore-pair')
+    parser.add_argument('--replica-mode',choices=('restore-pair','restore-fork','restore-fork-parallel'),default='restore-pair')
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()
     if not args.run:

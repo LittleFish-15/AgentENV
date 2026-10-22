@@ -26,7 +26,7 @@ python3 -I -B native_archive_round.py run-a --scenario single-a --run
 python3 -I -B native_archive_round.py run-a --scenario dual-ab --run
 ```
 
-单节点使用`native-archive-single-*`目录和独立代际；双节点使用`native-archive-*`，不会以“B有空闲映射”充当严格单节点。默认每模板两次restore；如明确选择`--replica-mode restore-fork`，则每模板一次restore和一次实际Fork，报告会区分。创建顺序不是并发Fork压力验收。已有场景目录不因改变replica-mode而覆盖。
+单节点使用`native-archive-single-*`目录和独立代际；双节点使用`native-archive-*`，不会以“B有空闲映射”充当严格单节点。默认每模板两次restore；如明确选择`--replica-mode restore-fork`，则每模板一次restore和一次实际Fork，报告会区分。另可选择restore-fork-parallel，对四个不同parent发出最多四个并发Fork；它是独立能力模式，本地模型通过而硬件未验收。已有场景目录不因改变replica-mode而覆盖。
 
 单节点不发起任何B连接。双节点先确认A/B provider，再启动A Runtime、捕获四个parent并释放；将VM state、memory/rootfs层和native原始归档私下传到B，B在尚未启动时校验/播种新仓库，随后启动并恢复A的同一组ID。两端通过独立admission/completed屏障采样，不宣称指令级同步。
 
@@ -55,13 +55,15 @@ UB按ownerId归组，owner覆盖只记录一次，保留各节点观察，不把
 
 默认不带`--run`仅打印计划，无Host访问或改动。夜间开发未连接两台机器、未启动SDK或Guest。脚本通过本地编译与模型/文件集成检查；Linux部署、KVM/DAX和真实收益留待用户现场验收。
 
-本地186项交付检查通过，包括单节点禁止B操作、双节点阶段顺序、capture失败进入收尾、未知状态不退役、唯一owner覆盖不重复计、4GiB RAM绑定和helper版本闭合。模型执行不能代替目标部署或硬件验收。
+本地196项交付检查通过，包括单节点禁止B操作、双节点阶段顺序、capture失败进入收尾、未知状态不退役、唯一owner覆盖不重复计、4GiB RAM绑定和helper版本闭合。模型执行不能代替目标部署或硬件验收。
 
 
 ## 固定下载入口
 
-- [A单节点启动脚本](A_run_native_single.sh)
-- [A协调两节点启动脚本](A_run_native_dual.sh)
-- [下载器源码](native_round_bootstrap.py)
+本次修正的固定下载版本见同目录bootstrap与发布回执；旧ac9入口保留在Git历史。
 
-两个启动脚本都固定到主入口提交 `ac9f248b9dcacac0b32948c53669de96b0de4964`，entry SHA256为 `2ee6004d7be5621f2168903f7c2891d9e16395a38ff08cc266c8cd75e05e0aa6`。通过GitHub Git blob API下载3.67MB文件，检查长度、Git blob和SHA256，最多三次网络重试，不使用Contents API的内联大文件字段。只在A普通用户执行；现有不同代码或部分场景目录保留，不盲目覆盖／重跑。下载器另有3项本地检查，未在目标网络执行。
+## 完整性判定修正
+
+双节点必须收到A/B各一份报告，各含四模板×两个不同sandbox。每个job的预期动作数、实际完成数、逐step索引/退出码及非零计数必须一致；两端同template/slot的instance、replay SHA、创建模式及退出码向量须匹配。原有非零退出不会被改成成功。缺B、缺job/动作、协调器错误或两端退出结果不同，均保留为partial，不能由一份A报告得出完整成功。这个匹配不证明stdout语义等价，也不构成原版因果对照。
+
+provider明确回复refused时立即保留该回复并停止收尾，不再等半小时，也不重发。丢回复或超时仍只观察实际journal，不推断释放。

@@ -112,7 +112,7 @@ def check_cohort_sources():
 
 def worker(node,mode,replica_mode='restore-pair',admission=None,completed=None):
     check_cohort_sources()
-    need(mode in ('parents','replay','cleanup') and replica_mode in ('restore-pair','restore-fork'),'Invalid cohort mode')
+    need(mode in ('parents','replay','cleanup') and replica_mode in ('restore-pair','restore-fork','restore-fork-parallel'),'Invalid cohort mode')
     args=[PYTHON,'-I','-B',str(COHORT/'native_archive_cohort.py'),mode,'--node',node,'--replica-mode',replica_mode,'--run']
     if mode!='cleanup':args+=['--provider-plan',str(PROVIDER_PLAN/'plan.json')]
     if mode!='parents':args+=['--scenario',SCENARIO]
@@ -257,6 +257,11 @@ def retire_local(node):
     with log.open('xb') as output:
         try:result=subprocess.run(command,stdout=output,stderr=subprocess.STDOUT,timeout=660)
         except subprocess.TimeoutExpired:result=None
+    if result is not None and result.returncode!=0 and log.stat().st_size<=65536:
+        try:reply=json.loads(log.read_bytes())
+        except (ValueError,UnicodeDecodeError):reply=None
+        if isinstance(reply,dict) and reply.get('state')=='refused':
+            raise RuntimeError('Provider explicitly refused retirement; preserve the exact reply and do not resend')
     # A lost control reply does not warrant a second request. Observe journals.
     value=wait_until('provider-release-'+node,lambda:released_local(node,allow_pending=True),1800)
     value['retireCommandExit']=result.returncode if result else None;return value
@@ -312,9 +317,39 @@ def rpc_long(mode,timeout=7200,**values):
     with log.open('rb') as stream:stream.seek(0,2);stream.seek(max(0,stream.tell()-8*1024**2));tail=stream.read().decode()
     return json.loads(tail.strip().splitlines()[-1])
 
+def validate_reports(reports,error=None):
+    expected={'node-a'} if SCENARIO=='single-a' else {'node-a','node-b'}
+    issues=[];vectors={};identities={}
+    if error is not None:issues.append('coordinator_error')
+    if len(reports)!=len(expected) or {r.get('node') for r in reports}!=expected:issues.append('missing_or_duplicate_node_report')
+    for report in reports:
+        node=report.get('node')
+        if (report.get('scenario')!=SCENARIO or report.get('status')!='NATIVE_FOUR_REPLAY_COMPLETED_OWNED_GUESTS_RELEASED'
+                or report.get('workerExitCode')!=0 or report.get('replicaFormation') not in ('restore-pair','restore-fork','restore-fork-parallel')):
+            issues.append(str(node)+':worker_incomplete')
+        jobs=report.get('jobs',[])
+        if len(jobs)!=8 or len({j.get('sandboxId') for j in jobs})!=8 or { (j.get('templateIndex'),j.get('slot')) for j in jobs }!={(i,s) for i in range(4) for s in (0,1)}:
+            issues.append(str(node)+':guest_inventory_incomplete');continue
+        vectors[node]={};identities[node]={}
+        for job in jobs:
+            key=(job['templateIndex'],job['slot']);results=job.get('commandResults',[]);count=job.get('expectedSteps')
+            valid=type(count) is int and count>0 and job.get('state')=='REPLAY_COMPLETED' and job.get('stepsCompleted')==count and len(results)==count
+            valid=valid and all(row.get('step')==i and type(row.get('returnCode')) is int and row['returnCode'] not in (124,137) for i,row in enumerate(results))
+            valid=valid and job.get('failedCommands')==sum(row['returnCode']!=0 for row in results)
+            valid=valid and isinstance(job.get('instanceId'),str) and bool(job['instanceId']) and isinstance(job.get('replaySha256'),str) and re.fullmatch('[0-9a-f]{64}',job['replaySha256']) is not None
+            if not valid:issues.append(str(node)+':commands_incomplete:'+str(key));continue
+            vectors[node][key]=[row['returnCode'] for row in results]
+            identities[node][key]=(job.get('instanceId'),job.get('replaySha256'),report.get('replicaFormation'))
+    peer_match=None
+    if SCENARIO=='dual-ab':
+        peer_match=(set(vectors)==expected and all(len(v)==8 for v in vectors.values())
+                    and vectors['node-a']==vectors['node-b'] and identities['node-a']==identities['node-b'])
+        if not peer_match:issues.append('native_peer_command_results_or_inputs_differ')
+    return {'complete':not issues,'issues':issues,'nativePeerCommandResultsMatch':peer_match}
+
 def emit_report(reports,cleanup,error=None):
-    complete=bool(reports) and all(r.get('status')=='NATIVE_FOUR_REPLAY_COMPLETED_OWNED_GUESTS_RELEASED'
-                                 and r.get('workerExitCode')==0 for r in reports)
+    validation=validate_reports(reports,error)
+    complete=validation['complete'] and cleanup.get('status')=='OWN_NATIVE_ROUND_QUIESCED_AND_UB_RELEASED'
     pools={}
     for report in reports:
         provider=report.get('completedSample',{}).get('provider',{})
@@ -330,7 +365,7 @@ def emit_report(reports,cleanup,error=None):
         pool['manifestIdentityConsistent']=len(identities)==1 and None not in identities
         if not pool['manifestIdentityConsistent']:pool['ownerReportedCoverageBytes']=None
     result={'status':'NATIVE_ROUND_MEASURED_AND_RELEASED' if complete and not cleanup['unknownPreserved'] else 'NATIVE_ROUND_PARTIAL_PRESERVED',
-            'scenario':SCENARIO,'reports':reports,'cleanup':cleanup,'error':error,
+            'scenario':SCENARIO,'reports':reports,'cleanup':cleanup,'error':error,'completionValidation':validation,
             'originalComparison':'historical reference only; no original Runtime replay in this native round',
             'memfileCrossNodeCowImplemented':False,'completeCounterfactualAccepted':False,
             'globalPhysicalNetSavingBytes':None,'rootfsCompleteAccessResidency':None,'SDKCoverageIsPhysicalIncrement':False,
@@ -446,7 +481,7 @@ def b_prepare_runtime(args):
 def b_fetch(name):
     paths={'provider-root.txt':PROVIDER_PLAN/'activate-root.sh','runtime-root.txt':DEPLOYMENT/'review-new-unit-root.txt',
            'peer-release.json':WORK/'generation-node-b/provider/release.json',
-           **{'replay-node-b-'+mode+'.json':WORK/('replay-node-b-'+mode+'.json') for mode in ('restore-pair','restore-fork')}}
+           **{'replay-node-b-'+mode+'.json':WORK/('replay-node-b-'+mode+'.json') for mode in ('restore-pair','restore-fork','restore-fork-parallel')}}
     need(name in paths,'Unexpected private response file')
     raw=read(paths[name],8*1024**2)
     return {'name':name,'data':base64.b64encode(raw).decode(),'sha256':hashlib.sha256(raw).hexdigest()}
@@ -456,7 +491,7 @@ def main():
     parser.add_argument('mode',choices=('run-a','b-prepare-provider','b-provider-state','b-prepare-runtime','b-runtime-state',
         'b-health','b-worker','b-fetch','b-pair','b-stop-plan','b-stop-state','b-retire'))
     parser.add_argument('--scenario',choices=('single-a','dual-ab'),required=True)
-    parser.add_argument('--replica-mode',choices=('restore-pair','restore-fork'),default='restore-pair')
+    parser.add_argument('--replica-mode',choices=('restore-pair','restore-fork','restore-fork-parallel'),default='restore-pair')
     for name in ('bundle-sha','inputs-sha','snapshots-sha','admission-epoch','completed-epoch','pair-epoch','variant','operation','payload','file'):
         parser.add_argument('--'+name)
     parser.add_argument('--run',action='store_true');args=parser.parse_args();scenario_paths(args.scenario)

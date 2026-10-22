@@ -29,7 +29,7 @@ parent成功前必须确认全局Guest空与完整cleanup。每个snapshot检查
 
 B仅接受已导入A快照的回执，核相同任务、资源、replay SHA、snapshot ID、catalog及实际raw归档，再恢复。`parents --node node-b`被拒绝。双节点`--scenario dual-ab`需要协调者提供同一轮明确的`--admission-epoch`及`--completed-epoch`并操作屏障；本组件不会自行创建对端或启动SSH。请勿手工随便填写epoch绕过这一步。
 
-`--replica-mode restore-fork`是独立能力阶段：每模板先恢复一个Guest，再通过实际Fork API创建第二个。两种模式使用不同phase目录、保留不同`replicaFormation`，不能混为同一对照。Fork与restore的副本寿命均为7200秒，Guest命令300秒、CLI330秒保持；此改动不延长任务截止时间。当前创建按模板依次执行，**没有证明并发Fork通过**。未知Fork回复保留intent、阻止后续创建，不重试未知操作。
+`--replica-mode restore-fork`是独立能力阶段：每模板先恢复一个Guest，再通过实际Fork API创建第二个。两种模式使用不同phase目录、保留不同`replicaFormation`，不能混为同一对照。Fork与restore的副本寿命均为7200秒，Guest命令300秒、CLI330秒保持；此改动不延长任务截止时间。默认与restore-fork仍按模板依次创建；可选并发能力模式见末节。未知Fork回复保留intent、阻止后续创建，不重试未知操作。
 
 ## 记录与收尾
 
@@ -39,6 +39,15 @@ B仅接受已导入A快照的回执，核相同任务、资源、replay SHA、sn
 
 失败时保留未知创建/Fork/删除intent。`cleanup --node ... --scenario ... --replica-mode ... --run`只恢复同boot/Runtime/config的原case journal，不重新开始任务；cleanup不要求provider仍serving，以免阻止必要Guest收尾。只有确认所有Guest释放后，才能停止Runtime，再按provider协议B释放／A核peer receipt并退役。不要用关闭终端或直接杀provider代替退役。
 
-本地10项检查覆盖真实Fork调用数量/7200副本寿命、两restore区分、未知Fork不重试、10helper pins、capture清理不确定不发布ready、真实A归档在B选择及损坏拒绝、安装不覆盖、provider PID变化/缺cgroup。整体186交付检查通过；这些含模型API及本地文件，不是目标Linux/SDK/DAX/Guest验收。memfile真正私有CoW仍未实现。
+本地13项检查覆盖真实Fork调用数量/7200副本寿命、两restore区分、未知Fork不重试、10helper pins、capture清理不确定不发布ready、真实A归档在B选择及损坏拒绝、安装不覆盖、provider PID变化/缺cgroup。整体196交付检查通过；这些含模型API及本地文件，不是目标Linux/SDK/DAX/Guest验收。memfile真正私有CoW仍未实现。
 
 最新集成修正：native观察器以4GiB核对实际FC RAM区间，纠正旧512MiB调用参数；仍不按大小猜测VMA。样本补充collector、精确父coordinator与Runtime host proxy的进程指标，独立失败记NA。辅助进程与Host其他账户存在重叠，SSH/kernel/driver成本未完整覆盖，不求和冒充物理净收益。
+
+
+## 有界并发Fork模式（代码与本地模型已验证，硬件待验收）
+
+`--replica-mode restore-fork-parallel`先按顺序恢复四个已确认的parent，再用最多四个线程、每parent一条Fork请求创建四个child；最终仍是每模板两个Guest。它不测试同一个parent的多重并发Fork，也不改变默认restore-pair对照。
+
+开始前及四parent完成后都要求保守的26个空闲ublk槽位；不扩容驱动、不清理别人的设备。每个case仍在HTTP请求前持久记录intent；case及aggregate写入使用同一个RLock，避免临时journal文件竞争。首个失败会关闭后续准入；已经批准的请求可能继续到达服务端，均单独记账、等待有界结束，不重试。所有原mutation guard在退出前恢复，未确认结果继续阻止后续创建和UB退役。多出的能力模式需在全新场景选择，已有目录不能盲重跑。
+
+新增检查用真实Python线程/barrier证明最多四个并发模型调用、八个已确认Guest范围及scoped cleanup；丢一条Fork回复时保留unknown、不重试；并发case持久化只有一个writer。没有真实KVM/UB并发Fork结果。

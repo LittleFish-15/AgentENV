@@ -1,5 +1,7 @@
 """Compose four bounded one-template journals without widening their ownership."""
 import copy
+import concurrent.futures
+import threading
 import hashlib
 
 
@@ -62,7 +64,8 @@ class FourLifecycle:
                               'snapshotEvidence': copy.deepcopy(case.state['snapshotEvidence'][0])})
         return templates
 
-    def restore_pairs(self, templates, fork=False):
+    def restore_pairs(self, templates, fork=False, parallel=False):
+        if parallel:return self.parallel_forks(templates)
         need(len(templates) == 4 and not self.cases, 'Four fresh replay cases required')
         need(self.api.call('GET', '/v2/sandboxes?limit=1') == (200, []), 'New Runtime inventory must be empty')
         jobs = []
@@ -81,6 +84,54 @@ class FourLifecycle:
                              'nativeTemplateId': template['nativeTemplateId'], 'caseRunId': case.run_id})
         need(len(jobs) == len({job['sandboxId'] for job in jobs}) == 8, 'Eight distinct Guests required')
         return jobs
+
+    def parallel_forks(self,templates):
+        """Four admitted owned parents, at most one in-flight Fork per parent.
+
+        The original global unknown-operation guard is restored before returning.
+        An error stops later admission approvals; already approved requests may
+        still reach the server, remain journaled and are joined without retry.
+        """
+        need(len(templates)==4 and not self.cases,'Four fresh parent cases required')
+        need(self.api.call('GET','/v2/sandboxes?limit=1')==(200,[]),'Runtime inventory must be empty')
+        self.capacity('fork-burst')
+        parents=[];jobs=[]
+        for index,template in enumerate(templates):
+            need(template['templateIndex']==index,'Template order differs')
+            case=self.begin_case(index)
+            sid=case.create('/v2/sandboxes',{'templateID':template['nativeTemplateId'],'timeout':7200,
+                'autoPause':False,'allow_internet_access':False,'secure':True,
+                'metadata':{'cow_batch':case.run_id,'cow_four_index':str(index),'cow_four_slot':'0'}})
+            parents.append((index,case,sid,template))
+            jobs.append({'templateIndex':index,'slot':0,'sandboxId':sid,'nativeTemplateId':template['nativeTemplateId'],'caseRunId':case.run_id})
+        self.guard();self.capacity('fork-burst')
+        halt=threading.Event();admission=threading.Lock()
+        def allowed():
+            with admission:need(not halt.is_set(),'Fork burst stopped after an uncertain or failed request')
+        def fork(item):
+            index,case,parent,template=item
+            try:
+                child=case.fork_one(parent,timeout=7200)
+                return {'templateIndex':index,'slot':1,'sandboxId':child,'nativeTemplateId':template['nativeTemplateId'],'caseRunId':case.run_id}
+            except BaseException:
+                halt.set()
+                raise
+        previous=[case.mutation_guard for _,case,_,_ in parents]
+        errors=[]
+        try:
+            for _,case,_,_ in parents:case.mutation_guard=allowed
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futures=[pool.submit(fork,item) for item in parents]
+                for future in futures:
+                    try:jobs.append(future.result())
+                    except Exception as error:errors.append(type(error).__name__)
+        finally:
+            halt.set()
+            for (_,case,_,_),guard in zip(parents,previous):case.mutation_guard=guard
+        need(not errors,'Native Fork burst failed; preserve per-case request journals: '+','.join(errors))
+        need(len(jobs)==len({job['sandboxId'] for job in jobs})==8,'Eight confirmed distinct Guests required')
+        return sorted(jobs,key=lambda job:(job['templateIndex'],job['slot']))
+
 
     def owned(self, sid):
         matches = [case for case in self.cases.values() if sid in case.state['sandboxIds']]
