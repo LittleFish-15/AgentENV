@@ -74,3 +74,35 @@ report directory. The baseline `de320ed9ad9b4b8b9aa037ee9d4dcc8e` is preserved.
 Local `test_trial.py` exercises seven control cases, including real temporary
 file replacement and exact hardlink restoration. Linux UID/proc/systemd/socket
 behavior is simulated in these portable tests; the target trial is pending.
+
+## Fresh original 256 KiB control after the completed 64 KiB trial
+
+The IO64 trial `e743a6785cfe48cbb822f8d87213f176` completed and restored the
+original server. `../cow4_original_256_recheck.py` runs a new, independently
+recorded control against that restored original. It uses the original server
+SHA-256 `0c5478b8382289c05ab1730401eea6918420c35594604cc7131592e81ad5aeff`
+and the first experiment's observer daemon SHA-256
+`eed36d01de13f83a8abdc13e93c21883a3a48273da83fa1c813e65e4655babcf`.
+There is no recompilation and no server binary replacement. The existence of
+the IO64 source change on this development branch does not make this entry use
+that Runtime or daemon: the original binaries are pinned and verified.
+
+Run `run --quiet-window-confirmed --accept-nonzero-baseline` as the ordinary
+user, then paste the printed `COW4_ORIGINAL_256_RECHECK_ROOT` literal block into
+the same host's root terminal within 600 seconds. Keep both terminals open; no
+`done` input. `status` reads this new receipt. Earlier receipts remain intact.
+
+This entry keeps the same four templates, eight Guests, continuous replay,
+60-second idle interval, two host-wide sync/drop1 operations, observer and
+sampling routines. It additionally verifies both effective queue limits are
+256 KiB for all bound rootfs and memory devices. The original server executable
+hash/inode is checked before activation, while active, and after restoration.
+Only the original daemon path in the configuration is temporarily redirected
+to the original observation build; the exact original configuration is restored.
+
+Success is `COW4_ORIGINAL_256_RECHECK_MEASURED_GUESTS_RELEASED_RESTORED` and
+requires complete observation coverage, device checks, Guest release and
+restoration. Seven local admission/identity/device tests passed; they do not
+substitute for the forthcoming target execution. Compare all three runs while
+retaining background activity and cache-reclaim differences as potential
+confounders; this repeat alone does not guarantee a noise-free machine.
