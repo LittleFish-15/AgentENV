@@ -258,7 +258,10 @@ they are not exact Guest application demand bytes or measured hardware IO.
 An opt-in observer executable reads its adjacent `.access-spec` file. The spec
 uses `output=`, `max_bytes=`, `max_records=`, `allow=dev:inode:file_bytes`, and
 `allow_content=sha256:hex:file_bytes`. Its private owned output directory must
-exist and output/status files must be new. Version 2 trace headers include both
+exist and output/status files must be new. The output filename may contain one
+`{pid}` placeholder so sequential daemon lifetimes get separate files without
+changing the spec or appending to old evidence; parent-directory placeholders
+are rejected. Version 2 trace headers include both
 allowlist counts. Sequence/error/drop/unsupported-context status makes incomplete
 coverage visible. A missing observer, absent source binding or stale/incomplete
 status means unknown coverage, never a measured zero. Logging can add latency

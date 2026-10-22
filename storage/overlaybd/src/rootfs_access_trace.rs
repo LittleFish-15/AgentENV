@@ -23,6 +23,26 @@ pub fn rootfs_source(source: &Path) -> bool {
     source.is_absolute() && source.ends_with("overlaybd/image.json")
 }
 
+/// A fixed spec may span sequential daemon lifetimes without appending to an
+/// older trace. Only the filename may contain one literal {pid} placeholder.
+pub fn process_output(path: &Path, pid: u32) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    if path.parent()?.to_string_lossy().contains(['{', '}']) {
+        return None;
+    }
+    if !name.contains(['{', '}']) {
+        return Some(path.to_path_buf());
+    }
+    if name.matches("{pid}").count() != 1 {
+        return None;
+    }
+    let expanded = name.replace("{pid}", &pid.to_string());
+    if expanded.contains(['{', '}']) {
+        return None;
+    }
+    Some(path.with_file_name(expanded))
+}
+
 pub fn content_identity(digest: &str, bytes: u64) -> bool {
     let hash = digest.strip_prefix("sha256:").unwrap_or("");
     bytes > 0
@@ -180,7 +200,9 @@ mod linux {
                 return Err(std::io::Error::other("unknown observer setting"));
             }
         }
-        let output = output.ok_or_else(|| std::io::Error::other("no observer output"))?;
+        let configured = output.ok_or_else(|| std::io::Error::other("no observer output"))?;
+        let output = super::process_output(&configured, std::process::id())
+            .ok_or_else(|| std::io::Error::other("invalid process output template"))?;
         if !output.is_absolute()
             || (allowed.is_empty() && allowed_contents.is_empty())
             || allowed_contents.len() > 64
@@ -554,6 +576,15 @@ pub use linux::{fallback, now_ns, record, record_content};
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_logs_are_fresh_per_pid_without_changing_parent() {
+        let p = Path::new("trace-{pid}.jsonl");
+        assert_eq!(process_output(p, 41).unwrap(), Path::new("trace-41.jsonl"));
+        assert_ne!(process_output(p, 41), process_output(p, 42));
+        assert!(process_output(Path::new("parent-{pid}/trace.jsonl"), 41).is_none());
+        assert!(process_output(Path::new("trace-{pid}-{pid}.jsonl"), 41).is_none());
+        assert!(process_output(Path::new("trace-{other}.jsonl"), 41).is_none());
+    }
     #[test]
     fn content_events_preserve_reader_and_actual_source() {
         let source = if cfg!(windows) {
