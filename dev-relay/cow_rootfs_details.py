@@ -9,6 +9,10 @@ from pathlib import Path
 
 def expand_row(row):
     result=dict(row)
+    lower=row.get('lower_file_bytes')
+    if type(lower) is int and lower>0:
+        for name,source in [('access_resident_coverage_fraction','accessed_resident_union_bytes'),('shared_access_resident_coverage_fraction','shared_accessed_host_pagecache_bytes')]:
+            value=row.get(source);result[name]=value/lower if type(value) is int else None
     sids=row['sandbox_ids']
     observations={x['sandbox_id']:x for x in row.get('upper_observations',[])}
     for number,sid in enumerate(sids,1):
@@ -57,7 +61,7 @@ def summarize(report,frames):
             g=groups.get((tid,phase),{'sample_count':0,'metrics':{},'sandbox_ids':jobs[tid]})
             rows.append(dict(template_id=tid,trajectory=labels.get(tid),phase=phase,
                 lower_layer_reference_count=len(layers),unique_lower_file_count=len(objects),
-                lower_file_bytes=sum(objects.values()),lower_identity_scope='prepared_template_inventory',
+                lower_file_bytes=sum(objects.values()),lower_page_span_bytes=sum((n+4095)//4096*4096 for n in objects.values()),lower_identity_scope='prepared_template_inventory',
                 runtime_binding_present=any(b.get('template_id')==tid for b in report.get('bindings',[])),**g))
     return {'revision':'rootfs-existing-evidence-details-v1','run_id':report['run_id'],
         'source_run_status':report.get('status',report.get('validation',{}).get('status')),
@@ -81,7 +85,17 @@ def markdown(result):
         keys=[f'sandbox{i}_upper_{f}' for i in (1,2) for f in ('file_bytes','allocated_bytes','resident_bytes')]
         lines.append('|'+ '|'.join([str(r['trajectory']),r['template_id'],r['phase'],str(r['lower_layer_reference_count']),amount(r['lower_file_bytes'])]+[metric(r,k) for k in keys]+[str(r['sample_count'])])+'|')
     lines+=['',f"跨模板去重lower文件数：{result['global_unique_lower_file_count']}；文件长度：{amount(result['global_unique_lower_file_bytes'])} MiB。",
-        'S1/S2的完整沙箱ID对应关系，以及upper各指标有效样本数见JSON；缺项不补0，upper data与index按inode去重。', '']
+        'S1/S2的完整沙箱ID对应关系，以及upper各指标有效样本数见JSON；缺项不补0，upper data与index按inode去重。', '',
+        '|轨迹|阶段|lower文件MiB|lower页跨度MiB|访问驻留并集MiB|共同访问驻留MiB|并集/lower文件|交集/lower文件|',
+        '|---|---|---:|---:|---:|---:|---:|---:|']
+    for r in result['rows']:
+        def percent(key):
+            v=r['metrics'].get(key)
+            return 'NA' if not v else f"{v['min']*100:.3f}%–{v['max']*100:.3f}%"
+        lines.append('|'+ '|'.join([str(r['trajectory']),r['phase'],amount(r['lower_file_bytes']),amount(r['lower_page_span_bytes']),
+            metric(r,'accessed_resident_union_bytes'),metric(r,'shared_accessed_host_pagecache_bytes'),
+            percent('access_resident_coverage_fraction'),percent('shared_access_resident_coverage_fraction')])+'|')
+    lines+=['','并集/lower、交集/lower是实际访问驻留覆盖率，不是整个lower文件的总驻留率。页跨度另列以说明文件末页取整。','']
     return '\n'.join(lines)
 
 

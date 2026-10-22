@@ -97,6 +97,7 @@ def summarize(work, report, process):
         'host_page_identity':'same-node dev/inode/file-page-index','access_cache_samples':len(samples),
         'sample_file':str(p),'trace_file':str(work/'observer/trace.jsonl'),
         'ordinary_guest_ram_physical_sharing_resampled':False,'cross_node_net_saving_bytes':None,
+        'global_access_cache_sweeps':[{k:s[k] for k in ('sample_id','unix','global_accessed_resident_union_bytes','global_same_template_shared_accessed_resident_bytes','reference_union_avoided_bytes') if k in s} for s in samples],
         'read_ahead_pages_outside_requested_backing_ranges_included':False,
         'payload_is_host_backing_format_not_decoded_guest_file_bytes':True,
         'boot_id':report['root_plan']['boot_id'],'candidate_sha256':CANDIDATE_SHA,'observer_patch_sha256':PATCH_SHA,
@@ -107,7 +108,7 @@ def summarize(work, report, process):
         if not v:return 'NA'
         scale=100 if ratio else 1/1024**2
         return f"{v['min']*scale:.3f}–{v['max']*scale:.3f}"+('%' if ratio else '')
-    lines=['# 4模板原版rootfs实际读取驻留补测','',
+    lines=['# '+str(len(report['template_lowers']))+'模板原版rootfs实际读取驻留补测','',
         '原版ae9c626增加只记录元数据的读取观测；复用已有模板，各2沙箱，continuous轨迹。',
         '统计host lower backing读取范围与采样时驻留页的交集；不是整个文件缓存，也不是Guest文件有效字节。IO完成时间定义窗口，启动前读取排除，轨迹结束后该沙箱访问集冻结。',
         'RAM物理PFN本批未重采；整FC RSS/PSS另列。物理净收益与跨节点验收仍为NA。','',
@@ -122,6 +123,15 @@ def summarize(work, report, process):
         fields=('sandbox_min_rss_bytes','sandbox_max_rss_bytes','sandbox_min_pss_bytes','sandbox_max_pss_bytes','template_min_shared_bytes','template_max_shared_bytes')
         lines.append('|'+ '|'.join([r['template_id'],r['sandbox_id'],r['phase']]+['NA' if r[k] is None else f'{r[k]/1024**2:.3f}' for k in fields]+[str(r['template_valid_paired_samples'])])+'|')
     lines+=['','共享估计逐轮Σ(RSS−PSS)/(2−1)，整进程口径不等于memfile物理共享。lower层数/大小及upper各次file/allocated/resident数据见JSON。不得将各模板交集直接相加作为全局去重收益。','']
+    lines+=['同节点全批检查点去重统计（包含部分轨迹结束后的保持阶段，单位MiB）：','',
+        '|指标|最小|最大|末次|','|---|---:|---:|---:|']
+    for label,key in [('所有沙箱访问驻留页并集','global_accessed_resident_union_bytes'),
+                      ('各模板两侧共同访问驻留页再做全局并集','global_same_template_shared_accessed_resident_bytes'),
+                      ('沙箱引用合计减全局并集（副本比较模型）','reference_union_avoided_bytes')]:
+        values=[s[key] for s in result['global_access_cache_sweeps'] if key in s]
+        cells=[f'{value/1024**2:.3f}' for value in (min(values),max(values),values[-1])] if values else ['NA']*3
+        lines.append('|'+label+'|'+'|'.join(cells)+'|')
+    lines+=['','全局页集合按本节点dev/inode/page_index去重；最后一项是引用去重模型，不是UB净物理收益。每轮时间与数值保留在JSON。','']
     (work/'combined-summary.md').write_text('\n'.join(lines)+'\n'+DETAILS.markdown(result['rootfs_storage_details']),encoding='utf-8')
     return result
 
@@ -150,9 +160,9 @@ class FourRun:
         finally:
             with self.c.lock:self.ends[job['sandbox_id']]=time.monotonic_ns()
     def metrics(self):
-        before={self.c.jobs[i]['template_id']:self.phase([j['sandbox_id'] for j in self.c.jobs[i:i+2]]) for i in range(0,8,2)}
+        before={self.c.jobs[i]['template_id']:self.phase([j['sandbox_id'] for j in self.c.jobs[i:i+2]]) for i in range(0,self.c.max_guests,2)}
         began=time.time();r=self.rpc('sample');finished=time.time()
-        for i in range(0,8,2):
+        for i in range(0,self.c.max_guests,2):
             jobs=self.c.jobs[i:i+2];sids=[j['sandbox_id'] for j in jobs]
             phase=self.phase(sids);phase=phase if phase==before[jobs[0]['template_id']] else 'transition'
             frame={'run_id':self.c.run_id,'variant':'original_with_access_observer','mode':'continuous','node':'node-a',
@@ -163,7 +173,7 @@ class FourRun:
             with (self.c.work/'measurements/process.jsonl').open('a') as f:f.write(json.dumps(frame)+'\n')
         self.index+=1
     def cache(self):
-        before={self.c.jobs[i]['template_id']:self.phase([j['sandbox_id'] for j in self.c.jobs[i:i+2]]) for i in range(0,8,2)}
+        before={self.c.jobs[i]['template_id']:self.phase([j['sandbox_id'] for j in self.c.jobs[i:i+2]]) for i in range(0,self.c.max_guests,2)}
         observer=self.c.work/'observer';status=json.loads(ENGINE.H.read(observer/'trace.status.json',65536))
         ENGINE.need(status['pid']==self.observer_pid,'Observer process changed')
         ENGINE.need(0<=time.monotonic_ns()-status['mono_ns']<10*10**9,'Stale observer heartbeat')
@@ -173,14 +183,16 @@ class FourRun:
             sets,audit=ACCOUNTING.read_sets(stream,status,self.bindings,windows,self.files,PATCH_SHA,window_semantics='completion')
         ENGINE.need(audit['direct_lower_reads']==0,'Direct lower IO does not establish the selected buffered-cache metric')
         requested=set().union(*sets.values());resident,probe=ACCOUNTING.resident_accessed_pages(self.files,requested)
-        rows=[]
-        for i in range(0,8,2):
+        rows=[];global_common=set()
+        for i in range(0,self.c.max_guests,2):
             jobs=self.c.jobs[i:i+2];sids=[j['sandbox_id'] for j in jobs];tid=jobs[0]['template_id']
             phase=self.phase(sids);phase=phase if phase==before[tid] else 'transition'
             r=ACCOUNTING.pair_statistics(sets[sids[0]],sets[sids[1]],resident)
+            global_common.update(sets[sids[0]]&sets[sids[1]]&resident)
             r.update(template_id=tid,sandbox_ids=sids,phase=phase,
                 lower_layer_count=len(self.plan['template_lowers'][tid]),
                 lower_file_bytes=sum(f['file_bytes'] for f in self.plan['template_lowers'][tid]),
+                lower_page_span_bytes=sum((f['file_bytes']+4095)//4096*4096 for f in self.plan['template_lowers'][tid]),
                 sandbox_windows_monotonic_ns={sid:windows[sid] for sid in sids})
             upper=[]
             for sid in sids:
@@ -194,10 +206,13 @@ class FourRun:
             'templates':rows,'accessed_page_ranges':{sid:compact_ranges(s) for sid,s in sets.items()},
             'resident_page_ranges':compact_ranges(resident),
             'global_accessed_resident_union_bytes':len(requested&resident)*4096,
+            'global_same_template_shared_accessed_resident_bytes':len(global_common)*4096,
             'reference_union_avoided_bytes':(sum(len(s&resident) for s in sets.values())-len(requested&resident))*4096}
         path=self.c.work/'measurements/access-cache.jsonl'
-        ENGINE.need(not path.exists() or path.stat().st_size<1024**3,'Measurement output budget reached')
-        with path.open('a') as f:f.write(json.dumps(frame,separators=(',',':'))+'\n')
+        encoded=(json.dumps(frame,separators=(',',':'))+'\n').encode()
+        limit=(2 if self.c.max_guests>8 else 1)*1024**3
+        ENGINE.need((path.stat().st_size if path.exists() else 0)+len(encoded)<=limit,'Measurement output budget reached')
+        with path.open('ab') as f:f.write(encoded)
         self.cache_index+=1
         print('CACHE_SAMPLE='+str(self.cache_index)+' accessed_union_mib='+str(round(frame['global_accessed_resident_union_bytes']/1024**2,3)),flush=True)
     def run(self):
@@ -213,7 +228,7 @@ class FourRun:
         c.report['bindings']=self.bound;c.report['observer_identity']=r['observer_identity'];c.persist()
         # All Guests are ready before any replay window starts.
         time.sleep(2);self.start=time.monotonic_ns();c.report['replay_start_monotonic_ns']=self.start
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=c.max_guests) as pool:
             futures=[pool.submit(self.replay,j) for j in c.jobs];next_cache=time.monotonic()+2
             try:
                 while not all(f.done() for f in futures):
