@@ -31,3 +31,46 @@ configuration bytes, verify kernel queue limits for each owned device, and
 restore the originals after the unchanged four-template/eight-Guest experiment.
 Do not replace installed binaries or restart services manually from this build
 receipt.
+
+## Pinned four-template trial
+
+The returned target build succeeded. `../cow4_original_io64_once.py` now binds
+server SHA-256 `118fac40d567b07e236f6fcdff90bc8b8aa99bf2c1ae0e7998c7b608726d0517`
+and daemon SHA-256 `3d6af078dc4b4ce5ad8531cfb1cb91242745bbfd300757a3197cce45e64cb3d0`.
+It derives from the executed global-cache packet whose SHA-256 is
+`4dc486145378f945df9a285e9bee0fe7368c147a67699b3343ce47bc8200ceb1`.
+All ten prior embedded observation/lifecycle helper modules are unchanged.
+`make_trial.py` reproduces the packet from that exact prior packet; the new
+owner and literal-root additions are readable alongside it.
+
+Run as the ordinary experiment user with `run --quiet-window-confirmed
+--accept-nonzero-baseline`. Keep the owner terminal open and paste the printed
+literal root block into the same host's root terminal within 600 seconds.
+Do not run the downloaded Python file as root. No `done` input is used.
+`status` reads this trial's receipt; an existing receipt blocks an implicit retry.
+
+Only the original service is temporarily changed. The owner preserves a
+hardlink to the original executable and original configuration bytes. Root
+checks the current running executable inode and candidate hashes, atomically
+installs the candidate, then restarts the empty original service. Before replay,
+root binds all eight Guests to the original unit, local lower/upper identities,
+and actual block devices. Both kernel `max_hw_sectors_kb` and `max_sectors_kb`
+must be 64 for each rootfs and 256 for each memory device. Mismatch stops replay.
+
+The original workload and observation schedule are retained: four templates,
+eight Guests, continuous replay, 60-second idle control, exactly two host-wide
+sync plus `drop_caches=1` operations before idle/replay, one-second host/process
+sampling and nominal 15-second file-cache sampling. The quiet-window flag is
+an operator declaration, not an independent proof of absent background I/O.
+
+After owned Guests are released, root restores the exact original server inode
+and configuration bytes/metadata, restarts the original service, checks health,
+and verifies other service identities. Unknown binaries or remaining Guests
+are preserved for explicit recovery. The receipt does not claim complete
+acceptance without device checks, full sampling coverage and successful restore.
+Backups, the root plan, raw measurements, JSON and Markdown remain in the new
+report directory. The baseline `de320ed9ad9b4b8b9aa037ee9d4dcc8e` is preserved.
+
+Local `test_trial.py` exercises seven control cases, including real temporary
+file replacement and exact hardlink restoration. Linux UID/proc/systemd/socket
+behavior is simulated in these portable tests; the target trial is pending.
