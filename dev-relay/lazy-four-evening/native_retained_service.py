@@ -4,9 +4,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 ROOT=Path('/home/jwk/agent')
-COMMIT='1ad71de6711658ab5a4e130fceba4478c08ddf71'
-PINS={'aenv_ub_provider/__init__.py': 'd2874d88f7d86870ee8386ef2f7bad5e451b4fce5beef6c7b488998b0250665b', 'aenv_ub_provider/__main__.py': '1b29b9dcdcba2813c13dd0b616e5942c24aba97be245869ee145a04f47e5d9d9', 'aenv_ub_provider/bindings.py': 'f19930790b92ea061cbb547409348c759618f154adfccb4249023e3d8e7c8686', 'aenv_ub_provider/contract.py': '0c47efda619977b708fdb88f9195e49ea7b9bc45c9ec28de75e9173d3cfe8be9', 'aenv_ub_provider/io.py': '0a42d175d199e676819c02a1a8594af7e2946c0563f4e966ef902ce2e3f20956', 'aenv_ub_provider/lazy.py': '78936996bbf9b3a61950208da9e03c96fa1fa41517f7add66efb2c942a3c25ee', 'aenv_ub_provider/lazy_service.py': 'f4e87898430d6b51640cce171e6be672fe2530a03d72c7580e72f89285a7f0e3', 'aenv_ub_provider/raw.py': 'e8a95882197eec441a49ffb7cea11ab5b8d939c14c181f21cea1ae3a547684e7', 'aenv_ub_provider/retained.py': 'd200f07406802c1d99692a5bace6e5eaf26f179d7157983a4c83c898798d59f5', 'aenv_ub_provider/sdk.py': 'd7fe2d35aeedb2423cbed387c284a71b5336fe24a221b91aa9e7d30cac0189f3', 'aenv_ub_provider/service.py': '09710de1add9a3bdf732a6498ee5c078d0be1acb18c313fa27923a5b80d6d6c5', 'aenv_ub_provider/stored.py': 'dd2c001b2e87fe07e6be9db287221e0686845e90b8a14b11039baa7b3cd762a8'}
-ENTRY_SHA='fbf13746c88c0e606de9d0c1073de37128fa7df56d7359c2e1821e4ba7135aff'
+COMMIT='ba4a5c18f84acebe816ede7f49b9b020bc477986'
+PINS={'aenv_ub_provider/__init__.py': 'd2874d88f7d86870ee8386ef2f7bad5e451b4fce5beef6c7b488998b0250665b', 'aenv_ub_provider/__main__.py': '1b29b9dcdcba2813c13dd0b616e5942c24aba97be245869ee145a04f47e5d9d9', 'aenv_ub_provider/bindings.py': 'f19930790b92ea061cbb547409348c759618f154adfccb4249023e3d8e7c8686', 'aenv_ub_provider/contract.py': '0c47efda619977b708fdb88f9195e49ea7b9bc45c9ec28de75e9173d3cfe8be9', 'aenv_ub_provider/io.py': '0a42d175d199e676819c02a1a8594af7e2946c0563f4e966ef902ce2e3f20956', 'aenv_ub_provider/lazy.py': '78936996bbf9b3a61950208da9e03c96fa1fa41517f7add66efb2c942a3c25ee', 'aenv_ub_provider/lazy_service.py': 'f4e87898430d6b51640cce171e6be672fe2530a03d72c7580e72f89285a7f0e3', 'aenv_ub_provider/raw.py': 'e8a95882197eec441a49ffb7cea11ab5b8d939c14c181f21cea1ae3a547684e7', 'aenv_ub_provider/retained.py': '67091342a154c3f88d70991d47ea313f19932db50d8e6d45af8bd7cd6de081e0', 'aenv_ub_provider/sdk.py': 'd7fe2d35aeedb2423cbed387c284a71b5336fe24a221b91aa9e7d30cac0189f3', 'aenv_ub_provider/service.py': '6a9d57632efad648f993f1b00d751eafc2f273a0df7a92bf90b42654ec1a745f', 'aenv_ub_provider/stored.py': 'dd2c001b2e87fe07e6be9db287221e0686845e90b8a14b11039baa7b3cd762a8'}
+ENTRY_SHA='e1897eef4dd7012415933132cd445361b919a5c1b13bb4cee80579ba5d1d543a'
 GIB=1024**3
 
 def need(ok,message):
@@ -64,30 +64,62 @@ def coordination_mutex(name):
     finally:os.close(fd)
 
 def validate_request(value,node):
-    common={'version','scenario','installation','manifest','deviceRuntime','output','adapter','adapterSha256',
+    need(isinstance(value,dict),'Expected a native service request object')
+    is_set='snapshotSet' in value
+    common={'version','scenario','installation','snapshotSet' if is_set else 'manifest','deviceRuntime','output','adapter','adapterSha256',
             'region','logicalBudgetBytes','coverageBytes'}
-    expected=common|({'artifactRoot'} if node=='node-a' else {'publisherManifest','publisherManifestSha256'})
+    expected=common|((set() if is_set else {'artifactRoot'}) if node=='node-a' else {'publisherManifest','publisherManifestSha256'})
     need(isinstance(value,dict) and set(value)==expected and type(value['version']) is int and value['version']==1,'Unexpected native service request')
     need(value['scenario'] in ('single-a','dual-ab') and (node=='node-a' or value['scenario']=='dual-ab'),'Scenario/node differs')
     for key,cap in (('logicalBudgetBytes',16*GIB),('coverageBytes',18*GIB)):
         need(type(value[key]) is int and 0<value[key]<=cap,'Declared native budget exceeds this experiment scope')
     need(value['coverageBytes']>=value['logicalBudgetBytes'],'Coverage guard below logical budget')
-    for key in ('installation','manifest','deviceRuntime','output','adapter',*(['artifactRoot'] if node=='node-a' else ['publisherManifest'])):
+    role_paths=([] if is_set else ['artifactRoot']) if node=='node-a' else ['publisherManifest']
+    for key in ('installation','snapshotSet' if is_set else 'manifest','deviceRuntime','output','adapter',*role_paths):
         path=Path(value[key]);need(path.is_absolute() and path.is_relative_to(ROOT) and '..' not in path.parts,'Request path outside experiment workspace')
     output=Path(value['output'])
     need(not output.is_relative_to(Path(value['installation'])),'Provider output must not mutate the pinned source installation')
-    if node=='node-a':need(not output.is_relative_to(Path(value['artifactRoot'])),'Provider output must not mutate snapshot artifacts')
+    if node=='node-a' and not is_set:need(not output.is_relative_to(Path(value['artifactRoot'])),'Provider output must not mutate snapshot artifacts')
     for key in ('adapterSha256',*(['publisherManifestSha256'] if node=='node-b' else [])):
         need(isinstance(value[key],str) and re.fullmatch(r'sha256:[0-9a-f]{64}',value[key]),'Expected explicit file SHA256')
     need(isinstance(value['region'],str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,127}',value['region']),'Invalid existing region')
     return value
 
+def input_identity(value,node,destination=None):
+    """Pin reviewed metadata and keep every archive separate from new outputs.
+
+    Core rehashes the actual raw images before SDK publication. These pins bind
+    activation to the same selection, manifests and runtime reviewed in prepare.
+    """
+    files=[value['deviceRuntime']]
+    if node=='node-b':files.append(value['publisherManifest'])
+    if 'snapshotSet' in value:
+        files.append(value['snapshotSet']);selection=json.loads(owned(value['snapshotSet']))
+        need(isinstance(selection,dict) and set(selection)=={'version','snapshots'}
+             and type(selection['version']) is int and selection['version']==1
+             and isinstance(selection['snapshots'],list) and 1<=len(selection['snapshots'])<=32,'Invalid snapshot set')
+        items=selection['snapshots']
+    else:items=[{k:value[k] for k in (('manifest','artifactRoot') if node=='node-a' else ('manifest',))}]
+    expected={'manifest','artifactRoot'} if node=='node-a' else {'manifest'}
+    for item in items:
+        need(isinstance(item,dict) and set(item)==expected,'Invalid role-specific snapshot entry')
+        for name in item.values():
+            need(isinstance(name,str),'Expected explicit snapshot path')
+            path=Path(name);need(path.is_absolute() and path.is_relative_to(ROOT) and '..' not in path.parts,'Snapshot path outside experiment workspace')
+        files.append(item['manifest'])
+        if node=='node-a':
+            archive=Path(item['artifactRoot']);need(archive.resolve(strict=True)==archive and archive.is_dir(),'Redirected archive directory')
+            for new in (value['output'],*([destination] if destination is not None else [])):
+                need(not Path(new).is_relative_to(archive),'New output must not mutate a snapshot archive')
+    return {name:hashlib.sha256(owned(name)).hexdigest() for name in sorted(set(files))}
+
 def command_args(value,node):
     validate_request(value,node)
-    args=['publish-retained-snapshot' if node=='node-a' else 'import-retained-snapshot']
-    fields={'manifest':'manifest','device-runtime':'deviceRuntime','output':'output','adapter':'adapter',
+    is_set='snapshotSet' in value
+    args=[('publish-retained-' if node=='node-a' else 'import-retained-')+('set' if is_set else 'snapshot')]
+    fields={('snapshot-set' if is_set else 'manifest'):('snapshotSet' if is_set else 'manifest'),'device-runtime':'deviceRuntime','output':'output','adapter':'adapter',
             'adapter-sha256':'adapterSha256','region':'region','max-bytes':'logicalBudgetBytes','coverage-bytes':'coverageBytes'}
-    fields.update({'artifact-root':'artifactRoot'} if node=='node-a' else {
+    fields.update(({} if is_set else {'artifact-root':'artifactRoot'}) if node=='node-a' else {
         'publisher-manifest':'publisherManifest','publisher-manifest-sha256':'publisherManifestSha256'})
     for flag,key in fields.items():args+=['--'+flag,str(value[key])]
     if value['scenario']=='dual-ab':args+=['--reader','node-b-native-retained']
@@ -162,7 +194,7 @@ def prepare_locked(request_path,node,destination):
          and destination.parent.is_dir() and not destination.exists() and not destination.is_symlink(),'Use a fresh plan directory')
     need(not destination.is_relative_to(output) and not output.is_relative_to(destination)
          and not destination.is_relative_to(installation),'Plan and provider/source directories must be separate')
-    if node=='node-a':need(not destination.is_relative_to(Path(value['artifactRoot'])),'Plan must not mutate snapshot artifacts')
+    input_pins=input_identity(value,node,destination)
     args=command_args(value,node)
     destination.mkdir(mode=0o700)
     try:
@@ -172,6 +204,7 @@ def prepare_locked(request_path,node,destination):
         need(result.returncode==0 and len(result.stdout)<=65536,'Native source/budget validation failed; inspect preserved validation logs')
         validated=json.loads(result.stdout)
         need(validated.get('state')=='retained_generation_validated_no_sdk','Unexpected provider dry-run result')
+        need(input_identity(value,node,destination)==input_pins,'Native inputs changed during validation')
     except BaseException as error:
         if isinstance(error,subprocess.TimeoutExpired):
             with (destination/'validation-timeout.stdout').open('xb') as stream:stream.write(error.stdout or b'')
@@ -183,7 +216,7 @@ def prepare_locked(request_path,node,destination):
     with script.open('xb') as stream:stream.write(source)
     plan={'version':1,'node':node,'request':value,'unit':'jwk-native-retained-'+node+'-'+uuid.uuid4().hex[:12]+'.service',
           'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-          'scriptSha256':hashlib.sha256(source).hexdigest(),'dryRun':validated,'SDK_called':False,'servicesChanged':False}
+          'scriptSha256':hashlib.sha256(source).hexdigest(),'inputPins':input_pins,'dryRun':validated,'SDK_called':False,'servicesChanged':False}
     put(destination/'plan.json',plan)
     plan_sha=hashlib.sha256(owned(destination/'plan.json')).hexdigest()
     code="""import hashlib,os,socket,stat,sys
@@ -205,6 +238,7 @@ def load_plan(path,pin,node):
     plan=json.loads(raw)
     need(plan['version']==1 and plan['node']==node and plan['bootId']==Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'Plan node or boot changed')
     validate_request(plan['request'],node)
+    need(input_identity(plan['request'],node,Path(path).parent)==plan['inputPins'],'Reviewed native input metadata changed')
     need(hashlib.sha256(owned(Path(__file__),512*1024)).hexdigest()==plan['scriptSha256'],'Service wrapper changed')
     return plan
 
@@ -212,6 +246,7 @@ def serve(plan):
     ordinary(plan['node']);need(984 in os.getgroups(),'Scoped existing SDK IPC group missing')
     request=plan['request'];entry=verify_source(Path(request['installation']))
     with coordination_mutex('native-four-prepare.lock'),coordination_mutex('ub-layer-sdk-'+plan['node']+'.lock'):
+        need(input_identity(request,plan['node'])==plan['inputPins'],'Native inputs changed before SDK start')
         sys.argv=[str(Path(request['installation'])/'provider_entry.py'),*command_args(request,plan['node']),'--run']
         exec(compile(entry,sys.argv[0],'exec'),{'__name__':'__main__','__file__':sys.argv[0]})
 

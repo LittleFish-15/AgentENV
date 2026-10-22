@@ -1,6 +1,6 @@
 # 从native快照归档到全新UB代际
 
-固定核心1ad71de6711658ab5a4e130fceba4478c08ddf71。新增`publish-retained-snapshot`与`import-retained-snapshot`，将已归档的pmem基础镜像接到原有发布/导入/lease/退役实现。它们默认只读校验；显式`--run`才新建私有准备目录并运行前台provider。没有改变NC属性、SDK适配器、KVM或Guest RAM私有化能力。
+固定核心ba4a5c18f84acebe816ede7f49b9b020bc477986。新增`publish-retained-snapshot`与`import-retained-snapshot`，将已归档的pmem基础镜像接到原有发布/导入/lease/退役实现。它们默认只读校验；显式`--run`才新建私有准备目录并运行前台provider。没有改变NC属性、SDK适配器、KVM或Guest RAM私有化能力。
 
 ## 适用前提
 
@@ -10,7 +10,7 @@ Runtime仍使用本夜已固定的5e6621c源码，已含归档持久化/恢复�
 
 ## 安装与调用
 
-`native_retained_install.py`内嵌固定核心的provider Python源和63项单元测试，不含SDK二进制、私有镜像、业务轨迹或真实对象清单。直接运行默认只打印计划；普通Linux用户加`--directory <全新绝对路径> --install`才安装并执行模型测试。成功为`NATIVE_RETAINED_PROVIDER_INSTALLED_TESTED_NO_SDK`，保留`installation.json`与`tests.log`。不覆盖已有目录，不调用SDK，不创建Guest或修改服务。
+`native_retained_install.py`内嵌固定核心的provider Python源和68项单元测试，不含SDK二进制、私有镜像、业务轨迹或真实对象清单。直接运行默认只打印计划；普通Linux用户加`--directory <全新绝对路径> --install`才安装并执行模型测试。成功为`NATIVE_RETAINED_PROVIDER_INSTALLED_TESTED_NO_SDK`，保留`installation.json`与`tests.log`。不覆盖已有目录，不调用SDK，不创建Guest或修改服务。
 
 安装后的`provider_entry.py`每次先核验全部源文件SHA；`--help`列出命令。A发布者按核心README传入归档目录、native快照清单、设备运行时pins、现有SDK适配器及其SHA、已有region、明确logical/coverage预算和B的reader身份。默认校验不写文件；加`--run`后形成`binding.json`、`image-catalog.json`、`provider.json`、`preparation.json`，并在子目录`provider`启动新代际。前台不返回是正常服务状态，应保持进程；不是完成释放。
 
@@ -28,6 +28,16 @@ A服务进入serving后，协调者私下传递`provider/replicas.json`与其**�
 
 ## 已验证与未验证
 
-63项core Python检查通过，新增9项覆盖真实归档/配置文件、无副作用默认CLI、错误身份/损坏内容/预算拒绝、生命周期调用一次、失败保留、无释放回执不成功、importer不携带owner路径。安装包另有3项本地检查，实际解包后63测试及入口`--help`通过，篡改源码会拒绝启动。Linux路径/SDK调用使用模型或未执行，不是目标UB验收。
+68项core Python检查通过，其中9项覆盖真实归档/配置文件、无副作用默认CLI、错误身份/损坏内容/预算拒绝、生命周期调用一次、失败保留、无释放回执不成功、importer不携带owner路径。安装包另有3项本地检查，实际解包后68测试及入口`--help`通过，篡改源码会拒绝启动。Linux路径/SDK调用使用模型或未执行，不是目标UB验收。
 
 **仍未完成：** 四业务模板普通rootfs到native制品的完整准备与部署，native Guest冷启动/capture/并发Fork/跨节点restore的现场协调验收，分布式失联回收，以及memfile真正私有CoW。此交付补的是归档重发布和导入接口，不能覆盖这些剩余项。
+
+## 多模板共用一个代际
+
+新增 `publish-retained-set` 和 `import-retained-set`。使用 `--snapshot-set PRIVATE_SET_JSON` 代替单快照的 `--manifest` / `--artifact-root`。选集格式为 `{"version":1,"snapshots":[...]}`；A每项为 `{"manifest":"绝对路径","artifactRoot":"绝对路径"}`，B每项只有 `manifest`，所有路径仅在各自私有文件中填写。
+
+支持1至32个已归档native快照，最终仍受原有最多8个唯一raw对象限制。各模板按sourceImage保留层顺序和filesystem身份；相同sourceImage但不同内容或层顺序会拒绝。相同完整raw内容只发布一次，各模板绑定复用同一对象；不同raw镜像即使有相同文件，也不会自动做文件级去重。合计预算按唯一对象的4MiB对齐映射长度检查，不能把每模板分别合格当整个代际合格。
+
+输出的 `binding.json` 为 `catalogVersion:1` 多source目录，可用于支持该目录格式的Runtime。B要求发布清单恰好覆盖选集的内容并集，拒绝缺失、额外或重复内容/对象名；用内容身份重建各模板顺序，不依赖owner全局列表顺序。一个provider/socket/SDK代际承担整组模板，沿用全部lease及peer释放语义。
+
+新增5项集合检查包含四模板聚合、内容去重、反向发布顺序导入、source冲突、合计预算和非法发布集拒绝、默认不调用SDK。它们是本地文件/协议测试，仍未执行目标SDK或Guest。这只聚合已经存在的native归档；普通四模板快照仍需实际native准备、首次capture及完整业务控制器。
