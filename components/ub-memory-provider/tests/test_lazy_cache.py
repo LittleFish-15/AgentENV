@@ -237,6 +237,50 @@ class DemandCache(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             h.request('status')
 
+    def test_released_pin_checkpoint_is_conservative_until_next_grant(self):
+        h = Harness()
+        initial = len(h.records)
+        first = h.request('acquire', digest=h.key, block=0)
+        self.assertIn(first['lease'], h.records[-1]['pins'])
+        h.request('release', lease=first['lease'])
+        self.assertNotIn(first['lease'], h.cache.leases)
+        self.assertIn(first['lease'], h.records[-1]['pins'])
+        self.assertEqual(len(h.records), initial + 1)
+        second = h.request('acquire', reader='node-b', digest=h.key, block=0)
+        self.assertEqual(set(h.records[-1]['pins']), {second['lease']})
+        self.assertEqual(set(h.cache.leases), set(h.records[-1]['pins']))
+        self.assertEqual(h.calls, [(h.key, 0)])
+
+    def test_grants_remain_durable_and_retirement_flushes_released_pins(self):
+        h = Harness()
+        initial = len(h.records)
+        reader = h.reader()
+        for _ in range(10):
+            self.assertEqual(reader.read(h.key, 7, 11), h.payload[7:18])
+            self.assertFalse(h.cache.leases)
+            # Ten grants require ten commits, not a second commit per release.
+        self.assertEqual(len(h.records) - initial, 10)
+        reader.release()
+        h.reader('node-b').release()
+        h.cache.freeze()
+        self.assertEqual(h.records[-1]['pins'], {})
+        self.assertTrue(h.records[-1]['frozen'])
+        self.assertEqual(set(h.records[-1]['releasedReaders']), {'owner', 'node-b'})
+
+    def test_failed_next_checkpoint_does_not_grant_or_forget_unknown_pins(self):
+        h = Harness()
+        unknown = h.request('acquire', reader='node-b', digest=h.key, block=0)
+        known = h.request('acquire', digest=h.key, block=0)
+        h.request('release', lease=known['lease'])
+        h.cache.journal = lambda _: (_ for _ in ()).throw(OSError('checkpoint failed'))
+        with self.assertRaises(OSError):
+            h.request('acquire', digest=h.key, block=1)
+        self.assertIn(unknown['lease'], h.cache.leases)
+        self.assertIn(unknown['lease'], h.records[-1]['pins'])
+        self.assertTrue(h.cache.poisoned)
+        with self.assertRaises(RuntimeError):
+            h.cache.freeze()
+
     def test_invalid_ranges_and_fields_do_not_trigger_backend_io(self):
         h = Harness()
         for block in (-1, 100, True, '0'):

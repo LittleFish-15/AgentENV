@@ -203,7 +203,12 @@ class Cache:
                     raise ValueError('Unknown lease or wrong reader')
                 record = self.leases.pop(lease)
                 self.entries[(record['digest'], record['block'])].pins -= 1
-                self.save()
+                # Explicit release follows the reader's completed mapping read.
+                # The durable journal may conservatively retain this old pin
+                # until the next grant, reader release, or freeze checkpoints
+                # the complete live set. Every new grant is still persisted
+                # before it is sent. Crash recovery must not infer expiry from
+                # this stale superset, nor resume this exclusive generation.
                 self.condition.notify_all()
                 return {'state': 'released'}
             if operation == 'reader-release':

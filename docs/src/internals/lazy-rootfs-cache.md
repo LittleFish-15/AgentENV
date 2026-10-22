@@ -38,6 +38,13 @@ flowchart TD
 * A pin is journaled and fsynced before its grant is sent. A lost response,
   timeout or disconnected reader never implicitly unpins a slot. Unknown pins
   block retirement and can reduce usable capacity until operator reconciliation.
+  An authenticated explicit chunk release removes the live pin after its read
+  completes, but does not require a second journal commit. The durable journal
+  can retain a conservative superset of old pins until the next grant, reader
+  release, or freeze writes the full live set. New grants and final retirement
+  checkpoints remain durable before acknowledgment. This reduces per-chunk
+  journal writes; it adds no crash-resume or automatic stale-pin recovery and
+  does not establish a hardware performance gain.
 * Source reads use Linux `O_DIRECT` and an aligned temporary buffer, with no
   buffered fallback. This avoids adding source-file pagecache through these
   reads; filesystem/device support must be validated on the target. Tail chunks
