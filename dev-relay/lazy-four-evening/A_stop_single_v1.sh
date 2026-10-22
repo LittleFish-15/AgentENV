@@ -8,8 +8,8 @@ root=Path('/home/jwk/agent');assert root.resolve(strict=True)==root and root.sta
 folder=root/'lazy-single-v1';folder.mkdir(mode=0o700,exist_ok=True)
 assert folder.resolve(strict=True)==folder and folder.stat().st_uid==1204
 path=folder/'lazy_four_rollout.py'
-pin='a327066b805a96ddac1fdb6e6fb211df8c30b271afdb938f2e64016074910a1a'
-blob='b01a689ac465ed2062efbc3097e4d3a8eb1cd56f'
+pin='edb9aaaa3dcc35670f6884cab7bdd058c5c256fae1edaa105566994f771ddd43'
+blob='d98445122736a70ded8e4d5a72d948925e826609'
 assert not path.is_symlink()
 if path.exists():
     meta=path.stat();assert stat.S_ISREG(meta.st_mode) and meta.st_uid==1204 and meta.st_size<=8*1024**2
@@ -27,7 +27,7 @@ else:
             assert len(payload)<=12*1024**2
             item=json.loads(payload);assert item['sha']==blob and item['encoding']=='base64'
             data=base64.b64decode(''.join(item['content'].split()),validate=True)
-            assert len(data)==item['size']==5062100 and len(data)<=8*1024**2
+            assert len(data)==item['size']==5075040 and len(data)<=8*1024**2
             assert hashlib.sha256(data).hexdigest()==pin
             assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()==blob
             break

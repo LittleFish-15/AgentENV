@@ -4,7 +4,7 @@
 
 这是普通OverlayBD/ublk路径的rootfs缓存对照。Guest仍有私有文件缓存，memfile跨节点私有CoW未实现。本入口不验收native pmem/DAX，也不是ae9原版二进制对照。不会将两节点试验的A节点切片称为独立单节点数据。
 
-Runtime/daemon源固定为6ab53dd2e1f33cb63cbad63eb62a3388494e382c；provider Python固定为2f1550f826d858e9a230cd28a8386c2028ab225b，并发准入显式4。两者间Rust/SDK未改。复用同一成功构建、现有镜像/快照/adapter/catalog；只有此前没有成功构建时才构建server/daemon。没有重复编译FC、下载业务镜像或改变原安装。
+Runtime/daemon源固定为5e6621c9c9d2e347959a61a46c7f6d99688eeb55；provider Python固定为2f1550f826d858e9a230cd28a8386c2028ab225b，并发准入显式4。Runtime新增在途读取确认和pmem归档发布修复，provider字节仍固定2f，SDK适配器不变。构建复用仅限同源builds/content-observer-release-v2，保留旧v1产物。复用同一成功构建、现有镜像/快照/adapter/catalog；只有此前没有成功构建时才构建server/daemon。没有重复编译FC、下载业务镜像或改变原安装。
 
 ## 现场步骤
 
@@ -19,7 +19,7 @@ Runtime/daemon源固定为6ab53dd2e1f33cb63cbad63eb62a3388494e382c；provider Py
 
 统一目录`/home/jwk/agent/r/lazy-single-v1`：`comparison/comparison.json`与`comparison.md`、`return.json`、`cleanup.json`、阶段日志。失败轮尽量生成`partial-comparison`。原始逐命令、样本、生命周期日志保留在部署目录的`four-cohort-single-v1/off`和`lazy`。
 
-报告包含实际任务结果/耗时、实际Guest RAM VMA与整FC、私有upper、Host、provider/cgroup、唯一UB池计数，以及每模板两Guest已观察读取前缀与完成时驻留集合的交并。完整lower驻留与实际观察到的访问集合分别列示。尚无终止排空证明，穷尽访问字段为NA；未知物理增量与净收益也为NA。UB预算模型不是实测净内存收益，缺失指标不写0。
+报告包含实际任务结果/耗时、实际Guest RAM VMA与整FC、私有upper、Host、provider/cgroup、唯一UB池计数，以及每模板两Guest已观察读取前缀与完成时驻留集合的交并。完整lower驻留与实际观察到的访问集合分别列示。已接入观察器的读取在途完成证明单列，但仍不足以证明全部Guest访问覆盖，穷尽访问字段为NA；未知物理增量与净收益也为NA。UB预算模型不是实测净内存收益，缺失指标不写0。
 
 每模板交集不能相加当全局唯一字节；全局至少两Guest共同内容另算。RAM VMA属于整FC，PSS/cgroup/Host/UB映射也可能重叠，不能直接相加。独立单节点与两节点结果可分别报告，但不同节点总数、任务数和背景负载仍须注明，不能直接拿绝对缓存差当新增收益。off是相同修改版关闭UB；历史ae9原版数据仅作参考。
 
@@ -29,4 +29,4 @@ Runtime/daemon源固定为6ab53dd2e1f33cb63cbad63eb62a3388494e382c；provider Py
 
 若root监督通道提前关闭，或SDK/Guest结果仍未知，入口保留回执并拒绝声称清理完成；本版仅支持RECOVERY-ENTRY.md列明的已确认状态接管；未知服务或Guest结果仍需根据证据处理，不能直接重复run-a。成功收尾只停止本试验新服务并释放本试验新UB对象；保留二进制、快照、源码、日志和报告，无需回拷旧安装文件。
 
-本地12项单节点检查及全体127项交付回归通过，覆盖实际入口流程模型、owner-only清单、固定帮助模块、版本路径、失败收尾、逐命令比较、集合去重/错误窗口NA及默认plan不动作。Linux/systemd/SDK/KVM/真实Guest尚未执行，不保证现场通过、提速或正收益。
+本地12项单节点检查及全体131项交付回归通过，覆盖实际入口流程模型、owner-only清单、固定帮助模块、版本路径、失败收尾、逐命令比较、集合去重/错误窗口NA及默认plan不动作。Linux/systemd/SDK/KVM/真实Guest尚未执行，不保证现场通过、提速或正收益。

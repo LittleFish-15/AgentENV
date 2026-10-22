@@ -18,8 +18,8 @@ import types
 ROOT=Path('/home/jwk/agent')
 D=ROOT/'deployments/agentenv-lazy-four-32ce41c'
 OLD_PREPARE_PIN='5015655787a4600fdd83c3b6db4fa47a417be6be36dd6dad920c23e68351d7f6'
-CANDIDATE_PIN='1bbd5df3e3133896a226aa6bd0aac76895efe6356ec42ea2c94d33ed9ad6c875'
-CANDIDATE_CORE='6ab53dd2e1f33cb63cbad63eb62a3388494e382c'
+CANDIDATE_PIN='4ac47d87a8b865a5fe68f072c2cde058bf6dc2c14c0f222f045e592718d7618d'
+CANDIDATE_CORE='5e6621c9c9d2e347959a61a46c7f6d99688eeb55'
 CORE='32ce41c0ac6436198860f888e07ef9793e58dc40'
 
 def need(ok,reason):
@@ -41,7 +41,7 @@ def validate_build(report):
          and report.get('SDK_called') is False and report.get('Guest_created') is False
          and report.get('servicesChanged') is False,'Candidate build identity or completion differs')
     required={'native-archive-file-lifecycle-tests','provider-protocol-and-archive-tests',
-              'content-observer-source-tests','build-content-observer-binaries'}
+              'content-observer-source-tests','native-posix-archive-publication-tests','build-content-observer-binaries'}
     need(set(report.get('phases',{}))==required and all(v.get('exitCode')==0 for v in report['phases'].values()),'Candidate build/test phases incomplete')
     need(set(report.get('artifacts',{}))=={'server','uvm-ublk-daemon'},'Unexpected candidate artifact set')
     need(report.get('observerSourceSha256')==report['release'].get('observerSourceSha256')

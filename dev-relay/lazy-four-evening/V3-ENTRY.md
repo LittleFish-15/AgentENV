@@ -1,6 +1,6 @@
 # 四模板两节点 v3：统一构建、部署、对照、采集与收尾
 
-核心源码版本：`2f1550f826d858e9a230cd28a8386c2028ab225b`。协调发布使用Runtime/daemon编译源`6ab53dd2e1f33cb63cbad63eb62a3388494e382c`与提供者Python源`2f1550f`；两者之间Rust和SDK适配器未改，已有构建可以复用。入口包含20个按SHA固定的帮助模块和离线源包。已完成代码接合与本地127项检查；尚未在目标节点执行新版本构建、部署、SDK或Guest验收，不保证通过或正收益。
+核心源码版本：`5e6621c9c9d2e347959a61a46c7f6d99688eeb55`。协调发布使用Runtime/daemon编译源`5e6621c9c9d2e347959a61a46c7f6d99688eeb55`与提供者Python源`2f1550f`；本版Runtime包含读取在途计数和pmem POSIX持久化修复，provider Python字节仍与固定2f版本一致，SDK适配器继续复用。新的Runtime/daemon必须使用builds/content-observer-release-v2；只有同源成功构建才复用，旧v1构建保留。入口包含20个按SHA固定的帮助模块和离线源包。已完成代码接合与本地131项检查；尚未在目标节点执行新版本构建、部署、SDK或Guest验收，不保证通过或正收益。
 
 ## 实际测试范围
 
@@ -22,7 +22,7 @@ A统一结果目录：`/home/jwk/agent/r/lazy-four-rollout-v3`。完整报告位
 
 报告保留实际Guest RAM VMA、整FC、upper、Host、provider、UB唯一池等原有分项；缺项NA，不相加重叠指标。新增完成屏障内的读取/驻留证据：逐sandbox读取范围、普通文件mincore有效内容范围、A的单一UB ready集合、每节点与跨节点逻辑交并及逐模板交集。两节点各自冻结任务读取集合，使用同一完成屏障，不能直接比较不同节点的monotonic数值。
 
-观察器日志按固定PID、构建标识、序号和状态计数校验。当前接受的是状态所确认的日志前缀，未取得终止排空确认，因此`fullAccessCoverageAccepted=false`；不得把已观察集合称为穷尽读取。未取得有效前缀/绑定/采样时明确NA，不用完整lower驻留替代实际访问交集。普通文件尾页的page bytes与有效内容bytes分开。观察日志cache和cohort进程开销保留，可能与Host/cgroup重叠，不能重复相加。
+观察器日志按固定PID、构建标识、序号和状态计数校验。当前接受的是状态所确认的日志前缀，新版状态提供已接入观察器读取的在途完成确认；采集最多等待10秒并核对前缀字节数，确认结果单列。但这不覆盖Guest文件缓存命中或所有未接入路径，因此`fullAccessCoverageAccepted=false`；不得把已观察集合称为穷尽读取。未取得有效前缀/绑定/采样时明确NA，不用完整lower驻留替代实际访问交集。普通文件尾页的page bytes与有效内容bytes分开。观察日志cache和cohort进程开销保留，可能与Host/cgroup重叠，不能重复相加。
 
 仅对自己的保留lower文件作既有scoped advice，不做全机drop_caches。清理后的非零驻留作为实测基线保留；不再要求绝对零，也不宣称严格冷态。完整任务/退出码匹配不等于背景隔离或性能因果验收。UB ready内容、SDK覆盖、逻辑池容量均不冒充物理增量，物理净收益仍NA。
 
@@ -39,3 +39,5 @@ A统一结果目录：`/home/jwk/agent/r/lazy-four-rollout-v3`。完整报告位
 回放准入核验隔离安装的installation.json及新server/daemon，CLI仍复用旧已核验字节。新receipt明确runtimeSourceCommit；旧receipt和旧bin不参与新版server/daemon来源判定。实际cohort来源校验代码与stage产物联测通过，混入旧daemon或旧来源字段会被拒绝。
 
 新增受限的root监督恢复，操作见同提交RECOVERY-ENTRY.md。仅接管相同boot/script/scope且连续确认、无Guest/未决意图、当前服务身份一致的状态；只允许观察与收尾，不恢复新实验启动。无法确认的服务操作或SDK退役继续保留。监督器白名单显式包含本版observed_io.py，其他任意帮助文件仍拒绝。
+
+新版协调构建包含原始归档文件测试、provider协议测试、11项Linux观察器源码测试、POSIX native归档发布测试和server/daemon构建五个阶段，必须全部成功才stage。任务300/330秒不变；等待读取完成确认发生在任务结束、Guest仍保持的采集阶段，确认缺失保持前缀范围与NA，不伪造全部访问覆盖。
