@@ -368,7 +368,14 @@ class Compatibility(unittest.TestCase):
                 'region': 'default', 'maxCoverageBytes': 4194304, 'poolBytes': 4194304,
                 'sourceRoot': str(source.parent.resolve()), 'catalog': str(catalog_path),
                 'catalogSha256': lazy.digest(encoded), 'readers': ['node-b']}
+            for invalid in (0, 9, True):
+                config['maxConcurrentReads'] = invalid
+                config_path.write_text(json.dumps(config), encoding='utf-8')
+                with self.assertRaises(ValueError):
+                    lazy_service.load_config(config_path)
+            config['maxConcurrentReads'] = 4
             config_path.write_text(json.dumps(config), encoding='utf-8')
+            self.assertEqual(lazy_service.load_config(config_path)[0]['maxConcurrentReads'], 4)
             with patch.object(sys, 'argv', ['aenv-ub-lazy', 'serve', str(config_path)]), \
                     patch.object(lazy_service, 'serve') as serve, \
                     patch.object(lazy_service.sdk, 'NativeBackend') as sdk, \

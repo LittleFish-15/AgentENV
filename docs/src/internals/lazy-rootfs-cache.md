@@ -287,3 +287,31 @@ mincore count, full ready bytes, or aggregate provider read bytes for actual
 per-Guest intersections. Cross-node content overlap alone is not physical net
 saving: local Guest caches, private uppers, UB capacity and auxiliary costs still
 require separate non-overlapping accounts.
+
+## Bounded node-local read concurrency
+
+The optional provider setting `maxConcurrentReads` accepts integers 1 through 8
+and defaults to 1. It bounds entire broker reads, including metadata grant waits,
+mapping reads, hash verification and explicit release acknowledgement. Concurrent
+reads can overlap independent metadata round trips; each chunk retains its own
+pin until its synchronous mapping read finishes. Admission waits at most 30
+seconds and requests no grant when it times out. This does not change Guest task
+timeouts, the metadata wire format, pool capacity or chunk size.
+
+The reader's condition lock protects admission/state transitions without covering
+network or SDK IO. A lost grant/release reply still poisons that reader, wakes
+queued callers and rejects further grants. Other concurrent calls may retain
+conservative pins when the reader becomes uncertain; none are auto-released.
+The provider must explicitly quiesce the reader after stopping its broker and
+before either node unmaps SDK memory. Active reads refuse retirement, and a
+reader-release attempt is never implicitly repeated. Importers still acknowledge
+remote retirement only after their local mappings and SDK session are closed.
+
+Status records configured concurrency, active/peak whole-read calls and queued
+admission waits. These are read-pipeline counters, not proof of simultaneous SDK
+copies or measured throughput. The existing SDK adapter still serializes its
+bounded volatile NC copies under its mutex, and the Rust client still serializes
+each shared per-layer wire session. Therefore potential improvement mainly comes
+from overlapping metadata latency; hardware performance must be measured. The
+concurrency tests exercise actual Python threads, exact bytes and unknown-pin
+lifetimes with modeled mappings, not a UB performance benchmark.

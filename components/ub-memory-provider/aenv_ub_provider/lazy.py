@@ -397,21 +397,55 @@ def collect_residency(request):
 
 
 class Reader:
-    def __init__(self, value, mapping, slots, cache_id, reader, token, request):
+    def __init__(self, value, mapping, slots, cache_id, reader, token, request, max_concurrent_reads=1):
         self.layers = catalog(value)
         self.mapping, self.slots, self.cache_id = mapping, slots, cache_id
         self.reader, self.token, self.request = reader, token, request
-        self.failed = False
-        self.lock = threading.Lock()
+        if type(max_concurrent_reads) is not int or not 1 <= max_concurrent_reads <= 8:
+            raise ValueError('Reader concurrency must be an explicit integer in 1..8')
+        self.failed = self.closing = self.closed = self.retirement_attempted = False
+        self.max_concurrent_reads = max_concurrent_reads
+        self.active_reads = self.queued_waits = self.peak_active_reads = 0
+        self.lock = threading.Condition()
+
+    def poison(self):
+        with self.lock:
+            self.failed = True
+            self.lock.notify_all()
+
+    def status(self):
+        with self.lock:
+            return {'maxConcurrentReads': self.max_concurrent_reads, 'activeReads': self.active_reads,
+                    'queuedReadWaits': self.queued_waits, 'peakActiveReads': self.peak_active_reads,
+                    'readerClosing': self.closing,
+                    'readerFailed': self.failed}
+
+    def admit(self):
+        with self.lock:
+            if self.active_reads >= self.max_concurrent_reads:
+                self.queued_waits += 1
+            if not self.lock.wait_for(lambda: self.failed or self.closing
+                                      or self.active_reads < self.max_concurrent_reads, timeout=30):
+                raise RuntimeError('Reader concurrency admission exceeded 30 seconds; no grant requested')
+            if self.failed or self.closing:
+                raise RuntimeError('Reader admission closed or uncertain; no new grants')
+            self.active_reads += 1
+            self.peak_active_reads = max(self.peak_active_reads, self.active_reads)
+
+    def depart(self):
+        with self.lock:
+            self.active_reads -= 1
+            self.lock.notify_all()
 
     def rpc(self, operation, **fields):
-        if self.failed:
-            raise RuntimeError('Reader has an uncertain operation; no implicit reconnect/retry')
+        with self.lock:
+            if self.failed:
+                raise RuntimeError('Reader has an uncertain operation; no implicit reconnect/retry')
         try:
             return self.request(dict(operation=operation, reader=self.reader, token=self.token,
                                      cacheId=self.cache_id, **fields))
         except BaseException:
-            self.failed = True
+            self.poison()
             raise
 
     def observe(self, operation, **fields):
@@ -425,7 +459,8 @@ class Reader:
                 or offset < 0 or not 0 < count <= stored.CHUNK
                 or offset + count > self.layers[key]['fileBytes']):
             raise ValueError('Invalid bounded layer read')
-        with self.lock:
+        self.admit()
+        try:
             result = bytearray()
             while len(result) < count:
                 at = offset + len(result)
@@ -438,7 +473,7 @@ class Reader:
                         != (self.cache_id, key, block, size, self.layers[key]['chunks'][block])
                         or type(grant['slot']) is not int or not 0 <= grant['slot'] < self.slots
                         or not isinstance(grant['lease'], str) or re.fullmatch(r'[0-9a-f]{64}', grant['lease']) is None):
-                    self.failed = True
+                    self.poison()
                     raise ValueError('Invalid/stale chunk grant; possible pin preserved')
                 try:
                     data = self.mapping.read(grant['slot'] * CHUNK, size)
@@ -450,15 +485,31 @@ class Reader:
                     # Synchronous mapping.read has finished even if it failed.
                     reply = self.rpc('release', lease=grant['lease'])
                     if reply != {'state': 'released'}:
-                        self.failed = True
+                        self.poison()
                         raise ValueError('Unconfirmed chunk release')
             return bytes(result)
+        finally:
+            self.depart()
+
+    def quiesce(self):
+        """Close read admission before an SDK mapping may be unmapped."""
+        with self.lock:
+            if self.active_reads:
+                raise RuntimeError('Active mapping reads remain; reader retirement refused')
+            self.closing = True
+            self.lock.notify_all()
 
     def release(self):
+        self.quiesce()
         with self.lock:
-            if self.rpc('reader-release') != {'state': 'reader-released'}:
-                self.failed = True
-                raise ValueError('Unconfirmed reader release')
+            if self.retirement_attempted:
+                raise RuntimeError('Reader retirement already begun; no implicit retry')
+            self.retirement_attempted = True
+        if self.rpc('reader-release') != {'state': 'reader-released'}:
+            self.poison()
+            raise ValueError('Unconfirmed reader release')
+        with self.lock:
+            self.closed = True
 
 
 class LayerView:

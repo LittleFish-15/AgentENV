@@ -77,7 +77,9 @@ def load_config(path):
     common = {'version', 'role', 'workDir', 'adapter', 'adapterSha256', 'region', 'maxCoverageBytes'}
     extra = {'catalog', 'catalogSha256', 'sourceRoot', 'poolBytes', 'readers'} if config.get('role') == 'publish' else {
         'manifest', 'credential', 'coordinationSocket'}
-    if (set(config) != common | extra or type(config['version']) is not int or config['version'] != 1
+    if (set(config) - {'maxConcurrentReads'} != common | extra
+            or type(config.get('maxConcurrentReads', 1)) is not int or not 1 <= config.get('maxConcurrentReads', 1) <= 8
+            or type(config['version']) is not int or config['version'] != 1
             or config['role'] not in ('publish', 'import') or not lazy.sha(config['adapterSha256'])
             or type(config['maxCoverageBytes']) is not int or not 0 < config['maxCoverageBytes'] < 2**63
             or not isinstance(config['region'], str) or not config['region'] or '\0' in config['region']
@@ -131,7 +133,8 @@ def serve(config, value, manifest, credential):
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     state = {'state': 'intent_before_sdk', 'mode': 'stored-lazy', 'role': config['role'],
              'cacheId': manifest['cacheId'], 'pool': manifest['pool'],
-             'physicalIncrementMeasured': False, 'daxDemandPagingAccepted': False}
+             'physicalIncrementMeasured': False, 'daxDemandPagingAccepted': False,
+             'maxConcurrentReads': config.get('maxConcurrentReads', 1)}
     def journal(update):
         state.update(update)
         atomic_json(work / 'owner.json', state)
@@ -160,7 +163,7 @@ def serve(config, value, manifest, credential):
             coordinator = lazy.Cache(manifest['catalog'], mapping, slots, sources.read,
                                      manifest['cacheId'], tokens, journal)
             reader = lazy.Reader(manifest['catalog'], mapping, slots, manifest['cacheId'],
-                                 'owner', tokens['owner'], coordinator.request)
+                                 'owner', tokens['owner'], coordinator.request, config.get('maxConcurrentReads', 1))
             if reader.rpc('open-reader') != {'state': 'reader-opened'}:
                 raise ValueError('Owner reader admission was not confirmed')
             metadata = lazy.MetadataServer(coordinator.request)
@@ -168,7 +171,7 @@ def serve(config, value, manifest, credential):
         else:
             reader = lazy.Reader(manifest['catalog'], None, slots, manifest['cacheId'],
                                  credential['reader'], credential['token'],
-                                 lambda request: lazy.connect(config['coordinationSocket'], request))
+                                 lambda request: lazy.connect(config['coordinationSocket'], request), config.get('maxConcurrentReads', 1))
             if reader.rpc('open-reader') != {'state': 'reader-opened'}:
                 raise ValueError('Importer admission was not confirmed')
             backend.initialize()
@@ -205,6 +208,7 @@ def serve(config, value, manifest, credential):
                         continue
                     if request == {'operation': 'status'}:
                         status = reader.rpc('status')
+                        status.update(reader.status())
                         with broker.condition:
                             status.update(nodeReadRequests=broker.reads, nodeReadBytes=broker.bytes)
                         service.control_reply(stream, status)
@@ -221,6 +225,7 @@ def serve(config, value, manifest, credential):
                     service.control_reply(stream, {'state': 'refused', 'reason': str(error)[:500]})
                     continue
                 broker.stop()
+                reader.quiesce()  # No active read may overlap either node unmapping.
                 if coordinator is not None:
                     reader.release()
                     coordinator.freeze()

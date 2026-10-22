@@ -16,7 +16,7 @@ from test_control_lifecycle import Control, Location, Stream
 
 class LazyLifecycle(unittest.TestCase):
     def exercise(self, streams, admission_error=None, unmap_error=None, release_error=None,
-                 role='import', peer_released=True, outstanding_pin=False):
+                 role='import', peer_released=True, outstanding_pin=False, active_read=False):
         events, journal = [], []
         control = Control(streams)
         mapping = types.SimpleNamespace(backing_coverage=4194304)
@@ -45,7 +45,9 @@ class LazyLifecycle(unittest.TestCase):
             initialize=lambda: events.append('initialize'), map=record_map,
             allocate=lambda pool: events.append('allocate'), deallocate=lambda pool: events.append('delete'),
             close_maps=close_maps, finalize=lambda: events.append('finalize'))
-        reader = types.SimpleNamespace(rpc=admit, release=release)
+        def quiesce():
+            if active_read:raise RuntimeError('Active mapping read remains')
+        reader = types.SimpleNamespace(rpc=admit, release=release, quiesce=quiesce, status=lambda: {'maxConcurrentReads':1, 'activeReads':0})
         broker = types.SimpleNamespace(condition=threading.Condition(), active=0, retiring=False,
             reads=7, bytes=100, start=lambda path: None, stop=lambda: events.append('stop-broker'))
         config = {'workDir': '/owned/new-lazy', 'role': role, 'adapter': '/owned/adapter.so',
@@ -107,11 +109,20 @@ class LazyLifecycle(unittest.TestCase):
         self.assertEqual(journal[-1]['state'], 'released')
         self.assertEqual(stream.replies, [{'state': 'released'}])
 
+    def test_active_reader_blocks_sdk_unmap_and_remote_release(self):
+        control = Stream({'operation': 'retire'})
+        events, journal, error = self.exercise([control], active_read=True)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertNotIn('unmap', events)
+        self.assertNotIn('finalize', events)
+        self.assertNotIn('release-reader', events)
+        self.assertEqual(journal[-1]['state'], 'unresolved_preserved')
+
     def test_status_includes_node_reads_and_does_not_release_any_resources(self):
         status, retire = Stream({'operation': 'status'}), Stream({'operation': 'retire'})
         events, journal, error = self.exercise([status, retire])
         self.assertIsNone(error)
-        self.assertEqual(status.replies, [{'state': 'serving', 'pins': 0, 'nodeReadRequests': 7, 'nodeReadBytes': 100}])
+        self.assertEqual(status.replies, [{'state': 'serving', 'pins': 0, 'nodeReadRequests': 7, 'nodeReadBytes': 100, 'maxConcurrentReads':1, 'activeReads':0}])
         self.assertLess(events.index('status'), events.index('stop-broker'))
 
     def test_failed_unmap_never_acknowledges_remote_release(self):
