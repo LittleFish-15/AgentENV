@@ -64,3 +64,6 @@ pub use snapshot::export_upper_as_snapshot_layer;
 
 // Re-export the compact_writer
 pub use storage_util::compact_writer;
+
+#[cfg(feature = "rootfs-read-trace")]
+pub mod rootfs_access_trace;

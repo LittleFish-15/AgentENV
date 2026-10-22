@@ -112,6 +112,8 @@ pub struct UbLayerFile {
     fallback: Option<Arc<File>>,
     fallback_active: Arc<AtomicBool>,
     size: u64,
+    #[cfg(feature = "rootfs-read-trace")]
+    digest: String,
 }
 
 impl UbLayerFile {
@@ -119,6 +121,8 @@ impl UbLayerFile {
         replica.validate()?;
         let replica = replica.clone();
         let size = replica.file_bytes;
+        #[cfg(feature = "rootfs-read-trace")]
+        let digest = replica.layer_digest.clone();
         let object = replica.object_name.clone();
         let fallback_replica = replica.clone();
         let fallback = if replica.allow_repository_fallback {
@@ -170,20 +174,21 @@ impl UbLayerFile {
             fallback,
             fallback_active: Arc::new(AtomicBool::new(degraded)),
             size,
+            #[cfg(feature = "rootfs-read-trace")]
+            digest,
         })
     }
 }
 
-#[async_trait]
-impl VirtualFile for UbLayerFile {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<Bytes> {
+impl UbLayerFile {
+    async fn read_range(&self, offset: u64, len: usize) -> Result<(Bytes, bool)> {
         let count = self.size.saturating_sub(offset).min(len as u64) as usize;
         ensure!(
             count <= MAX_READ,
             "UB layer read exceeds bounded allocation limit"
         );
         if count == 0 {
-            return Ok(Bytes::new());
+            return Ok((Bytes::new(), false));
         }
         let session = self.session.clone();
         let fallback = self.fallback.clone();
@@ -193,7 +198,7 @@ impl VirtualFile for UbLayerFile {
                 let result = session.as_ref().context("missing UB session")?.lock()
                     .map_err(|_| anyhow::anyhow!("UB session lock poisoned"))?.read_at(offset, count);
                 match result {
-                    Ok(bytes) => return Ok(Bytes::from(bytes)),
+                    Ok(bytes) => return Ok((Bytes::from(bytes), true)),
                     Err(error) if fallback.is_some() => {
                         if !fallback_active.swap(true, Ordering::AcqRel) {
                             tracing::warn!(%error, resolved_source = "repository", "UB read failed; rereading full range from verified durable source");
@@ -205,10 +210,46 @@ impl VirtualFile for UbLayerFile {
             let mut bytes = vec![0; count];
             fallback.as_ref().context("missing verified UB fallback")?
                 .read_exact_at(&mut bytes, offset).context("read entire durable fallback range")?;
-            Ok(Bytes::from(bytes))
+            Ok((Bytes::from(bytes), false))
         })
         .await
         .context("join UB layer read")?
+    }
+}
+
+#[async_trait]
+impl VirtualFile for UbLayerFile {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<Bytes> {
+        self.read_range(offset, len).await.map(|(bytes, _)| bytes)
+    }
+
+    #[cfg(feature = "io-uring")]
+    fn read_at_with_ctx<'a>(
+        &'a self,
+        ctx: crate::io::virtual_file::IoCtx<'a>,
+        offset: u64,
+        len: usize,
+    ) -> crate::io::virtual_file::LocalBoxFuture<'a, Result<Bytes>> {
+        Box::pin(async move {
+            #[cfg(feature = "rootfs-read-trace")]
+            let started = crate::rootfs_access_trace::now_ns();
+            let result = self.read_range(offset, len).await;
+            #[cfg(feature = "rootfs-read-trace")]
+            if let (Some(source), Ok((data, from_ub))) = (ctx.read_source(), &result) {
+                crate::rootfs_access_trace::record_content(
+                    source,
+                    &self.digest,
+                    self.size,
+                    offset,
+                    data.len(),
+                    *from_ub,
+                    started,
+                );
+            }
+            #[cfg(not(feature = "rootfs-read-trace"))]
+            let _ = ctx;
+            result.map(|(bytes, _)| bytes)
+        })
     }
 
     async fn write_at(&self, _offset: u64, _data: &[u8]) -> Result<usize> {

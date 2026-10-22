@@ -244,3 +244,43 @@ cleanup ordering, and the unchanged binary read protocol. SDK and resource
 lifecycle tests use explicit models; UNIX path/credential checks are modeled
 where required on Windows. They are not Linux direct-I/O, UB SDK, KVM/DAX,
 two-node or performance acceptance.
+
+## Optional content access and ready-set observation
+
+The `overlaybd/rootfs-read-trace` build feature propagates the rootfs image-config
+identity through ublk IO context. Local file reads retain their inode attribution;
+UB reads emit successful stored-content ranges with digest, length, source image
+config, monotonic start/end and actual UB-versus-repository source. The observer
+records no payload. It is disabled by default and does not change read results.
+These are underlying stored-layer reads, including format/decompression reads;
+they are not exact Guest application demand bytes or measured hardware IO.
+
+An opt-in observer executable reads its adjacent `.access-spec` file. The spec
+uses `output=`, `max_bytes=`, `max_records=`, `allow=dev:inode:file_bytes`, and
+`allow_content=sha256:hex:file_bytes`. Its private owned output directory must
+exist and output/status files must be new. Version 2 trace headers include both
+allowlist counts. Sequence/error/drop/unsupported-context status makes incomplete
+coverage visible. A missing observer, absent source binding or stale/incomplete
+status means unknown coverage, never a measured zero. Logging can add latency
+and Host file cache; account for observer files and compare equally instrumented
+binaries when measuring overhead.
+
+`lazy_service residency WORK_DIR` fetches one bounded, immutable diagnostic
+copy of the owner's ready content ranges. It uses the existing authenticated
+metadata channel and 4KiB wire limit, with at most 16 rows per page. A row is
+`[digest, stored_offset, valid_bytes, slot]`. The header carries cache generation,
+owner monotonic/wall time, ready bytes and pool capacity. The diagnostic copy
+expires after 60 seconds or is replaced by a newer request; this never expires
+a reader lease or permits slot reuse. Paging a superseded copy fails explicitly.
+Diagnostic transport errors do not mark data-plane reader leases uncertain.
+
+The snapshot identifies content valid in the already allocated UB pool; it is
+not a measurement of physical allocation increment or device residency. Form
+each Guest's completed-read page set, intersect it with the same observation
+window's valid content set, then compute unions/intersections by content identity.
+Do not compare monotonic timestamps across nodes without a coordinated window
+or calibrated clock relationship. Do not substitute a local lower file's zero
+mincore count, full ready bytes, or aggregate provider read bytes for actual
+per-Guest intersections. Cross-node content overlap alone is not physical net
+saving: local Guest caches, private uppers, UB capacity and auxiliary costs still
+require separate non-overlapping accounts.

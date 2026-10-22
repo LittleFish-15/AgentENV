@@ -198,6 +198,11 @@ def serve(config, value, manifest, credential):
                 try:
                     contract.same_uid(stream)
                     request = contract.receive_json(stream)
+                    if isinstance(request, dict) and request.get('operation') in ('residency-open', 'residency-page', 'residency-close'):
+                        fields = dict(request)
+                        operation = fields.pop('operation')
+                        service.control_reply(stream, reader.observe(operation, **fields))
+                        continue
                     if request == {'operation': 'status'}:
                         status = reader.rpc('status')
                         with broker.condition:
@@ -255,7 +260,7 @@ def main():
     run = sub.add_parser('serve')
     run.add_argument('config')
     run.add_argument('--run', action='store_true')
-    for operation in ('status', 'retire'):
+    for operation in ('status', 'retire', 'residency'):
         command = sub.add_parser(operation)
         command.add_argument('work_dir')
     args = parser.parse_args()
@@ -269,13 +274,16 @@ def main():
         print(json.dumps({'state': 'offline_catalog_prepared_no_sdk', 'layers': len(value['layers']),
                           'catalogSha256': service.identity_bytes(output)}))
         return 0
-    if args.command in ('status', 'retire'):
+    if args.command in ('status', 'retire', 'residency'):
         service.ordinary_linux()
         work = Path(args.work_dir)
         meta = work.stat()
         if not work.is_absolute() or meta.st_uid != os.geteuid() or meta.st_mode & 0o077:
             raise ValueError('Control requires an owned private generation directory')
-        reply = lazy.connect(work / 'control.sock', {'operation': args.command})
+        if args.command == 'residency':
+            reply = lazy.collect_residency(lambda request: lazy.connect(work / 'control.sock', request))
+        else:
+            reply = lazy.connect(work / 'control.sock', {'operation': args.command})
         print(json.dumps(reply))
         return 1 if reply.get('state') == 'refused' else 0
     config, value, manifest, credential = load_config(args.config)

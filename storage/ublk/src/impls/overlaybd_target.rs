@@ -372,7 +372,7 @@ impl UVMUblkTarget for OverlaybdTarget {
 
         tracing::debug!(qid, tag, ?op, offset, len, "handle overlaybd ublk request");
 
-        let ctx = IoCtx::new(io_ring);
+        let ctx = IoCtx::new(io_ring).with_read_source(&state.image_config_path);
         let result: Result<i32> = match op {
             UblkDescOperation::Read => self
                 .handle_read(&state, ctx, offset, len, buf)

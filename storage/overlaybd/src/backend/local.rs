@@ -624,7 +624,24 @@ impl VirtualFile for LocalFile {
         offset: u64,
         len: usize,
     ) -> LocalBoxFuture<'a, Result<Bytes>> {
-        Box::pin(self.inner.read_at_via(ctx.ring(), offset, len))
+        Box::pin(async move {
+            #[cfg(feature = "rootfs-read-trace")]
+            let started = crate::rootfs_access_trace::now_ns();
+            let result = self.inner.read_at_via(ctx.ring(), offset, len).await;
+            #[cfg(feature = "rootfs-read-trace")]
+            if let (Some(source), Ok(data)) = (ctx.read_source(), &result) {
+                crate::rootfs_access_trace::record(
+                    source,
+                    &self.inner.file,
+                    &self.inner.path,
+                    offset,
+                    data.len(),
+                    self.inner.direct_io,
+                    started,
+                );
+            }
+            result
+        })
     }
 
     #[cfg(feature = "io-uring")]
@@ -634,7 +651,24 @@ impl VirtualFile for LocalFile {
         offset: u64,
         dst: &'a mut [u8],
     ) -> LocalBoxFuture<'a, Result<usize>> {
-        Box::pin(self.inner.read_at_into_via(ctx.ring(), offset, dst))
+        Box::pin(async move {
+            #[cfg(feature = "rootfs-read-trace")]
+            let started = crate::rootfs_access_trace::now_ns();
+            let result = self.inner.read_at_into_via(ctx.ring(), offset, dst).await;
+            #[cfg(feature = "rootfs-read-trace")]
+            if let (Some(source), Ok(data)) = (ctx.read_source(), &result) {
+                crate::rootfs_access_trace::record(
+                    source,
+                    &self.inner.file,
+                    &self.inner.path,
+                    offset,
+                    *data,
+                    self.inner.direct_io,
+                    started,
+                );
+            }
+            result
+        })
     }
 
     #[cfg(feature = "io-uring")]

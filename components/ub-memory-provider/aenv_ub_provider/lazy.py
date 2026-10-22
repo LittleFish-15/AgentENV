@@ -153,6 +153,7 @@ class Cache:
         self.cache_id, self.tokens, self.journal = cache_id, dict(tokens), journal
         self.condition = threading.Condition()
         self.entries, self.leases, self.released, self.opened = {}, {}, set(), set()
+        self.observation = None
         self.clock = self.loading = 0
         self.frozen = self.poisoned = False
         self.stats = {'hits': 0, 'misses': 0, 'waits': 0, 'evictions': 0,
@@ -183,7 +184,9 @@ class Cache:
         base = {'operation', 'reader', 'token', 'cacheId'}
         operation = request['operation']
         expected = base | ({'digest', 'block'} if operation == 'acquire' else
-                           {'lease'} if operation == 'release' else set())
+                           {'lease'} if operation == 'release' else
+                           {'snapshot', 'offset'} if operation == 'residency-page' else
+                           {'snapshot'} if operation == 'residency-close' else set())
         if set(request) != expected:
             raise ValueError('Unexpected lazy metadata fields')
         if operation == 'acquire':
@@ -219,6 +222,34 @@ class Cache:
                 self.released.add(reader)
                 self.save()
                 return {'state': 'reader-released'}
+            if operation == 'residency-open':
+                # One bounded diagnostic image, independent of reader leases.
+                # Taking or expiring it never pins, evicts or loads payload.
+                rows = tuple((key[0], key[1] * CHUNK, self.length(key), entry.slot)
+                             for key, entry in sorted(self.entries.items()) if entry.state == 'ready')
+                snapshot = uuid.uuid4().hex
+                captured = time.monotonic_ns()
+                self.observation = (snapshot, reader, captured, rows)
+                return {'state': 'residency-snapshot', 'snapshot': snapshot, 'cacheId': self.cache_id,
+                        'ownerMonotonicNs': captured, 'ownerUnixNs': time.time_ns(),
+                        'entries': len(rows), 'readyBytes': sum(row[2] for row in rows),
+                        'poolBytes': self.slots * CHUNK, 'chunkBytes': CHUNK,
+                        'scope': 'logical-ready-content-not-physical-increment'}
+            if operation in ('residency-page', 'residency-close'):
+                observation = self.observation
+                if (observation is None or observation[:2] != (request['snapshot'], reader)
+                        or time.monotonic_ns() - observation[2] > 60 * 10**9):
+                    raise ValueError('Diagnostic snapshot absent, superseded or expired; no payload state changed')
+                if operation == 'residency-close':
+                    self.observation = None
+                    return {'state': 'residency-closed'}
+                offset = request['offset']
+                rows = observation[3]
+                if type(offset) is not int or not 0 <= offset <= len(rows):
+                    raise ValueError('Invalid diagnostic page offset')
+                end = min(offset + 16, len(rows))
+                return {'state': 'residency-page', 'snapshot': observation[0],
+                        'offset': offset, 'next': end, 'entries': rows[offset:end], 'done': end == len(rows)}
             if operation == 'status':
                 return {'state': 'frozen' if self.frozen else 'serving', **self.stats,
                         'pins': len(self.leases), 'loading': self.loading,
@@ -316,6 +347,55 @@ class Cache:
             self.save()
 
 
+def collect_residency(request):
+    """Read one immutable logical-ready snapshot using bounded metadata pages.
+
+    Owner monotonic time belongs to the owner node, not the importing node.
+    This is cache content occupancy, not device physical allocation accounting.
+    """
+    header = request({'operation': 'residency-open'})
+    if (not isinstance(header, dict) or header.get('state') != 'residency-snapshot'
+            or not isinstance(header.get('snapshot'), str)
+            or re.fullmatch(r'[0-9a-f]{32}', header['snapshot']) is None
+            or type(header.get('entries')) is not int or not 0 <= header['entries'] <= 65536
+            or type(header.get('poolBytes')) is not int or header['poolBytes'] % CHUNK
+            or not 4 * CHUNK <= header['poolBytes'] <= 65536 * CHUNK
+            or header.get('chunkBytes') != CHUNK
+            or type(header.get('readyBytes')) is not int or not 0 <= header['readyBytes'] <= header['poolBytes']
+            or type(header.get('ownerMonotonicNs')) is not int or header['ownerMonotonicNs'] <= 0
+            or type(header.get('ownerUnixNs')) is not int or header['ownerUnixNs'] <= 0
+            or not isinstance(header.get('cacheId'), str)
+            or re.fullmatch(r'[0-9a-f]{32}', header['cacheId']) is None
+            or header.get('scope') != 'logical-ready-content-not-physical-increment'):
+        raise ValueError('Invalid diagnostic residency header')
+    rows, seen, slots = [], set(), set()
+    try:
+        while len(rows) < header['entries']:
+            offset = len(rows)
+            page = request({'operation': 'residency-page', 'snapshot': header['snapshot'], 'offset': offset})
+            end = min(offset + 16, header['entries'])
+            if (not isinstance(page, dict) or page.get('state') != 'residency-page'
+                    or page.get('snapshot') != header['snapshot'] or type(page.get('offset')) is not int
+                    or page['offset'] != offset or type(page.get('next')) is not int or page['next'] != end
+                    or page.get('done') is not (end == header['entries'])
+                    or not isinstance(page.get('entries'), (list, tuple)) or len(page['entries']) != end - offset):
+                raise ValueError('Incomplete or mismatched residency page')
+            for row in page['entries']:
+                if (not isinstance(row, (list, tuple)) or len(row) != 4 or not sha(row[0])
+                        or type(row[1]) is not int or row[1] < 0 or row[1] % CHUNK
+                        or type(row[2]) is not int or not 0 < row[2] <= CHUNK
+                        or type(row[3]) is not int or not 0 <= row[3] < header['poolBytes'] // CHUNK
+                        or (row[0], row[1]) in seen or row[3] in slots):
+                    raise ValueError('Invalid, duplicated or aliased ready content range')
+                seen.add((row[0], row[1]));slots.add(row[3]);rows.append(list(row))
+        if sum(row[2] for row in rows) != header['readyBytes']:
+            raise ValueError('Residency content byte accounting differs')
+        return dict(header, ranges=rows)
+    finally:
+        # Only a diagnostic copy is discarded; this never releases read pins.
+        request({'operation': 'residency-close', 'snapshot': header['snapshot']})
+
+
 class Reader:
     def __init__(self, value, mapping, slots, cache_id, reader, token, request):
         self.layers = catalog(value)
@@ -333,6 +413,12 @@ class Reader:
         except BaseException:
             self.failed = True
             raise
+
+    def observe(self, operation, **fields):
+        if operation not in ('residency-open', 'residency-page', 'residency-close'):
+            raise ValueError('Not a diagnostic operation')
+        return self.request(dict(operation=operation, reader=self.reader, token=self.token,
+                                 cacheId=self.cache_id, **fields))
 
     def read(self, key, offset, count):
         if (key not in self.layers or type(offset) is not int or type(count) is not int

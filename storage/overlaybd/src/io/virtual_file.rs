@@ -32,12 +32,38 @@ pub type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 #[derive(Clone, Copy)]
 pub struct IoCtx<'a> {
     ring: &'a AsyncIoRing,
+    #[cfg(feature = "rootfs-read-trace")]
+    source: Option<&'a std::path::Path>,
 }
 
 #[cfg(feature = "io-uring")]
 impl<'a> IoCtx<'a> {
     pub fn new(ring: &'a AsyncIoRing) -> Self {
-        Self { ring }
+        Self {
+            ring,
+            #[cfg(feature = "rootfs-read-trace")]
+            source: None,
+        }
+    }
+
+    pub fn with_read_source(self, source: &'a std::path::Path) -> Self {
+        #[cfg(feature = "rootfs-read-trace")]
+        {
+            Self {
+                source: Some(source),
+                ..self
+            }
+        }
+        #[cfg(not(feature = "rootfs-read-trace"))]
+        {
+            let _ = source;
+            self
+        }
+    }
+
+    #[cfg(feature = "rootfs-read-trace")]
+    pub fn read_source(&self) -> Option<&'a std::path::Path> {
+        self.source
     }
 
     pub fn ring(&self) -> &'a AsyncIoRing {
@@ -89,6 +115,10 @@ pub trait VirtualFile: Send + Sync {
         offset: u64,
         len: usize,
     ) -> LocalBoxFuture<'a, Result<Bytes>> {
+        #[cfg(feature = "rootfs-read-trace")]
+        if let Some(source) = _ctx.read_source() {
+            crate::rootfs_access_trace::fallback(source);
+        }
         Box::pin(self.read_at(offset, len))
     }
 
