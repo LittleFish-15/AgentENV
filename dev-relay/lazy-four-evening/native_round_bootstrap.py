@@ -2,7 +2,7 @@
 import argparse,base64,hashlib,json,os,socket,stat,sys,time,urllib.error,urllib.request,uuid
 from pathlib import Path
 
-RELEASE={'commit': 'ac9f248b9dcacac0b32948c53669de96b0de4964', 'sha256': '2ee6004d7be5621f2168903f7c2891d9e16395a38ff08cc266c8cd75e05e0aa6', 'bytes': 3670600, 'blob': 'a9a9226f25ecf0331086ab0a9cac7984a2c845cf'}
+RELEASE={'commit': '7f6b3ce0ed7758fd9459b6331b5fc793b22c4d18', 'sha256': 'c863211c869f45b547c884d5528548bbb5ef2e99077bf3b4b0abe20e90954846', 'bytes': 3675901, 'blob': 'afedb5fae77bbc01ce095a19b625f39e52a3efe8'}
 ROOT=Path('/home/jwk/agent')
 
 class OfficialOnly(urllib.request.HTTPRedirectHandler):
@@ -33,7 +33,7 @@ def download():
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--scenario',choices=('single-a','dual-ab'),required=True)
-    p.add_argument('--replica-mode',choices=('restore-pair','restore-fork'),default='restore-pair');p.add_argument('--run',action='store_true');a=p.parse_args()
+    p.add_argument('--replica-mode',choices=('restore-pair','restore-fork','restore-fork-parallel'),default='restore-pair');p.add_argument('--run',action='store_true');a=p.parse_args()
     need(sys.platform=='linux' and os.getuid()==os.geteuid()==1204 and socket.gethostname()=='server1','Use the ordinary A experiment user')
     need(ROOT.resolve(strict=True)==ROOT and ROOT.stat().st_uid==1204,'Experiment directory differs');os.umask(0o077)
     path=ROOT/'native_archive_round.py'

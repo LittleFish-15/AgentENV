@@ -60,7 +60,7 @@ UB按ownerId归组，owner覆盖只记录一次，保留各节点观察，不把
 
 ## 固定下载入口
 
-本次修正的固定下载版本见同目录bootstrap与发布回执；旧ac9入口保留在Git历史。
+主入口固定提交 `7f6b3ce0ed7758fd9459b6331b5fc793b22c4d18`，SHA256 `c863211c869f45b547c884d5528548bbb5ef2e99077bf3b4b0abe20e90954846`。使用同目录 [A单节点脚本](A_run_native_single.sh)、[A双节点脚本](A_run_native_dual.sh)；下载器为 [native_round_bootstrap.py](native_round_bootstrap.py)。旧ac9入口保留在Git历史，未新增实机验收。
 
 ## 完整性判定修正
 
