@@ -1,0 +1,109 @@
+"""Compose four bounded one-template journals without widening their ownership."""
+import copy
+import hashlib
+
+
+def need(ok, message):
+    if not ok:
+        raise RuntimeError(message)
+
+
+def empty_state(context):
+    return {'version': 1, 'phase': 'prepared', 'openRequests': [], 'sandboxIds': [],
+            'outcomeUncertain': False, 'runtimeContext': copy.deepcopy(context)}
+
+
+class FourLifecycle:
+    def __init__(self, engine, api, run_id, context, persist, capacity, snapshot, *, initial=None):
+        self.engine, self.api, self.run_id = engine, api, run_id
+        self.context, self.persist = context, persist
+        self.capacity, self.snapshot = capacity, snapshot
+        self.cases = {}
+        if initial is not None:
+            need(set(initial) <= {str(i) for i in range(4)}, 'Unexpected saved case scope')
+            for index, state in initial.items():
+                need(state.get('runtimeContext') == context, 'Saved Runtime context differs')
+                self.cases[int(index)] = engine.Cohort.recovery(api, state, self.writer(int(index)))
+
+    def writer(self, index):
+        return lambda state: self.persist(index, state)
+
+    def guard(self):
+        need(all(not case.state['openRequests'] for case in self.cases.values()),
+             'An uncertain request in any case blocks all new creations')
+
+    def begin_case(self, index):
+        self.guard()
+        need(index in range(4) and index not in self.cases, 'Repeated case initialization refused')
+        nonce = hashlib.sha256((self.run_id + ':' + str(index)).encode()).hexdigest()[:32]
+        case = self.engine.Cohort(self.api, empty_state(self.context), self.writer(index),
+            None, None, self.capacity, lambda sid: self.snapshot(index, sid), run_id=nonce,
+            mutation_guard=self.guard)
+        self.cases[index] = case
+        return case
+
+    def prepare_parents(self, images):
+        need(len(images) == 4 and not self.cases, 'Four fresh native parent cases required')
+        need(self.api.call('GET', '/v2/sandboxes?limit=1') == (200, []), 'New Runtime inventory must be empty')
+        templates = []
+        for index, image in enumerate(images):
+            case = self.begin_case(index)
+            resource = image['resources']
+            need(resource['memory_mib'] == 4096 and resource['cpu_count'] == 2, 'Reference resources differ')
+            sid = case.create('/sandboxes-cold', {'image': image['ociReference'], 'cpuCount': 2, 'memoryMB': 4096,
+                'secure': True, 'autoPause': False, 'allowInternetAccess': False, 'timeout': 1800,
+                'metadata': {'cow_batch': case.run_id, 'cow_four_index': str(index)}})
+            template = case.capture(sid)
+            case.delete(sid)
+            case.state['phase'] = 'quiesced'
+            case.save()
+            templates.append({'templateIndex': index, 'nativeTemplateId': template,
+                              'sourceImage': image['sourceImage'], 'resources': resource,
+                              'snapshotEvidence': copy.deepcopy(case.state['snapshotEvidence'][0])})
+        return templates
+
+    def restore_pairs(self, templates):
+        need(len(templates) == 4 and not self.cases, 'Four fresh replay cases required')
+        need(self.api.call('GET', '/v2/sandboxes?limit=1') == (200, []), 'New Runtime inventory must be empty')
+        jobs = []
+        for index, template in enumerate(templates):
+            need(template['templateIndex'] == index, 'Template ordering differs')
+            case = self.begin_case(index)
+            for slot in (0, 1):
+                sid = case.create('/v2/sandboxes', {'templateID': template['nativeTemplateId'],
+                    'timeout': 7200, 'autoPause': False, 'allow_internet_access': False, 'secure': True,
+                    'metadata': {'cow_batch': case.run_id, 'cow_four_index': str(index), 'cow_four_slot': str(slot)}})
+                jobs.append({'templateIndex': index, 'slot': slot, 'sandboxId': sid,
+                             'nativeTemplateId': template['nativeTemplateId'], 'caseRunId': case.run_id})
+        need(len(jobs) == len({job['sandboxId'] for job in jobs}) == 8, 'Eight distinct Guests required')
+        return jobs
+
+    def owned(self, sid):
+        matches = [case for case in self.cases.values() if sid in case.state['sandboxIds']]
+        need(len(matches) == 1, 'Guest not uniquely bound to this four-case batch')
+        return matches[0].owned(sid)
+
+    def cleanup(self):
+        # Each existing engine can reconcile only its own durable response and
+        # at most three Guests. Never replace unknown POSTs with empty inventory.
+        for case in self.cases.values():
+            case.recover_owned()
+        clean = all(not case.state['sandboxIds'] and not case.state['openRequests'] for case in self.cases.values())
+        if clean:
+            clean = self.api.call('GET', '/v2/sandboxes?limit=1') == (200, [])
+        if clean:
+            # Earlier individual cleanup may see another case's still-running
+            # Guest. Only after the final global-empty check can all be quiesced.
+            for case in self.cases.values():
+                case.state['phase'] = 'quiesced'
+                case.save()
+        return {'ownedGuestsReleased': clean,
+                'outcomeUncertain': any(case.state['openRequests'] for case in self.cases.values()),
+                'remainingSandboxIds': [sid for case in self.cases.values() for sid in case.state['sandboxIds']]}
+
+    def release_captures(self, record):
+        result = self.cleanup()
+        need(result['ownedGuestsReleased'] and not result['outcomeUncertain'], 'Cleanup must complete before capture release')
+        for index, case in self.cases.items():
+            self.engine.release_captures(self.api, case.state, self.writer(index), lambda sid: record(index, sid))
+            need(case.state.get('captureReleaseComplete') is True, 'Owned capture release remains unconfirmed')
