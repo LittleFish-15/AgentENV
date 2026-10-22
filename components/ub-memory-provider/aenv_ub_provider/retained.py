@@ -102,6 +102,103 @@ def plan_import(manifest_path, publisher_path, publisher_sha256, reader, runtime
             'alignedLogicalBytes': aligned, 'output': str(output), 'publisherManifestSha256': publisher_sha256}
 
 
+def snapshot_set(path, publishing):
+    value = read_json(path)
+    if (not isinstance(value, dict) or set(value) != {'version', 'snapshots'}
+            or type(value['version']) is not int or value['version'] != 1
+            or not isinstance(value['snapshots'], list) or not 1 <= len(value['snapshots']) <= 32):
+        raise ValueError('Expected 1..32 explicit retained snapshots')
+    expected = {'manifest', 'artifactRoot'} if publishing else {'manifest'}
+    for item in value['snapshots']:
+        if (not isinstance(item, dict) or set(item) != expected
+                or any(not isinstance(v, str) or not Path(v).is_absolute() for v in item.values())):
+            raise ValueError('Snapshot set entries require absolute paths and exact role-specific fields')
+    return value['snapshots']
+
+
+def binding_catalog(values):
+    from . import service
+    unique = {}
+    for binding in values:
+        source = binding['sourceImage']
+        if source in unique:
+            # Node-local archive paths can differ; immutable bytes, order and
+            # filesystem must not. Runtime selection is keyed by source image.
+            normalized = lambda value: {k: v for k, v in value.items() if k != 'snapshotSources'}
+            if service.identity(normalized(unique[source])) != service.identity(normalized(binding)):
+                raise ValueError('One source image has conflicting native rootfs bindings')
+        else:
+            unique[source] = binding
+    return {'catalogVersion': 1, 'bindings': list(unique.values())}
+
+
+def plan_publish_set(selection, runtime, output, adapter, adapter_sha256, region, logical_budget, coverage_budget, readers):
+    from . import service
+    plans = [plan_publish(item['manifest'], item['artifactRoot'], runtime, output, adapter, adapter_sha256,
+                          region, logical_budget, coverage_budget, readers) for item in snapshot_set(selection, True)]
+    objects = {}
+    for plan in plans:
+        for entry in plan['catalog']['objects']:
+            key = entry['backing']['objectId']
+            if key in objects and objects[key]['backing'] != entry['backing']:
+                raise ValueError('Conflicting native object identity across snapshots')
+            objects.setdefault(key, entry)
+    catalog = {'version': 1, 'objects': list(objects.values())}
+    socket_path = data_socket(Path(plans[0]['config']['workDir']))
+    contract.validate_catalog(catalog, socket_path, logical_budget)
+    aligned = sum(raw.shape(e['backing'], 'aenv_' + '0' * 32)['mappingBytes'] for e in catalog['objects'])
+    if aligned > logical_budget or aligned > coverage_budget:
+        raise ValueError('Combined unique aligned images exceed the declared generation budgets')
+    result = dict(plans[0], binding=binding_catalog([p['binding'] for p in plans]), catalog=catalog,
+                  alignedLogicalBytes=aligned, snapshotCount=len(plans))
+    service.validate_config(result['config'])
+    return result
+
+
+def plan_import_set(selection, publisher_path, publisher_sha256, reader, runtime, output,
+                    adapter, adapter_sha256, region, logical_budget, coverage_budget):
+    from . import service
+    output, socket_path, config = common(output, adapter, adapter_sha256, region, logical_budget, coverage_budget)
+    natives = [bindings.retained_metadata(item['manifest'], logical_budget) for item in snapshot_set(selection, False)]
+    contract.validate_device_runtime(runtime)
+    with Path(publisher_path).open('rb') as stream:
+        payload = stream.read(1024 * 1024 + 1)
+    if len(payload) > 1024 * 1024 or 'sha256:' + hashlib.sha256(payload).hexdigest() != publisher_sha256:
+        raise ValueError('Transferred set publisher manifest differs from its SHA256')
+    published = json.loads(payload)
+    if (not isinstance(published, dict) or set(published) != {'version', 'ownerId', 'mode', 'readers', 'replicas'}
+            or type(published['version']) is not int or published['version'] != 1 or published['mode'] != 'pmem'
+            or not isinstance(published['ownerId'], str) or len(published['ownerId']) != 32
+            or any(c not in '0123456789abcdef' for c in published['ownerId'])
+            or reader not in service.names(published['readers']) or not isinstance(published['replicas'], list)):
+        raise ValueError('Set publication or registered reader differs')
+    by_content = {}
+    names = set()
+    for replica in published['replicas']:
+        spec = contract.validate_spec(dict(replica['identity'], socket=socket_path))
+        raw.validate_replica(replica, spec)
+        key = (spec['sha256'], spec['bytes'])
+        if key in by_content or replica['objectName'] in names:
+            raise ValueError('Duplicate content/allocation in the shared generation')
+        names.add(replica['objectName']); by_content[key] = spec
+    expected = {(layer['sha256'], layer['bytes']) for native in natives for layer in native['layers']}
+    if set(by_content) != expected:
+        raise ValueError('Published set has missing or unexpected native contents')
+    contract.validate_catalog({'version': 1, 'objects': [{'backing': spec} for spec in by_content.values()]},
+                              socket_path, logical_budget)
+    aligned = sum(replica['mappingBytes'] for replica in published['replicas'])
+    if aligned > logical_budget or type(coverage_budget) is not int or aligned > coverage_budget:
+        raise ValueError('Combined imported images exceed the declared generation budgets')
+    catalog = binding_catalog([{'version': 3, 'sourceImage': native['sourceImage'],
+        'layers': [by_content[(layer['sha256'], layer['bytes'])] for layer in native['layers']],
+        'maxPmemBytes': logical_budget, 'deviceRuntime': runtime, 'lowerFilesystem': native['filesystem']} for native in natives])
+    config.update(role='import', readerId=reader, manifest=str(output / 'publisher.json'))
+    service.validate_config(config)
+    return {'role': 'import', 'binding': catalog, 'config': config, 'publisher': published,
+            'alignedLogicalBytes': aligned, 'output': str(output), 'publisherManifestSha256': publisher_sha256,
+            'snapshotCount': len(natives)}
+
+
 def execute(plan):
     """Create one immutable preparation, then run the existing foreground service.
 

@@ -183,6 +183,27 @@ retained snapshot. They do not transfer artifacts, start AgentENV, restore/fork
 Guests, infer remote death, or implement writable Guest RAM CoW. Native Guest
 DAX and memory savings still need separate hardware acceptance.
 
+For several templates in one SDK generation, use `publish-retained-set` or
+`import-retained-set` with `--snapshot-set PRIVATE_SELECTION_JSON` instead of
+`--manifest` and `--artifact-root`. Other options and the explicit `--run` gate
+remain the same. The publisher selection is:
+
+```json
+{"version":1,"snapshots":[{"manifest":"/absolute/snapshot/manifest.json","artifactRoot":"/absolute/snapshot"}]}
+```
+
+Importer entries contain only `manifest`. Up to 32 snapshot selections become
+one `catalogVersion: 1` binding document; the raw provider still permits at most
+eight unique image objects. Identical image contents are allocated once and
+charged once against the aligned logical budget, while each source image keeps
+its own ordered layer binding. Conflicting bindings for the same source image,
+missing/extra imported contents or duplicate allocation names are rejected.
+The importer matches by immutable content rather than assuming the publisher's
+global object order equals every template's layer order. A shared generation is
+retired only after all its local Guest leases and configured peer receipts have
+completed. This supports aggregating retained native snapshots; ordinary VM
+snapshots without native archives still cannot be used as selections.
+
 First freeze new imports and stop all Guest/readers for the generation. Retire
 each importer only after its local inherited leases have closed:
 

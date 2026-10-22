@@ -323,9 +323,9 @@ def main():
     archived.add_argument('--max-bytes', type=int, required=True)
     archived.add_argument('--device-runtime', required=True)
     archived.add_argument('--output', required=True)
-    for name in ('publish-retained-snapshot', 'import-retained-snapshot'):
+    for name in ('publish-retained-snapshot', 'import-retained-snapshot', 'publish-retained-set', 'import-retained-set'):
         command = commands.add_parser(name)
-        command.add_argument('--manifest', required=True)
+        command.add_argument('--snapshot-set' if name.endswith('-set') else '--manifest', required=True)
         command.add_argument('--device-runtime', required=True)
         command.add_argument('--output', required=True)
         command.add_argument('--adapter', required=True)
@@ -335,18 +335,23 @@ def main():
         command.add_argument('--coverage-bytes', type=int, required=True)
         command.add_argument('--run', action='store_true', help='Create fresh preparation and serve via the existing SDK lifecycle')
         if name.startswith('publish-'):
-            command.add_argument('--artifact-root', required=True)
+            if not name.endswith('-set'):
+                command.add_argument('--artifact-root', required=True)
             command.add_argument('--reader', action='append', default=[])
         else:
             command.add_argument('--publisher-manifest', required=True)
             command.add_argument('--publisher-manifest-sha256', required=True)
             command.add_argument('--reader', required=True)
     args = parser.parse_args()
-    if args.command in ('publish-retained-snapshot', 'import-retained-snapshot'):
+    if args.command in ('publish-retained-snapshot', 'import-retained-snapshot', 'publish-retained-set', 'import-retained-set'):
         from . import retained
         runtime = read_json(args.device_runtime)
         common = (runtime, args.output, args.adapter, args.adapter_sha256, args.region, args.max_bytes, args.coverage_bytes)
-        if args.command.startswith('publish-'):
+        if args.command == 'publish-retained-set':
+            plan = retained.plan_publish_set(args.snapshot_set, *common, args.reader)
+        elif args.command == 'import-retained-set':
+            plan = retained.plan_import_set(args.snapshot_set, args.publisher_manifest, args.publisher_manifest_sha256, args.reader, *common)
+        elif args.command.startswith('publish-'):
             plan = retained.plan_publish(args.manifest, args.artifact_root, *common, args.reader)
         else:
             plan = retained.plan_import(args.manifest, args.publisher_manifest, args.publisher_manifest_sha256, args.reader, *common)
