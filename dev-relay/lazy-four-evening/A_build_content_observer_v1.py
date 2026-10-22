@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -44,6 +45,9 @@ def main():
               'scope': 'Matching Runtime and observed daemon candidates; deployment and same-window collection remain separate', 'automaticUbRepublishImplemented': False}
     if not args.run:
         print(json.dumps(report, indent=2)); return 0
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt('Build interrupted; preserve candidate outputs')
+    signal.signal(signal.SIGTERM, interrupted)
     made = False
     try:
         need(RELEASE.get('published') is True, 'Draft source packet is not a published release')
