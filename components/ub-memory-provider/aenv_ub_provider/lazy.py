@@ -435,7 +435,7 @@ class Reader:
     def depart(self):
         with self.lock:
             self.active_reads -= 1
-            self.lock.notify_all()
+            self.lock.notify()  # One freed admission slot; failures/closing wake all.
 
     def rpc(self, operation, **fields):
         with self.lock:
