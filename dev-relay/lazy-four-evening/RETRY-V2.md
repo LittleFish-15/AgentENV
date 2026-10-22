@@ -59,7 +59,7 @@ binary. Whole-lower residency is not per-Guest accessed/resident intersection.
 SDK coverage subtraction remains a budget model, not measured physical savings.
 Full physical net savings stays NA without complete nonoverlapping physical data.
 
-Local validation: 41 Python checks, including the actual coordinator control flow
+Local validation: 47 Python checks, including the actual coordinator control flow
 with modeled external nodes/processes, cleanup ordering/refusal, embedded hash
 closure, reuse identity, root receipt trust, proxy deadlines and metric readers.
 Windows filesystem/ownership tests model Linux-specific operations. No target
@@ -73,3 +73,5 @@ new grant remains durable before reply, and unknown pins never expire. Ten local
 modeled chunk reads now require ten grant checkpoints rather than twenty
 grant/release checkpoints; no target latency improvement is claimed. Prior 3aa
 adapter/catalog preparation is reusable only after exact identity/release checks.
+
+Reports now include per-Guest outcomes/durations and template RAM/FC/upper/auxiliary tables. A failed run produces an explicit partial report when node reports are available. Full acceptance requires per-command exit codes to match off versus lazy on the same node/template/slot; 124/137 remain failures. Identical nonzero results are retained, not called all tests passed.
