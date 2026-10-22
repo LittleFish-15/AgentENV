@@ -94,10 +94,14 @@ aenv-ub-provider relocate-rootfs --binding PUBLISHER_BINDING \
 `bind-rootfs --lower-filesystem ext4` explicitly selects immutable ext4 lowers.
 Add `--snapshot-references` only with the matching version-3 Runtime/FC to enable
 content-based snapshot rebinding. Relocation preserves version 3 and content
-identity while replacing node-local sockets and binary pins. Immutable base
-images and UB publications must remain externally retained for the lifetime of
-referencing snapshots; this option does not provide distributed garbage
-collection, repository backups, or native Guest RAM private CoW.
+identity while replacing node-local sockets and binary pins. By default the
+immutable base images remain external dependencies. Add `--retain-snapshot-bases`
+with a matching Runtime to pin the supplied raw files and archive verified copies
+with each snapshot. Relocation of this binding requires one `--snapshot-source`
+per layer on the new node. `bind-retained-snapshot` can reconstruct a publication
+catalog from the archived manifest and artifact directory after the old UB
+generation is released. Publication/import and fresh FD verification are still
+required; this does not add automatic SDK failover or native Guest RAM private CoW.
 Version-3 images must also contain the static executable `/.aenv-dax-exec`
 (mode 0555), built from `components/firecracker-native-pmem/guest-exec-probe.S`
 for the Guest architecture before sealing/publishing the image. The Runtime

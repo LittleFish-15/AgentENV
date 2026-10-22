@@ -145,9 +145,63 @@ impl SnapshotRuntimeResolver for OssRuntimeResolver {
         handles.push(vm_state_handle);
 
         // ── firecracker manifest ───────────────────────────────────
-        let committed_manifest = self
+        let mut committed_manifest = self
             .load_committed_firecracker_manifest(&layout, &id)
             .await?;
+        if let Some(native) = &mut committed_manifest.native_rootfs {
+            let names = native
+                .archive_names()
+                .map_err(|e| RepositoryError::backend("validate native archive references", e))?;
+            for (name, layer) in names.iter().zip(&native.layers) {
+                let key = layout.artifact_key(&name.to_string_lossy());
+                let client = Arc::clone(&self.client);
+                let download_key = key.clone();
+                let expected = layer.sha256.clone();
+                let bytes = layer.bytes;
+                let handle = self
+                    .cache
+                    .ensure_cached(&key, move |destination| {
+                        let client = client.clone();
+                        let download_key = download_key.clone();
+                        let expected = expected.clone();
+                        async move {
+                            let actual = client
+                                .get_sized_to_file(&download_key, &destination, bytes)
+                                .await?;
+                            anyhow::ensure!(
+                                actual == bytes,
+                                "downloaded native archive length differs"
+                            );
+                            let validation_path = destination.clone();
+                            tokio::task::spawn_blocking(move || {
+                                crate::sandbox::native_archive::verify_path(
+                                    &validation_path,
+                                    &expected,
+                                    bytes,
+                                )
+                            })
+                            .await??;
+                            Ok(actual)
+                        }
+                    })
+                    .await
+                    .map_err(|e| RepositoryError::backend("resolve native pmem archive", e))?;
+                // A cache hit must be checked too; never trust a local artifact
+                // merely because its key has a previously committed digest.
+                let path = handle.path().to_path_buf();
+                let verify = path.clone();
+                let expected = layer.sha256.clone();
+                let bytes = layer.bytes;
+                tokio::task::spawn_blocking(move || {
+                    crate::sandbox::native_archive::verify_path(&verify, &expected, bytes)
+                })
+                .await
+                .map_err(|e| RepositoryError::backend("join native cache verification", e))?
+                .map_err(|e| RepositoryError::backend("verify native cache artifact", e))?;
+                native.archive_paths.push(path);
+                handles.push(handle);
+            }
+        }
 
         // ── memory image config ────────────────────────────────────
         let memory_layers: Vec<OverlaybdLayerRef> = committed

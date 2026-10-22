@@ -396,8 +396,9 @@ impl FirecrackerSandboxConfig {
                 &fs::read(&user_image_config.image_config_path)?,
                 0,
             )?;
-            let binding =
+            let mut binding =
                 super::direct_backing::rootfs_binding_for_source(Path::new(&path), &source_image)?;
+            binding.pin_snapshot_sources()?;
             common.direct_rootfs = Some(binding);
         }
         common.ublk_config = Some(UblkConfig::overlaybd_with_runtime_upper_mode(
@@ -503,9 +504,12 @@ impl FirecrackerSnapshotConfig {
             FirecrackerCommonConfig::from_global_config().context("load sandbox common config")?;
         let manifest = snapshot.manifest();
         if let Some(native) = &manifest.native_rootfs {
-            base_common.direct_rootfs = Some(
-                super::direct_backing::RootfsBinding::restore_binding(native)?,
-            );
+            let mut binding = super::direct_backing::RootfsBinding::restore_binding(native)?;
+            if native.archive_version.is_some() {
+                binding.snapshot_lease =
+                    Some(super::direct_backing::NativeSnapshotLease::new(snapshot));
+            }
+            base_common.direct_rootfs = Some(binding);
         }
         if manifest.backend != FIRECRACKER_BACKEND {
             bail!(

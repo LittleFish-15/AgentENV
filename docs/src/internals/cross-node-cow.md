@@ -120,10 +120,11 @@ exact input hashes and policy scope.
    local binding, newly acquired leases and full content verification. FC saves
    content references instead of inherited FD numbers and restores the same
    guest device address/length. Versions 1/2 remain cold-boot-only. This code
-   needs native lifecycle acceptance. Immutable image bytes and their UB bases
-   remain externally retained dependencies: repository-owned pmem backups and
-   automatic generation reference counting are not implemented. Missing bases
-   fail restoration. Native RAM CoW is a separate unresolved capability.
+   needs native lifecycle acceptance. Immutable image bytes remain external
+   dependencies unless snapshot base archives are explicitly enabled (below).
+   Repository archives do not retain SDK allocations or automatically republish
+   them. Missing archives/bindings fail restoration. Native RAM CoW is a separate
+   unresolved capability.
    Version-3 readiness additionally requires a DAX-backed `/.aenv-dax-exec`
    built from the supplied minimal static assembly source, returning exit 73.
    This is necessary because imported-PFN data reads do not prove Guest code
@@ -150,6 +151,41 @@ exact input hashes and policy scope.
    automatic distributed garbage collection are not implemented.
 
 ## Required comparison
+
+### Repository-owned native snapshot bases
+
+For native v3 bindings, `bind-rootfs --snapshot-references --retain-snapshot-bases`
+adds explicit `snapshotSources` for the prebuilt immutable images. The Runtime
+retains read-only file descriptions and uses positional reads for concurrent
+captures. A capture archives the exact, hash-verified bytes under its private
+`native-pmem/` artifact namespace. POSIX publication copies them into the
+committed snapshot directory; OSS publication uploads them before the manifest
+and committed record. Existing snapshot-prefix deletion handles these files too.
+Archives are per snapshot, not a new distributed CAS or automatic reference-count
+service. Disk storage can be duplicated across snapshots.
+
+`archiveVersion: 1` in the portable native manifest declares this contract.
+Node-local paths and open file descriptions are not serialized. Both repository
+resolvers hydrate and verify the files; opened source descriptors remain held by
+the native Runtime configuration through forks and subsequent captures, including
+when the original local file path is removed. Old manifests without this field
+keep their explicit external-base dependency and are not silently upgraded.
+
+After an old UB generation has been retired, `bind-retained-snapshot --manifest
+<manifest.json> --artifact-root <snapshot-artifact-directory> --socket <new-provider>
+--max-bytes <budget> --device-runtime <pins.json> --output <new-directory>` verifies
+the archived images and creates a new v3 binding/publication catalog. It does not
+allocate UB. Start the normal publisher/importers with fresh lifecycle evidence
+and configure the node-local binding before restore; the Runtime still verifies
+the new UB FDs and never substitutes these local files as shared Guest RAM.
+Relocating an archive-enabled cold binding requires explicit matching local
+`--snapshot-source` paths, rather than retaining another node's paths.
+
+This closes source-byte retention for opted-in captures, not automatic SDK
+republishing, distributed failover or hardware acceptance. Snapshot archival and
+restoration perform complete file verification and may populate file cache; their
+I/O, disk use and memory costs must be reported separately. Sparse writes preserve
+the full logical byte image and are not a UB memory-allocation saving.
 
 ### Preparing a local raw rootfs view
 

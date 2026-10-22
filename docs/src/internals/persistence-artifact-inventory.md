@@ -59,6 +59,20 @@ Owned by `src/sandbox/firecracker/*`.
 | Firecracker serial logs      | `firecracker.serial_dir/{sandbox_id}/*`, or warm pool work dir logs | Firecracker stdout/stderr                                 | Debugging                                                    | Opened on spawn and appended only when `firecracker.log_level` is non-empty or an explicit Rust capture destination is set. Enabled warm logs are relocated when a warm process is consumed. Configured serial output is not automatically GC'd. | No, but disposable.                                          |
 | Firecracker logger output    | `firecracker.log` in the same per-sandbox log directory as the serial logs | Firecracker internal logger (`PUT /logger`)               | Debugging                                                    | Only created when `firecracker.log_level` is set to a non-empty level. Written by Firecracker itself; not automatically GC'd. | No, but disposable.                                          |
 
+### Native pmem snapshot archives
+
+Native v3 snapshots can additionally opt into repository-owned pmem bases with
+`snapshotSources`. Exact immutable images are archived under
+`native-pmem/{index}-{sha256}.img` inside the snapshot artifact namespace;
+`archiveVersion: 1` in the Firecracker manifest declares their presence. Source
+file descriptions are retained through capture/Fork, and restored artifact-cache
+leases remain pinned with the native configuration. POSIX and OSS snapshot
+publication/namespace deletion own these copies. Old snapshots without this
+marker retain their external-base dependency. Archives are disk copies, not UB
+allocations, and are not yet deduplicated across snapshot IDs. Republish identical
+archived bytes and acquire fresh UB bindings before a restore that lacks a live
+generation; there is no implicit local-RAM fallback or automatic SDK failover.
+
 ### Firecracker Pool
 
 Owned by `src/sandbox/firecracker/pool.rs`.

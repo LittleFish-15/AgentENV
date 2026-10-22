@@ -63,6 +63,36 @@ impl PosixFsArtifactStore {
             committed_layout.path(SNAPSHOT_ARTIFACT_LAYOUT.vm_state),
             &manifest.vm_state.path,
         )?;
+        if let Some(native) = &manifest.native_rootfs {
+            let names = native
+                .archive_names()
+                .map_err(|e| RepositoryError::backend("validate native archives", e))?;
+            if !names.is_empty() {
+                if names.len() != native.archive_paths.len() {
+                    return Err(RepositoryError::InvalidRequest {
+                        reason: "native archive paths are incomplete".into(),
+                    });
+                }
+                for ((name, source), layer) in
+                    names.iter().zip(&native.archive_paths).zip(&native.layers)
+                {
+                    let destination = committed_layout.path(&name.to_string_lossy());
+                    fs::create_dir_all(destination.parent().expect("native archive parent"))
+                        .map_err(|e| {
+                            RepositoryError::backend("create native archive directory", e)
+                        })?;
+                    crate::sandbox::native_archive::copy_path(
+                        source,
+                        &destination,
+                        &layer.sha256,
+                        layer.bytes,
+                    )
+                    .map_err(|e| {
+                        RepositoryError::backend("persist exact native pmem archive", e)
+                    })?;
+                }
+            }
+        }
         self.persist_firecracker_manifest(
             committed_layout.path(SNAPSHOT_ARTIFACT_LAYOUT.firecracker_manifest),
             manifest,

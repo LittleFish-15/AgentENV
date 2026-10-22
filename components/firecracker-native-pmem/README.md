@@ -54,11 +54,13 @@ isolated verifier. Missing, duplicate, changed-content or changed-length
 rebindings fail; raw inherited FD paths in old snapshots remain rejected.
 The restored pmem mapping must also match the saved device address-range size.
 
-Immutable bases remain externally retained dependencies. Content metadata does
-not retain an SDK object after the publisher deletes it, reconstruct missing
-bytes, or add a repository-owned backup. Keep each base generation alive through
-all snapshots that reference it, or explicitly republish identical retained
-image bytes and bind the new generation. Private writable OverlayFS state uses
+By default immutable bases remain externally retained dependencies. The matching
+Runtime can opt into `--retain-snapshot-bases` when preparing v3 bindings: exact
+source images then become verified per-snapshot repository artifacts. Content
+metadata alone does not keep an SDK allocation alive. After retirement, explicitly
+republish retained bytes and bind the new generation; `bind-retained-snapshot`
+prepares that catalog without making an SDK call. Old snapshots lacking archives
+still require their external sources. Private writable OverlayFS state uses
 the ordinary per-sandbox disk snapshot path. This is a coordinated Runtime/FC
 implementation requiring native capture/restore/Fork testing; compilation and
 protocol tests do not establish that hardware acceptance or memfile private CoW.

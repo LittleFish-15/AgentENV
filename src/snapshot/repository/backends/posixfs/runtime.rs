@@ -120,6 +120,26 @@ impl SnapshotRuntimeResolver for PosixFsRuntimeResolver {
             rootfs_image_config_path,
             &attached_drives,
         )?;
+        if let Some(native) = &mut runtime_manifest.native_rootfs {
+            let names = native
+                .archive_names()
+                .map_err(|e| RepositoryError::backend("validate native archive references", e))?;
+            for (name, layer) in names.iter().zip(&native.layers) {
+                let path = self
+                    .snapshot_layout(&snapshot_id)
+                    .path(&name.to_string_lossy());
+                let validate = path.clone();
+                let expected = layer.sha256.clone();
+                let bytes = layer.bytes;
+                tokio::task::spawn_blocking(move || {
+                    crate::sandbox::native_archive::verify_path(&validate, &expected, bytes)
+                })
+                .await
+                .map_err(|e| RepositoryError::backend("join native archive validation", e))?
+                .map_err(|e| RepositoryError::backend("validate retained native archive", e))?;
+                native.archive_paths.push(path);
+            }
+        }
         let consume_enabled = crate::cfg::ConfigManager::global_config()
             .snapshot
             .memory_startup_pack

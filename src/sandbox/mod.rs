@@ -5,6 +5,7 @@ mod envd;
 mod extra_drive;
 mod firecracker;
 pub mod manifest;
+pub(crate) mod native_archive;
 mod metrics;
 #[cfg(test)]
 pub(crate) mod mock;

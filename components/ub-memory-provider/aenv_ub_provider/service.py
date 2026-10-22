@@ -302,21 +302,37 @@ def main():
     bind.add_argument('--device-runtime', required=True)
     bind.add_argument('--lower-filesystem', choices=['erofs', 'ext4'], default='erofs')
     bind.add_argument('--snapshot-references', action='store_true',
-                      help='Emit v3 content references; requires matching Runtime/FC and externally retained immutable bases')
+                      help='Emit v3 content references; requires matching Runtime/FC and retained immutable bases')
+    bind.add_argument('--retain-snapshot-bases', action='store_true',
+                      help='Pin local raw sources and archive exact bases with snapshots; requires matching Runtime')
     bind.add_argument('--output', required=True)
     relocate = commands.add_parser('relocate-rootfs')
     relocate.add_argument('--binding', required=True)
     relocate.add_argument('--socket', required=True)
     relocate.add_argument('--device-runtime', required=True)
     relocate.add_argument('--output', required=True)
+    relocate.add_argument('--snapshot-source', action='append',
+                          help='Matching node-local raw image for each layer of an archived-capture binding')
+    archived = commands.add_parser('bind-retained-snapshot')
+    archived.add_argument('--manifest', required=True)
+    archived.add_argument('--artifact-root', required=True)
+    archived.add_argument('--socket', required=True)
+    archived.add_argument('--max-bytes', type=int, required=True)
+    archived.add_argument('--device-runtime', required=True)
+    archived.add_argument('--output', required=True)
     args = parser.parse_args()
+    if args.command == 'bind-retained-snapshot':
+        value = bindings.retained_snapshot(args.manifest, args.artifact_root, args.socket, args.max_bytes,
+                                          read_json(args.device_runtime), args.output)
+        print(json.dumps({'state': 'archived_binding_prepared_no_sdk', 'bytes': sum(x['bytes'] for x in value['layers'])}))
+        return 0
     if args.command in ('bind-rootfs', 'relocate-rootfs'):
         runtime = read_json(args.device_runtime)
         if args.command == 'bind-rootfs':
             value = bindings.rootfs(args.source, args.image, args.socket, args.max_bytes,
-                                    runtime, args.output, args.lower_filesystem, args.snapshot_references)
+                                    runtime, args.output, args.lower_filesystem, args.snapshot_references, args.retain_snapshot_bases)
         else:
-            value = bindings.relocate(args.binding, args.socket, runtime, args.output)
+            value = bindings.relocate(args.binding, args.socket, runtime, args.output, args.snapshot_source)
         print(json.dumps({'state': 'binding_prepared_no_sdk', 'bytes': sum(layer['bytes'] for layer in value['layers'])}))
         return 0
     if args.command == 'retire':

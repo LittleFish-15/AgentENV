@@ -353,6 +353,20 @@ impl SnapshotRepository for OssSnapshotRepository {
                     )
                 })?;
 
+            if let Some(native) = &manifest.native_rootfs {
+                let names = native.archive_names().map_err(|e| RepositoryError::backend("validate native archive references", e))?;
+                if names.len() != native.archive_paths.len() {
+                    return Err(RepositoryError::InvalidRequest { reason: "native archive source paths are incomplete".into() });
+                }
+                for ((name, path), layer) in names.iter().zip(&native.archive_paths).zip(&native.layers) {
+                    let source = path.clone(); let expected = layer.sha256.clone(); let bytes = layer.bytes;
+                    tokio::task::spawn_blocking(move || crate::sandbox::native_archive::verify_path(&source, &expected, bytes))
+                        .await.map_err(|e| RepositoryError::backend("join native archive validation", e))?
+                        .map_err(|e| RepositoryError::backend("verify native archive before upload", e))?;
+                    self.client.put_file(&layout.artifact_key(&name.to_string_lossy()), path, OssUploadArtifact::NativeRootfsArchive)
+                        .await.map_err(|e| RepositoryError::backend("upload native snapshot archive", e))?;
+                }
+            }
             let persisted_manifest_bytes = serde_json::to_vec_pretty(&manifest)
                 .map_err(|e| RepositoryError::backend("serialize firecracker manifest", e))?;
             self.client

@@ -46,6 +46,7 @@ pub(crate) enum OssUploadArtifact {
     AttachedDriveLayer,
     MemoryLayer,
     VmState,
+    NativeRootfsArchive,
     FirecrackerManifest,
     StartupPack,
     CatalogRecord,
@@ -59,6 +60,7 @@ impl OssUploadArtifact {
             Self::AttachedDriveLayer => "attached_drive_layer",
             Self::MemoryLayer => "memory_layer",
             Self::VmState => "vm_state",
+            Self::NativeRootfsArchive => "native_rootfs_archive",
             Self::FirecrackerManifest => "manifest",
             Self::StartupPack => "startup_pack",
             Self::CatalogRecord => "record",
@@ -173,6 +175,35 @@ impl OssClient {
         })
         .await
         .with_context(|| format!("oss get versioned object '{key}'"))
+    }
+
+    /// Download an object directly to a local file (atomic: temp + rename).
+    pub(crate) async fn get_sized_to_file(
+        &self,
+        key: &str,
+        dest: &Path,
+        expected_bytes: u64,
+    ) -> Result<u64> {
+        let full_key = self.full_key(key);
+        self.run_with_operator(|operator| {
+            let full_key = full_key.clone();
+            async move {
+                if operator.stat(&full_key).await?.content_length() != expected_bytes {
+                    return Err(OpenDalError::new(
+                        OpenDalErrorKind::Unexpected,
+                        "native archive object size differs before download",
+                    ));
+                }
+                Ok(())
+            }
+        })
+        .await?;
+        let actual = self.get_to_file(key, dest).await?;
+        anyhow::ensure!(
+            actual == expected_bytes,
+            "native archive object size changed during download"
+        );
+        Ok(actual)
     }
 
     /// Download an object directly to a local file (atomic: temp + rename).

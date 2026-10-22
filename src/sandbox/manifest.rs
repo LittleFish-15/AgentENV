@@ -68,6 +68,69 @@ pub struct NativeRootfsSnapshot {
     pub source_image: String,
     pub filesystem: String,
     pub layers: Vec<NativeRootfsLayer>,
+    /// Version 1 archives exact immutable bases under this snapshot's artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_version: Option<u32>,
+    /// Hydrated local paths, never persisted as node-local locations.
+    #[serde(skip)]
+    pub archive_paths: Vec<PathBuf>,
+}
+
+impl NativeRootfsSnapshot {
+    pub(crate) fn archive_names(&self) -> Result<Vec<PathBuf>> {
+        match self.archive_version {
+            None => Ok(Vec::new()),
+            Some(1) if self.version == 1 && !self.layers.is_empty() && self.layers.len() <= 8 => {
+                self.layers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, layer)| {
+                        anyhow::ensure!(
+                            layer.bytes > 0 && layer.bytes.is_multiple_of(2 * 1024 * 1024),
+                            "invalid native archive length"
+                        );
+                        super::native_archive::relative_name(index, &layer.sha256)
+                    })
+                    .collect()
+            }
+            _ => anyhow::bail!("unsupported native snapshot archive version/count"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_archive_tests {
+    use super::*;
+
+    #[test]
+    fn archive_locations_are_derived_not_serialized_and_old_metadata_stays_external() {
+        let mut value = NativeRootfsSnapshot {
+            version: 1,
+            source_image: "source".into(),
+            filesystem: "ext4".into(),
+            layers: vec![NativeRootfsLayer {
+                sha256: format!("sha256:{}", "a".repeat(64)),
+                bytes: 2 * 1024 * 1024,
+            }],
+            archive_version: Some(1),
+            archive_paths: vec![PathBuf::from("/private/node-cache/base.img")],
+        };
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert!(!encoded.contains("/private") && !encoded.contains("archivePaths"));
+        let restored: NativeRootfsSnapshot = serde_json::from_str(&encoded).unwrap();
+        assert!(restored.archive_paths.is_empty());
+        assert_eq!(
+            restored.archive_names().unwrap(),
+            vec![PathBuf::from(format!(
+                "native-pmem/00-{}.img",
+                "a".repeat(64)
+            ))]
+        );
+        value.archive_version = None;
+        assert!(value.archive_names().unwrap().is_empty());
+        value.archive_version = Some(99);
+        assert!(value.archive_names().is_err());
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

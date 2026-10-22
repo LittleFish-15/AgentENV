@@ -1266,6 +1266,40 @@ impl FirecrackerSandbox {
         &self,
         snapshot_dir: &Path,
     ) -> Result<(FirecrackerSnapshotConfig, SandboxSnapshotManifest)> {
+        // Archive immutable bases before restacking live memory/rootfs layers.
+        // A changed/missing archive source must not add a late failure that
+        // removes files the running VM has already adopted as new lowers.
+        let mut native_identity = self
+            .launch
+            .common()
+            .direct_rootfs
+            .as_ref()
+            .map(|binding| binding.snapshot_identity())
+            .transpose()?;
+        if let Some(sources) = self
+            .launch
+            .common()
+            .direct_rootfs
+            .as_ref()
+            .and_then(|binding| binding.retained_sources.clone())
+        {
+            let target = snapshot_dir.to_path_buf();
+            let cancel = crate::sandbox::native_archive::CaptureCancellation::default();
+            let flag = cancel.flag();
+            let managed_root = self.live_snapshot_root.clone();
+            let paths = tokio::task::spawn_blocking(move || {
+                // Keep managed output alive while blocking I/O winds down if
+                // the async capture is cancelled. No background publication.
+                let _managed_root = managed_root;
+                sources.archive_into_cancellable(&target, &flag)
+            })
+            .await??;
+            let native = native_identity
+                .as_mut()
+                .context("native source archive without snapshot identity")?;
+            native.archive_version = Some(1);
+            native.archive_paths = paths;
+        }
         let vm_state_path = snapshot_dir.join(VM_STATE_FILE_NAME);
         // Memory layers stay raw unless `[memory_snapshot].compression_enabled`
         // opts pause into ZFile output; the algorithm and workers come from
@@ -1398,11 +1432,7 @@ impl FirecrackerSandbox {
             &manifest_extra_drives,
         )
         .context("build firecracker snapshot manifest")?;
-        manifest.native_rootfs = snapshot_common
-            .direct_rootfs
-            .as_ref()
-            .map(|binding| binding.snapshot_identity())
-            .transpose()?;
+        manifest.native_rootfs = native_identity;
         manifest.volume_drive_slots = snapshot_common.volume_drive_slots;
         manifest.physical_extra_drive_count = manifest_extra_drives.len();
 
@@ -2111,9 +2141,9 @@ impl FirecrackerSandbox {
     async fn start_resume(&mut self, mut config: FirecrackerSnapshotConfig) -> Result<()> {
         if let Some(binding) = &config.common.direct_rootfs {
             let expected = binding.snapshot_identity()?;
-            config.common.direct_rootfs = Some(
-                super::direct_backing::RootfsBinding::restore_binding(&expected)?,
-            );
+            let mut refreshed = super::direct_backing::RootfsBinding::restore_binding(&expected)?;
+            refreshed.inherit_snapshot_sources(binding)?;
+            config.common.direct_rootfs = Some(refreshed);
             if let LaunchMode::Resume(saved) = &mut self.launch {
                 saved.common.direct_rootfs = config.common.direct_rootfs.clone();
             }

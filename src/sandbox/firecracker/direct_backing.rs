@@ -159,8 +159,9 @@ impl RootfsFilesystem {
 }
 
 /// Versions 1/2 are cold-boot only. Version 3 snapshots portable content
-/// references; operators must retain immutable bases and provide fresh local
-/// bindings on every restore node. An absent base is a hard restore error.
+/// references. Optional snapshot sources become repository-owned archives;
+/// otherwise operators retain bases externally. Every restore still needs
+/// fresh local bindings. An absent base is a hard restore error.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RootfsBinding {
@@ -177,6 +178,34 @@ pub struct RootfsBinding {
     /// Required only by version 2: explicitly pinned device-aware executables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_runtime: Option<DeviceRuntime>,
+    /// Optional exact raw images to retain as repository-owned snapshot artifacts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshot_sources: Vec<PathBuf>,
+    #[serde(skip)]
+    pub(crate) retained_sources:
+        Option<std::sync::Arc<crate::sandbox::native_archive::RetainedSources>>,
+    /// Keep repository cache accounting/ref-counts alive as well as open files.
+    #[serde(skip)]
+    pub(crate) snapshot_lease: Option<NativeSnapshotLease>,
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeSnapshotLease {
+    _snapshot: std::sync::Arc<crate::snapshot::RunnableSnapshot>,
+}
+
+impl NativeSnapshotLease {
+    pub(crate) fn new(snapshot: &crate::snapshot::RunnableSnapshot) -> Self {
+        Self {
+            _snapshot: std::sync::Arc::new(snapshot.clone()),
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeSnapshotLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("NativeSnapshotLease")
+    }
 }
 
 /// One node can serve several immutable rootfs images. Selection always uses
@@ -289,7 +318,46 @@ pub fn verify_binary(path: &Path, expected: &str) -> Result<()> {
 }
 
 impl RootfsBinding {
+    pub(crate) fn pin_snapshot_sources(&mut self) -> Result<()> {
+        if self.snapshot_sources.is_empty() || self.retained_sources.is_some() {
+            return Ok(());
+        }
+        self.validate()?;
+        let identities = self
+            .layers
+            .iter()
+            .map(|layer| (layer.sha256.clone(), layer.bytes))
+            .collect::<Vec<_>>();
+        self.retained_sources = Some(std::sync::Arc::new(
+            crate::sandbox::native_archive::RetainedSources::open(
+                &self.snapshot_sources,
+                &identities,
+            )?,
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn inherit_snapshot_sources(&mut self, previous: &Self) -> Result<()> {
+        ensure!(
+            self.snapshot_identity()? == previous.snapshot_identity()?,
+            "native source inheritance requires identical content"
+        );
+        if previous.retained_sources.is_some() {
+            self.snapshot_sources = previous.snapshot_sources.clone();
+            self.retained_sources = previous.retained_sources.clone();
+            self.snapshot_lease = previous.snapshot_lease.clone();
+        }
+        self.pin_snapshot_sources()
+    }
+
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.snapshot_sources.is_empty()
+                || (self.version == 3
+                    && self.snapshot_sources.len() == self.layers.len()
+                    && self.snapshot_sources.iter().all(|p| p.is_absolute())),
+            "native snapshot sources require one absolute source for every v3 layer"
+        );
         ensure!(
             (self.version == 1 || self.version == 2 || self.version == 3)
                 && !self.layers.is_empty()
@@ -361,6 +429,8 @@ impl RootfsBinding {
                     bytes: l.bytes,
                 })
                 .collect(),
+            archive_version: None,
+            archive_paths: Vec::new(),
         })
     }
 
@@ -369,8 +439,16 @@ impl RootfsBinding {
     ) -> Result<Self> {
         let path = std::env::var_os("AENV_DIRECT_ROOTFS_BINDING")
             .context("snapshot requires explicit node-local pmem content bindings")?;
-        let binding = rootfs_binding_for_source(Path::new(&path), &expected.source_image)?;
+        let mut binding = rootfs_binding_for_source(Path::new(&path), &expected.source_image)?;
         binding.validate_restore_identity(expected)?;
+        if expected.archive_version.is_some() {
+            ensure!(
+                expected.archive_paths.len() == expected.archive_names()?.len(),
+                "native snapshot archives were not hydrated"
+            );
+            binding.snapshot_sources = expected.archive_paths.clone();
+            binding.pin_snapshot_sources()?;
+        }
         Ok(binding)
     }
 
@@ -378,8 +456,12 @@ impl RootfsBinding {
         &self,
         expected: &crate::sandbox::manifest::NativeRootfsSnapshot,
     ) -> Result<()> {
+        expected.archive_names()?;
+        let mut content = expected.clone();
+        content.archive_version = None;
+        content.archive_paths.clear();
         ensure!(
-            self.snapshot_identity()? == *expected,
+            self.snapshot_identity()? == content,
             "restore pmem content, order, length or filesystem differs from captured snapshot"
         );
         Ok(())
@@ -516,8 +598,10 @@ mod linux {
                     "NC pmem requires a UB device provider without a RAM CoW claim"
                 );
             } else {
-                ensure!(response.source == "ub" && response.cache_mode == "cc",
-                    "FC path reopen requires cacheable backing; NC FD flags are not preserved by reopen");
+                ensure!(
+                    response.source == "ub" && response.cache_mode == "cc",
+                    "FC path reopen requires cacheable backing; NC FD flags are not preserved by reopen"
+                );
             }
             let lengths = response.segment_lengths;
             if nc_pmem {
@@ -807,6 +891,9 @@ mod tests {
     #[test]
     fn device_version_requires_explicit_binary_pins_and_cannot_downgrade() {
         let mut root = RootfsBinding {
+            snapshot_sources: Vec::new(),
+            retained_sources: None,
+            snapshot_lease: None,
             version: 2,
             source_image: "test".into(),
             layers: vec![spec()],
@@ -842,6 +929,9 @@ mod tests {
     }
     fn catalog_binding(source: &str) -> RootfsBinding {
         RootfsBinding {
+            snapshot_sources: Vec::new(),
+            retained_sources: None,
+            snapshot_lease: None,
             version: 3,
             source_image: source.into(),
             layers: vec![spec()],
@@ -934,8 +1024,52 @@ mod tests {
         assert!(changed.validate_restore_identity(&expected).is_err());
     }
     #[test]
+    fn snapshot_source_handles_survive_rebinding_without_reusing_old_ub_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("base.img");
+        let bytes = vec![0u8; PMEM_ALIGNMENT as usize];
+        std::fs::write(&source, &bytes).unwrap();
+        let mut old = catalog_binding("source");
+        old.layers[0].sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
+        old.snapshot_sources = vec![source.clone()];
+        old.pin_snapshot_sources().unwrap();
+        let mut fresh = old.clone();
+        fresh.retained_sources = None;
+        fresh.layers[0].object_id = "new-publication".into();
+        fresh.layers[0].generation = "new-generation".into();
+        fresh.layers[0].socket = "/run/new-provider.sock".into();
+        fresh.inherit_snapshot_sources(&old).unwrap();
+        assert_eq!(fresh.layers[0].object_id, "new-publication");
+        assert!(std::sync::Arc::ptr_eq(
+            fresh.retained_sources.as_ref().unwrap(),
+            old.retained_sources.as_ref().unwrap()
+        ));
+        drop(old);
+        std::fs::remove_file(source).unwrap();
+        let capture = root.path().join("capture");
+        std::fs::create_dir(&capture).unwrap();
+        let paths = fresh
+            .retained_sources
+            .as_ref()
+            .unwrap()
+            .archive_into(&capture)
+            .unwrap();
+        crate::sandbox::native_archive::verify_path(
+            &paths[0],
+            &fresh.layers[0].sha256,
+            fresh.layers[0].bytes,
+        )
+        .unwrap();
+        let mut changed = fresh.clone();
+        changed.layers[0].sha256 = format!("sha256:{}", "d".repeat(64));
+        assert!(changed.inherit_snapshot_sources(&fresh).is_err());
+    }
+    #[test]
     fn snapshot_content_identity_rebinds_nodes_but_rejects_changed_base() {
         let mut binding = RootfsBinding {
+            snapshot_sources: Vec::new(),
+            retained_sources: None,
+            snapshot_lease: None,
             version: 3,
             source_image: "source".into(),
             layers: vec![spec()],
@@ -1007,6 +1141,9 @@ mod tests {
     #[test]
     fn rootfs_has_explicit_capacity_and_unique_layers() {
         let mut root = RootfsBinding {
+            snapshot_sources: Vec::new(),
+            retained_sources: None,
+            snapshot_lease: None,
             version: 1,
             source_image: "test".into(),
             layers: vec![spec()],
@@ -1062,6 +1199,9 @@ mod tests {
         value = spec();
         value.bytes = 4096;
         assert!(RootfsBinding {
+            snapshot_sources: Vec::new(),
+            retained_sources: None,
+            snapshot_lease: None,
             version: 1,
             source_image: "test".into(),
             layers: vec![value],
