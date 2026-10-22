@@ -561,15 +561,85 @@ def wait_provider(node):
     raise RuntimeError('Provider not serving; no new SDK retry')
 
 
+def service_prepare_arguments(node,build_report,tools_report,tools_image=None):
+    need(node in ('node-a','node-b'),'Explicit service preparation node required')
+    # Ordinary baseline is explicit. The same service enables the UB replica
+    # index only during the later, separately verified lazy activation.
+    arguments=['prepare','--node',node,'--ordinary-only','--core-report',build_report,'--tools-report',tools_report]
+    if tools_image is not None:arguments+=['--tools-image',tools_image]
+    return arguments
+
+
+def validate_ordinary_prepare_stop(prior,failure,boot_id):
+    expected=['pack-existing-four-snapshots','receive-snapshots-a','pack-binaries','prepare-runtime-a']
+    need(prior.get('node')=='node-a' and prior.get('bootId')==boot_id and prior.get('status')=='PREPARING',
+         'Prior preparation belongs to another node/boot or already advanced')
+    rows=prior.get('steps',[])
+    need(len(rows)==4 and [row.get('name') for row in rows]==expected
+         and all(row.get('state')=='completed' for row in rows)
+         and [row.get('exitCode') for row in rows]==[0,0,0,1],
+         'Only the observed ordinary-mode guard failure can be resumed')
+    need(failure.get('status')=='STOPPED_NATIVE_PREPARATION_NO_SERVICE_STARTED'
+         and failure.get('errorType')=='RuntimeError'
+         and failure.get('reason')=='Choose explicit v3 rootfs binding or --ordinary-only control; an unbound service cannot later be called UB-enabled'
+         and all(failure.get(k) is False for k in ('SDK_called','Guest_created','services_changed')),
+         'Failure differs or side effects are uncertain; no automatic continuation')
+
+
+def resume_ordinary_prepare_steps():
+    import fcntl
+    import stat
+    global RESUME_PREPARATION_LOCK
+    safe(WORK)
+    lock=os.open(WORK/'ordinary-prepare-resume.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+    try:
+        meta=os.fstat(lock)
+        need(stat.S_ISREG(meta.st_mode) and meta.st_uid==1204 and meta.st_nlink==1,'Unexpected continuation mutex')
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        prior_path=WORK/'steps-node-a.json';prior_raw=read(prior_path);prior=json.loads(prior_raw)
+        log=WORK/'logs/prepare-runtime-a.log';log_raw=read(log)
+        text=log_raw.decode()
+        need(text.count('BEGIN_NATIVE_PREPARE_REPORT')==text.count('END_NATIVE_PREPARE_REPORT')==1,
+             'Missing or ambiguous original failure report')
+        failure=json.loads(text.split('BEGIN_NATIVE_PREPARE_REPORT',1)[1].split('END_NATIVE_PREPARE_REPORT',1)[0])
+        boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        validate_ordinary_prepare_stop(prior,failure,boot_id)
+        need(failure.get('preserve_new_partial_directory_if_present')==str(DEPLOYMENT),'Failure deployment scope differs')
+        for path in (DEPLOYMENT,ROOT/'r/lazy-four-a-v1',ROOT/'r/fc-lazy-four-a-v1',provider_path('node-a'),
+                     WORK/'root-scope.json',WORK/'root-mailbox',WORK/'metadata-transport.json'):
+            need(not path.exists() and not path.is_symlink(),'New deployment or later-stage state already exists; preserved')
+        for path in (WORK/'snapshots.tar',WORK/'release.tar',WORK/'snapshots/manifest.json',TOOLS):
+            safe(path);need(path.is_file(),'Completed preparation artifact is missing')
+        for row in prior['steps']:
+            need(row.get('log')==str(WORK/'logs'/(row['name']+'.log')),'Original log scope differs')
+        manifest=load(WORK/'snapshots/manifest.json')
+        need(manifest.get('kind')=='ordinary-four-snapshots' and len(manifest.get('templates',[]))==4,
+             'Received snapshot inventory differs')
+        steps=Steps.__new__(Steps)
+        steps.node='node-a';steps.path=WORK/'steps-node-a-ordinary-resume-v1.json'
+        need(not steps.path.exists() and not steps.path.is_symlink()
+             and not (WORK/'logs/prepare-runtime-a-ordinary.log').exists(),'Continuation already attempted; preserve its journal')
+        steps.state={'revision':'lazy-four-ordinary-prepare-resume-v1','node':'node-a','bootId':boot_id,
+            'status':'RESUMING_AFTER_CONFIRMED_PREWRITE_GUARD','steps':[],
+            'resumedFrom':{'journal':str(prior_path),'sha256':hashlib.sha256(prior_raw).hexdigest(),
+                           'failureLog':str(log),'failureLogSha256':hashlib.sha256(log_raw).hexdigest()},
+            'reusedCompletedStages':[row['name'] for row in prior['steps'][:3]],
+            'previousJournalAndLogsPreserved':True}
+        save(steps.path,steps.state)
+        RESUME_PREPARATION_LOCK=lock
+        return steps
+    except BaseException:
+        os.close(lock);raise
+
+
 def prepare_b(args):
     ordinary('node-b');steps=Steps('node-b')
     steps.local('receive-binaries','four_release_bundle.py',['receive','--archive',WORK/'release.tar',
         '--sha256',args.bundle_sha,'--destination',WORK/'release','--run'],1800)
     steps.local('receive-snapshots','lazy_four_snapshots.py',['receive','--archive',WORK/'snapshots.tar',
         '--sha256',args.inputs_sha,'--directory',WORK/'snapshots','--run'],7200)
-    steps.local('prepare-runtime','prepare_lazy_four_service.py',['prepare','--node','node-b',
-        '--core-report',WORK/'release/build-receipt.json','--tools-report',WORK/'release/tools-receipt.json',
-        '--tools-image',WORK/'release/tools.ext4'])
+    steps.local('prepare-runtime','prepare_lazy_four_service.py',service_prepare_arguments('node-b',
+        WORK/'release/build-receipt.json',WORK/'release/tools-receipt.json',WORK/'release/tools.ext4'))
     steps.local('seed-snapshots','lazy_four_snapshots.py',['seed','--directory',WORK/'snapshots','--node','node-b','--run'],7200)
     steps.local('prepare-provider','lazy_four_provider.py',['prepare','--node','node-b','--owner-plan',WORK/'owner-plan.json',
         '--plan-sha256',args.plan_sha,'--run'],600)
@@ -587,7 +657,7 @@ def fetch_b(name):
     return raw.decode()
 
 
-def run_a():
+def run_a(resume_ordinary=False):
     ordinary('node-a');need(Path(__file__).resolve()==SELF,'Use the isolated lazy-four coordinator')
     # Selection is saved before old raw exports begin. Reuse it even if those
     # unrelated exports are still running; do not restart or overwrite them.
@@ -598,7 +668,13 @@ def run_a():
     need(build.get('status')=='COORDINATED_CANDIDATE_BINARIES_BUILT_NOT_DEPLOYED'
          and build['release']['coreCommit']==CORE and build['release']['tree']==CORE_TREE,
          'Wait for the existing coordinated binary build; do not rerun it')
-    transport_readiness();download();steps=Steps('node-a')
+    transport_readiness();download()
+    if resume_ordinary:
+        steps=resume_ordinary_prepare_steps()
+        print('REUSE_THREE_COMPLETED_STAGES_NO_REPACK_NO_REEXTRACT',flush=True)
+        snapshots_sha=sha(WORK/'snapshots.tar');bundle_sha=sha(WORK/'release.tar')
+        return continue_after_archives(steps,bundle_sha,snapshots_sha,resumed=True)
+    steps=Steps('node-a')
     prepare_original_tools()
     steps.local('pack-existing-four-snapshots','lazy_four_snapshots.py',['pack','--repository',
         ROOT/'deployments/agentenv-ae9c626-baseline/state/snapshot-store/repository','--selection',selection,'--history',history,
@@ -609,8 +685,12 @@ def run_a():
     steps.local('pack-binaries','four_release_bundle.py',['pack','--build-report',BUILD,'--tools-report',TOOLS,
         '--archive',WORK/'release.tar','--run'],1800)
     bundle_sha=sha(WORK/'release.tar')
-    steps.local('prepare-runtime-a','prepare_lazy_four_service.py',['prepare','--node','node-a',
-        '--core-report',BUILD,'--tools-report',TOOLS])
+    return continue_after_archives(steps,bundle_sha,snapshots_sha)
+
+
+def continue_after_archives(steps,bundle_sha,snapshots_sha,resumed=False):
+    steps.local('prepare-runtime-a-ordinary' if resumed else 'prepare-runtime-a','prepare_lazy_four_service.py',
+        service_prepare_arguments('node-a',BUILD,TOOLS))
     steps.local('seed-snapshots-a','lazy_four_snapshots.py',['seed','--directory',WORK/'snapshots','--node','node-a','--run'],7200)
     steps.local('prepare-lazy-provider-a','lazy_four_provider.py',['prepare','--node','node-a','--run'],3600)
     code="import os,socket;from pathlib import Path;assert os.getuid()==os.geteuid()==1204 and socket.gethostname()=='agent1';os.umask(0o077);r=Path('/home/jwk/agent');assert r.resolve(strict=True)==r and r.stat().st_uid==1204;p=r/'r/lazy-four-rollout-v1';assert p.parent.resolve(strict=True)==p.parent;p.mkdir(mode=0o700);h=r/'lazy-four';h.mkdir(mode=0o700,exist_ok=True);assert h.resolve(strict=True)==h and h.stat().st_uid==1204"
@@ -673,7 +753,7 @@ def run_a():
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('mode',choices=('run-a','b-prepare','b-root-ready','b-root-command','b-health','b-provider-state',
+    p.add_argument('mode',choices=('run-a','resume-ordinary-prepare-a','b-prepare','b-root-ready','b-root-command','b-health','b-provider-state',
         'b-configure-import','b-retire','b-worker','b-fetch','b-pair'))
     for name in ('bundle-sha','inputs-sha','plan-sha','manifest-sha','credential-sha','admission-epoch','completed-epoch','pair-epoch','payload','file','root-operation'):
         p.add_argument('--'+name)
@@ -681,7 +761,7 @@ def main():
     p.add_argument('--variant',choices=('admission','completed'));p.add_argument('--operation',choices=('prepare','status','measure','release','abort'))
     p.add_argument('--run',action='store_true');a=p.parse_args()
     if not a.run:print('PLAN_ONLY_NO_TARGET_OPERATIONS');return
-    if a.mode=='run-a':run_a();return
+    if a.mode in ('run-a','resume-ordinary-prepare-a'):run_a(a.mode=='resume-ordinary-prepare-a');return
     ordinary('node-b');need(Path(__file__).resolve()==SELF,'Unexpected B coordinator')
     if a.mode=='b-prepare':prepare_b(a)
     elif a.mode=='b-root-ready':
