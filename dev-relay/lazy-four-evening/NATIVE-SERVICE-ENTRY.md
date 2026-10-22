@@ -48,7 +48,7 @@ root终端持续等待是前台provider服务状态，不能当成卡死。停�
 
 这个组件不启动AgentENV、不转换ordinary模板、不生成native快照、不恢复/Fork Guest，也不运行四模板业务。现有四模板native准备器已经包含导出、压缩及DAX执行标记，早先单镜像全零UUID问题也已有finisher；需要核实际准备回执才能选择复用，不能重复64GiB复制或把三文件抽样称为全文件树等价。
 
-本地14项参数、命令、身份、互斥、一次激活和失败语义检查通过；Linux systemd/SDK IPC实际运行未验收。memfile私有CoW和Guest共享文件页的硬件门槛未由该入口解决。普通rootfs对照仍用c56082c的一体入口，不把本组件混入其结果。
+本地15项参数、命令、身份、互斥、一次激活和失败语义检查通过；Linux systemd/SDK IPC实际运行未验收。memfile私有CoW和Guest共享文件页的硬件门槛未由该入口解决。普通rootfs对照仍用c56082c的一体入口，不把本组件混入其结果。
 
 ## 多快照选集与输入固定
 
@@ -65,3 +65,7 @@ A请求可用 `imageSet` 替代manifest/snapshotSet，不设置artifactRoot；�
 准备阶段核原始镜像/源配置为本用户工作目录内真实普通文件，输出与原始输入目录分开；不写入或重新生成raw镜像。设备runtime、选集及源配置固定文件SHA，raw镜像完整hash由核心校验。prepare结果必须有完整 `planSha256`；serve取得SDK锁后再次验证，带 `--expected-plan-sha256` 启动核心，防止实际运行内容不同于已准备计划。
 
 这些模式让首次native发布与后续归档重发布使用同一受限服务和退役合同。仍没有AgentENV/Guest服务部署、四模板任务回放或结果比较；不能直接把此组件的成功输出当成跨节点CoW收益。
+
+## 显式后台提交（供统一入口）
+
+prepare可显式加`--detached`，把`waitForRelease=false`固定到plan中。root只提交精确systemd unit并返回，日志进入journal；默认不加时仍保持前台等待。两种方式都不把提交0视作SDKready或释放，统一入口必须随后核真实owner serving，最终核释放journal及unit进程退出。没有自动restart或重复激活。

@@ -39,4 +39,6 @@ B仅接受已导入A快照的回执，核相同任务、资源、replay SHA、sn
 
 失败时保留未知创建/Fork/删除intent。`cleanup --node ... --scenario ... --replica-mode ... --run`只恢复同boot/Runtime/config的原case journal，不重新开始任务；cleanup不要求provider仍serving，以免阻止必要Guest收尾。只有确认所有Guest释放后，才能停止Runtime，再按provider协议B释放／A核peer receipt并退役。不要用关闭终端或直接杀provider代替退役。
 
-本地8项检查覆盖真实Fork调用数量/7200副本寿命、两restore区分、未知Fork不重试、10helper pins、capture清理不确定不发布ready、真实A归档在B选择及损坏拒绝、安装不覆盖、provider PID变化/缺cgroup。整体167交付检查通过；这些含模型API及本地文件，不是目标Linux/SDK/DAX/Guest验收。memfile真正私有CoW仍未实现。
+本地10项检查覆盖真实Fork调用数量/7200副本寿命、两restore区分、未知Fork不重试、10helper pins、capture清理不确定不发布ready、真实A归档在B选择及损坏拒绝、安装不覆盖、provider PID变化/缺cgroup。整体186交付检查通过；这些含模型API及本地文件，不是目标Linux/SDK/DAX/Guest验收。memfile真正私有CoW仍未实现。
+
+最新集成修正：native观察器以4GiB核对实际FC RAM区间，纠正旧512MiB调用参数；仍不按大小猜测VMA。样本补充collector、精确父coordinator与Runtime host proxy的进程指标，独立失败记NA。辅助进程与Host其他账户存在重叠，SSH/kernel/driver成本未完整覆盖，不求和冒充物理净收益。

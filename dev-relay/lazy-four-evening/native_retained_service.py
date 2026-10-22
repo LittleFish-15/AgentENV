@@ -162,7 +162,8 @@ def verify_source(directory):
 
 def service_command(plan,script,plan_path,plan_sha):
     need(re.fullmatch(r'jwk-native-retained-node-[ab]-[0-9a-f]{12}\.service',plan['unit']),'Unexpected owned unit name')
-    return ['/usr/bin/systemd-run','--unit='+plan['unit'],'--collect','--wait','--pipe',
+    wait_args=['--wait','--pipe'] if plan.get('waitForRelease',True) else ['--property=StandardOutput=journal','--property=StandardError=journal']
+    return ['/usr/bin/systemd-run','--unit='+plan['unit'],'--collect',*wait_args,
         '--property=User=jwk','--property=Group=jwk','--property=SupplementaryGroups=ubsmd',
         '--property=CapabilityBoundingSet=','--property=AmbientCapabilities=','--property=NoNewPrivileges=yes',
         '--property=RestrictSUIDSGID=yes','--property=Type=exec','--property=Restart=no',
@@ -193,12 +194,12 @@ def activation_receipt(plan,pin):
     finally:os.close(fd)
     return directory
 
-def prepare(request_path,node,destination):
+def prepare(request_path,node,destination,detached=False):
     ordinary(node)
     with coordination_mutex('native-four-prepare.lock'):
-        return prepare_locked(request_path,node,destination)
+        return prepare_locked(request_path,node,destination,detached)
 
-def prepare_locked(request_path,node,destination):
+def prepare_locked(request_path,node,destination,detached=False):
     ordinary(node);os.umask(0o077)
     value=validate_request(json.loads(owned(request_path)),node)
     memory_headroom(value['coverageBytes'])
@@ -244,7 +245,8 @@ def prepare_locked(request_path,node,destination):
     with script.open('xb') as stream:stream.write(source)
     plan={'version':1,'node':node,'request':value,'unit':'jwk-native-retained-'+node+'-'+uuid.uuid4().hex[:12]+'.service',
           'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-          'scriptSha256':hashlib.sha256(source).hexdigest(),'inputPins':input_pins,'dryRun':validated,'SDK_called':False,'servicesChanged':False}
+          'scriptSha256':hashlib.sha256(source).hexdigest(),'inputPins':input_pins,'dryRun':validated,'SDK_called':False,'servicesChanged':False,
+          'waitForRelease':not detached}
     put(destination/'plan.json',plan)
     plan_sha=hashlib.sha256(owned(destination/'plan.json')).hexdigest()
     code="""import hashlib,os,socket,stat,sys
@@ -266,6 +268,7 @@ def load_plan(path,pin,node):
     plan=json.loads(raw)
     need(plan['version']==1 and plan['node']==node and plan['bootId']==Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'Plan node or boot changed')
     validate_request(plan['request'],node)
+    need(type(plan.get('waitForRelease',True)) is bool,'Invalid provider activation wait policy')
     need(input_identity(plan['request'],node,Path(path).parent)==plan['inputPins'],'Reviewed native input metadata changed')
     need(hashlib.sha256(owned(Path(__file__),512*1024)).hexdigest()==plan['scriptSha256'],'Service wrapper changed')
     return plan
@@ -303,9 +306,10 @@ def activate(plan,path,pin):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=('prepare','activate','serve'))
     p.add_argument('--node',choices=('node-a','node-b'),required=True);p.add_argument('--request',type=Path)
-    p.add_argument('--directory',type=Path);p.add_argument('--plan',type=Path);p.add_argument('--sha256');p.add_argument('--run',action='store_true');a=p.parse_args()
+    p.add_argument('--directory',type=Path);p.add_argument('--plan',type=Path);p.add_argument('--sha256');p.add_argument('--run',action='store_true')
+    p.add_argument('--detached',action='store_true',help='Prepare an explicit systemd submission; readiness and retirement remain separately required');a=p.parse_args()
     if not a.run:print('PLAN_ONLY_NO_SDK_OR_SERVICE_ACTION');return 0
-    if a.mode=='prepare':need(a.request is not None and a.directory is not None,'Explicit private request and fresh plan directory required');prepare(a.request,a.node,a.directory);return 0
+    if a.mode=='prepare':need(a.request is not None and a.directory is not None,'Explicit private request and fresh plan directory required');prepare(a.request,a.node,a.directory,a.detached);return 0
     need(a.plan is not None and a.sha256 is not None,'Pinned prepared plan required');plan=load_plan(a.plan,a.sha256,a.node)
     if a.mode=='activate':return activate(plan,a.plan,a.sha256)
     serve(plan);return 0

@@ -61,4 +61,6 @@ python3 -I -B native_archive_inputs.py seed --node node-a \
 
 停止时先由业务生命周期确认全部Guest释放、无未知请求，再运行`rollback-plan --node node-a`。它只生成针对当前新Runtime/PID/startTicks和host proxy的停止块，root再核API空闲及cohort状态，停止该新unit并通过已取得pidfd结束其host proxy。保留新安装、日志、快照、所有provider对象及旧服务；UB退役必须另按provider准确release/peer receipt合同完成，不能把停止Runtime当UB释放证明。
 
-本地六项检查覆盖组合选择、坏文件/不完整构建拒绝、实际inventory读取新server、默认不动作、新unit/rollback边界、proxy截止修复。Linux权限、systemd启动、完整播种与Guest业务尚未实机执行。组件不可报告为完整跨节点CoW部署成功。
+本地七项检查覆盖组合选择、坏文件/不完整构建拒绝、实际inventory读取新server、默认不动作、新unit/rollback边界、proxy截止修复。Linux权限、systemd启动、完整播种与Guest业务尚未实机执行。组件不可报告为完整跨节点CoW部署成功。
+
+当前native启动环境显式移除外部继承的direct-memory、UB-memory、UB-rootfs和旧direct-rootfs变量，只设置本次声明的native rootfs绑定，避免把其他场景的内存/缓存路径混入。

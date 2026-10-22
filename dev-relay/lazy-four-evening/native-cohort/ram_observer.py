@@ -308,7 +308,7 @@ def collect_ram(base, runtime_pid, runtime_ticks, sids):
             backend = memory_backend(log.read_text())
             with (proc / 'smaps').open() as stream:smaps = stream.read(4 * 1024**2 + 1)
             require(len(smaps) <= 4 * 1024**2, 'Guest smaps exceeds observation bound')
-            maps = parse_guest_smaps(smaps, backend, 512 * 1024**2,
+            maps = parse_guest_smaps(smaps, backend, 4096 * 1024**2,
                                      guest_regions(cwd, pid))
             metrics = {}
             for name in ('Rss', 'Pss', 'Private_Clean', 'Private_Dirty', 'Shared_Clean', 'Shared_Dirty', 'Swap'):

@@ -81,6 +81,8 @@ def make_module(definition):
     original_environment=m.environment
     def environment():
         env=original_environment()
+        for key in ('AENV_DIRECT_MEMORY_BINDING','AENV_UB_MEMORY_REPLICAS','AENV_UB_ROOTFS_REPLICAS','AENV_DIRECT_ROOTFS_BINDING'):
+            env.pop(key,None)
         if definition.get('rootfsBinding'):
             env['AENV_DIRECT_ROOTFS_BINDING']=definition['rootfsBinding']['path']
         return env

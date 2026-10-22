@@ -231,6 +231,36 @@ def provider_metrics(node,observer):
         result.update(available=False,errorType=type(error).__name__,reason=str(error)[:300] if isinstance(error,RuntimeError) else 'Provider metrics unavailable')
     return result
 
+def auxiliary_metrics(base,observer):
+    """Identify owned helpers; values overlap other Host accounting layers."""
+    result={'scope':'owned_collector_parent_coordinator_and_runtime_host_proxy','processes':{},
+            'completeAuxiliaryCost':False,'physicalAdditive':False,'missingScopes':['SSH transport children','kernel mappings and driver accounting']}
+    candidates={}
+    try:candidates['collector']={'pid':os.getpid(),'startTicks':ticks(os.getpid())}
+    except (OSError,ValueError):result['processes']['collector']={'available':False}
+    try:
+        parent=os.getppid();cmd=Path('/proc',str(parent),'cmdline').read_bytes().split(b'\0')
+        if cmd[:4]==[b'/usr/bin/python3',b'-I',b'-B',os.fsencode(ROOT/'native_archive_round.py')]:
+            candidates['coordinator']={'pid':parent,'startTicks':ticks(parent)}
+        else:result['processes']['coordinator']={'available':False,'reason':'Exact parent coordinator command not established'}
+    except (OSError,ValueError):result['processes']['coordinator']={'available':False}
+    try:
+        installation=load(base/'installation.json');proxy=load(Path(installation['runtime'])/'host-proxy.json')
+        cmd=Path('/proc',str(proxy['pid']),'cmdline').read_bytes().split(b'\0')
+        need(cmd==[b'/usr/bin/python3',b'-I',b'-B',os.fsencode(base/'libexec/native_service.py'),b'proxy-host',b''],
+             'Exact Runtime proxy command differs')
+        candidates['hostProxy']={'pid':proxy['pid'],'startTicks':proxy['start_ticks']}
+    except (OSError,KeyError,RuntimeError):result['processes']['hostProxy']={'available':False}
+    seen=set()
+    for label,identity in candidates.items():
+        try:
+            pid=identity['pid'];status=Path('/proc',str(pid),'status').read_text()
+            need(re.search(r'^Uid:\s+1204\s+1204\s+1204\s+1204$',status,re.M),'Auxiliary process owner differs')
+            key=(pid,identity['startTicks']);need(key not in seen,'Repeated auxiliary process scope');seen.add(key)
+            result['processes'][label]={'identity':identity,'metrics':observer.whole_process_metrics(pid,identity['startTicks'])}
+        except (OSError,RuntimeError):result['processes'][label]={'available':False}
+    return result
+
 
 def sample_node(api, observer, base, node, phase, sids):
     start = time.time_ns()
@@ -238,7 +268,7 @@ def sample_node(api, observer, base, node, phase, sids):
     charge = cgroup_memory(api.cgroup)
     provider = provider_metrics(node, observer)
     return {'phase': phase, 'startNs': start, 'endNs': time.time_ns(), 'ram': ram,
-            'runtimeCharge': charge, 'provider': provider, 'atomicSnapshot': False}
+            'runtimeCharge': charge, 'provider': provider, 'auxiliary': auxiliary_metrics(base,observer), 'atomicSnapshot': False}
 
 ROOT = Path('/home/jwk/agent')
 CORE = '5e6621c9c9d2e347959a61a46c7f6d99688eeb55'
