@@ -25,8 +25,8 @@ use uvm_ublk::{
 };
 
 use crate::protocol::{
-    recv_message, send_message, AccessMode, DaemonRequest, DaemonResponse, PackRecordingState,
-    ResizeToolSpec,
+    recv_message, send_message, validate_max_io_buf_bytes, AccessMode, DaemonRequest,
+    DaemonResponse, PackRecordingState, ResizeToolSpec, DEFAULT_MAX_IO_BUF_BYTES,
 };
 use crate::runtime;
 
@@ -602,6 +602,41 @@ async fn handle_connection(
                 resize_global_config: &resize_global_config,
                 resize_permit: Arc::clone(&resize_permit),
                 allow_shrink,
+                max_io_buf_bytes: DEFAULT_MAX_IO_BUF_BYTES,
+            };
+            handle_create_overlaybd_runtime_device(
+                request,
+                ctrl_ring,
+                &devices,
+                &image_service_cache,
+                &pool_state,
+            )
+            .await
+        }
+        DaemonRequest::CreateOverlaybdRuntimeDeviceWithIoLimit {
+            source_image_config,
+            global_config,
+            runtime_dir,
+            read_only,
+            runtime_upper_mode,
+            requested_virtual_size,
+            known_source_virtual_size,
+            allow_shrink,
+            max_io_buf_bytes,
+        } => {
+            let request = OverlaybdRuntimeDeviceRequest {
+                source_image_config: &source_image_config,
+                global_config: &global_config,
+                runtime_dir: &runtime_dir,
+                read_only,
+                runtime_upper_mode,
+                requested_virtual_size,
+                known_source_virtual_size,
+                resize_tool: resize_tool.as_ref(),
+                resize_global_config: &resize_global_config,
+                resize_permit: Arc::clone(&resize_permit),
+                allow_shrink,
+                max_io_buf_bytes,
             };
             handle_create_overlaybd_runtime_device(
                 request,
@@ -694,6 +729,7 @@ async fn handle_connection(
                 &global_config,
                 virtual_size,
                 access_mode,
+                DEFAULT_MAX_IO_BUF_BYTES,
             )
             .await
         }
@@ -750,6 +786,7 @@ struct OverlaybdRuntimeDeviceRequest<'a> {
     resize_global_config: &'a Path,
     resize_permit: Arc<Mutex<()>>,
     allow_shrink: bool,
+    max_io_buf_bytes: u32,
 }
 
 async fn handle_create_overlaybd_runtime_device(
@@ -759,6 +796,11 @@ async fn handle_create_overlaybd_runtime_device(
     image_service_cache: &ImageServiceCache,
     pool_state: &Option<Arc<PoolState>>,
 ) -> Result<DaemonResponse> {
+    if let Err(error) = validate_max_io_buf_bytes(request.max_io_buf_bytes) {
+        return Ok(DaemonResponse::InvalidRequest {
+            message: error.to_string(),
+        });
+    }
     let runtime =
         match runtime::materialize_overlaybd_runtime(runtime::MaterializeOverlaybdRuntimeRequest {
             image_service_cache,
@@ -796,6 +838,7 @@ async fn handle_create_overlaybd_runtime_device(
             request.global_config,
             Some(runtime.actual_virtual_size),
             AccessMode::Exclusive,
+            request.max_io_buf_bytes,
         )
         .await
         {
@@ -813,6 +856,7 @@ async fn handle_create_overlaybd_runtime_device(
             image_service_cache,
             &runtime.runtime_image_config_path,
             request.global_config,
+            request.max_io_buf_bytes,
         )
         .await
     };
@@ -861,6 +905,7 @@ async fn handle_create_raw_overlaybd(
         image_service_cache,
         image_config,
         global_config,
+        DEFAULT_MAX_IO_BUF_BYTES,
     )
     .await?;
 
@@ -876,7 +921,9 @@ async fn create_overlaybd_device(
     image_service_cache: &ImageServiceCache,
     image_config: &Path,
     global_config: &Path,
+    max_io_buf_bytes: u32,
 ) -> Result<(u32, PathBuf)> {
+    validate_max_io_buf_bytes(max_io_buf_bytes)?;
     let image_service = image_service_cache
         .get_or_create(global_config)
         .await
@@ -899,6 +946,7 @@ async fn create_overlaybd_device(
 
     let ctrl = UVMUblkCtrlBuilder::new()
         .name("overlaybd-blk")
+        .max_io_buf_bytes(max_io_buf_bytes)
         .build(ctrl_ring.clone())
         .context("build ublk ctrl")?;
 
@@ -913,6 +961,13 @@ async fn create_overlaybd_device(
         cleanup_failed_ublk_start(ctrl_ring.clone(), dev).await;
         return Err(err);
     }
+
+    if dev.max_io_buf_bytes() != max_io_buf_bytes {
+        let actual = dev.max_io_buf_bytes();
+        cleanup_failed_ublk_start(ctrl_ring.clone(), dev).await;
+        bail!("kernel ublk I/O limit mismatch: requested {max_io_buf_bytes}, actual {actual}");
+    }
+    tracing::info!(dev_id, max_io_buf_bytes, "verified ublk device I/O limit");
 
     if let Err(err) = wait_for_ublk_dev(dev_id).context("wait for ublk device") {
         cleanup_failed_ublk_start(ctrl_ring.clone(), dev).await;
@@ -1451,7 +1506,13 @@ async fn handle_acquire_overlaybd(
     global_config: &Path,
     virtual_size: Option<u64>,
     access_mode: AccessMode,
+    max_io_buf_bytes: u32,
 ) -> Result<DaemonResponse> {
+    validate_max_io_buf_bytes(max_io_buf_bytes)?;
+    anyhow::ensure!(
+        access_mode == AccessMode::Exclusive || max_io_buf_bytes == DEFAULT_MAX_IO_BUF_BYTES,
+        "shared devices keep the default I/O limit"
+    );
     let pool = pool_state
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("warm pool not enabled"))?;
@@ -1482,7 +1543,14 @@ async fn handle_acquire_overlaybd(
 
     match access_mode {
         AccessMode::Exclusive => {
-            acquire_exclusive(Arc::clone(pool), ctrl_ring, image_config, image).await
+            acquire_exclusive(
+                Arc::clone(pool),
+                ctrl_ring,
+                image_config,
+                image,
+                max_io_buf_bytes,
+            )
+            .await
         }
         AccessMode::Shared => {
             acquire_shared(
@@ -1503,9 +1571,10 @@ async fn prepare_overlaybd_device(
     image_config: &Path,
     image: &Arc<ImageFile>,
     mode: &'static str,
+    max_io_buf_bytes: u32,
 ) -> Result<(UVMUblkDev<OverlaybdTarget>, bool)> {
     let new_sectors = image.num_lbas();
-    if let Some(p) = take_idle_device(pool, new_sectors) {
+    if let Some(p) = take_idle_device(pool, new_sectors, max_io_buf_bytes) {
         let dev_id = p.dev.dev_id();
         tracing::debug!(dev_id, mode, "reusing warm device from pool");
 
@@ -1528,7 +1597,7 @@ async fn prepare_overlaybd_device(
         Ok((p.dev, true))
     } else {
         tracing::debug!(mode, "pool miss: creating new device");
-        let dev = create_new_device(ctrl_ring.clone(), image_config, image)
+        let dev = create_new_device(ctrl_ring.clone(), image_config, image, max_io_buf_bytes)
             .await
             .with_context(|| format!("create new {mode} ublk device on pool miss"))?;
         Ok((dev, false))
@@ -1540,9 +1609,17 @@ async fn acquire_exclusive(
     ctrl_ring: IoRingHandle<io_uring::squeue::Entry128>,
     image_config: &Path,
     image: Arc<ImageFile>,
+    max_io_buf_bytes: u32,
 ) -> Result<DaemonResponse> {
-    let (dev, is_reused) =
-        prepare_overlaybd_device(&pool, &ctrl_ring, image_config, &image, "exclusive").await?;
+    let (dev, is_reused) = prepare_overlaybd_device(
+        &pool,
+        &ctrl_ring,
+        image_config,
+        &image,
+        "exclusive",
+        max_io_buf_bytes,
+    )
+    .await?;
 
     let dev_id = dev.dev_id();
     let device_path = dev.device_path().to_path_buf();
@@ -1598,8 +1675,15 @@ async fn acquire_shared(
         });
     }
 
-    let (dev, is_reused) =
-        prepare_overlaybd_device(&pool, &ctrl_ring, image_config, &image, "shared").await?;
+    let (dev, is_reused) = prepare_overlaybd_device(
+        &pool,
+        &ctrl_ring,
+        image_config,
+        &image,
+        "shared",
+        DEFAULT_MAX_IO_BUF_BYTES,
+    )
+    .await?;
 
     let dev_id = dev.dev_id();
     let device_path = dev.device_path().to_path_buf();
@@ -1823,13 +1907,30 @@ async fn handle_update_size(
 
 // ── Helper functions ────────────────────────────────────────────────────────
 
-fn take_idle_device(pool: &PoolState, dev_sectors: u64) -> Option<PooledDevice> {
-    if pool.supports_update_size() {
-        return pool.idle.try_acquire();
-    }
+fn idle_device_matches(
+    actual_sectors: u64,
+    actual_io_bytes: u32,
+    requested_sectors: u64,
+    requested_io_bytes: u32,
+    can_resize: bool,
+) -> bool {
+    actual_io_bytes == requested_io_bytes && (can_resize || actual_sectors == requested_sectors)
+}
 
-    pool.idle
-        .try_acquire_where(|pooled| pooled.dev_sectors == dev_sectors)
+fn take_idle_device(
+    pool: &PoolState,
+    dev_sectors: u64,
+    max_io_buf_bytes: u32,
+) -> Option<PooledDevice> {
+    pool.idle.try_acquire_where(|pooled| {
+        idle_device_matches(
+            pooled.dev_sectors,
+            pooled.dev.max_io_buf_bytes(),
+            dev_sectors,
+            max_io_buf_bytes,
+            pool.supports_update_size(),
+        )
+    })
 }
 
 async fn return_or_stop_idle_device(
@@ -1894,9 +1995,14 @@ async fn refill_idle_pool(
         .context("build pool placeholder for prewarm")?;
 
     for _ in 0..to_create {
-        let dev = create_new_device(ctrl_ring.clone(), &placeholder_config, &placeholder_image)
-            .await
-            .context("prewarm overlaybd pool device")?;
+        let dev = create_new_device(
+            ctrl_ring.clone(),
+            &placeholder_config,
+            &placeholder_image,
+            DEFAULT_MAX_IO_BUF_BYTES,
+        )
+        .await
+        .context("prewarm overlaybd pool device")?;
         let pooled = PooledDevice {
             dev,
             dev_sectors: placeholder_image.num_lbas(),
@@ -1979,7 +2085,9 @@ async fn create_new_device(
     ctrl_ring: IoRingHandle<io_uring::squeue::Entry128>,
     image_config: &Path,
     image: &Arc<ImageFile>,
+    max_io_buf_bytes: u32,
 ) -> Result<UVMUblkDev<OverlaybdTarget>> {
+    validate_max_io_buf_bytes(max_io_buf_bytes)?;
     let discard_supported = !image.is_read_only().await;
     let target = OverlaybdTarget::from_opened_image(
         image_config.to_path_buf(),
@@ -1990,6 +2098,7 @@ async fn create_new_device(
 
     let ctrl = UVMUblkCtrlBuilder::new()
         .name("overlaybd-blk")
+        .max_io_buf_bytes(max_io_buf_bytes)
         .build(ctrl_ring.clone())
         .context("build ublk ctrl")?;
 
@@ -2004,6 +2113,13 @@ async fn create_new_device(
         cleanup_failed_ublk_start(ctrl_ring.clone(), dev).await;
         return Err(err);
     }
+    if dev.max_io_buf_bytes() != max_io_buf_bytes {
+        let actual = dev.max_io_buf_bytes();
+        cleanup_failed_ublk_start(ctrl_ring.clone(), dev).await;
+        bail!("kernel ublk I/O limit mismatch: requested {max_io_buf_bytes}, actual {actual}");
+    }
+    tracing::info!(dev_id, max_io_buf_bytes, "verified ublk device I/O limit");
+
     if let Err(err) = wait_for_ublk_dev(dev_id).context("wait for ublk device") {
         cleanup_failed_ublk_start(ctrl_ring.clone(), dev).await;
         return Err(err);
@@ -2060,6 +2176,23 @@ fn clear_page_cache(device_path: &Path) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn idle_device_io_limit_never_crosses_pool_roles() {
+        for can_resize in [false, true] {
+            assert!(!idle_device_matches(4096, 262144, 4096, 65536, can_resize));
+            assert!(!idle_device_matches(4096, 65536, 4096, 262144, can_resize));
+            assert!(idle_device_matches(4096, 65536, 4096, 65536, can_resize));
+            assert!(idle_device_matches(4096, 262144, 4096, 262144, can_resize));
+        }
+    }
+
+    #[test]
+    fn idle_device_size_matching_still_requires_kernel_resize_support() {
+        assert!(!idle_device_matches(4096, 65536, 8192, 65536, false));
+        assert!(idle_device_matches(4096, 65536, 8192, 65536, true));
+        assert!(!idle_device_matches(4096, 262144, 8192, 65536, true));
+    }
 
     /// Minimal local `ImageService`; placeholder images have no lowers, so this
     /// is never used for registry access.

@@ -372,6 +372,7 @@ mod client_tests {
         let client = server.client();
         let device = client
             .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                max_io_buf_bytes: uvm_ublk_daemon::protocol::DEFAULT_MAX_IO_BUF_BYTES,
                 source_image_config: Path::new("/src/image.json"),
                 global_config: Path::new("/global.json"),
                 runtime_dir: Path::new("/work/overlaybd"),
@@ -407,6 +408,7 @@ mod client_tests {
         let client = server.client();
         let err = client
             .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                max_io_buf_bytes: uvm_ublk_daemon::protocol::DEFAULT_MAX_IO_BUF_BYTES,
                 source_image_config: Path::new("/src/image.json"),
                 global_config: Path::new("/global.json"),
                 runtime_dir: Path::new("/work/overlaybd"),
@@ -430,6 +432,7 @@ mod client_tests {
         let err = server
             .client()
             .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                max_io_buf_bytes: uvm_ublk_daemon::protocol::DEFAULT_MAX_IO_BUF_BYTES,
                 source_image_config: Path::new("/src/image.json"),
                 global_config: Path::new("/global.json"),
                 runtime_dir: Path::new("/work/overlaybd"),
@@ -451,6 +454,7 @@ mod client_tests {
         let client = server.client();
         let err = client
             .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                max_io_buf_bytes: uvm_ublk_daemon::protocol::DEFAULT_MAX_IO_BUF_BYTES,
                 source_image_config: Path::new("/src/image.json"),
                 global_config: Path::new("/global.json"),
                 runtime_dir: Path::new("/work/overlaybd"),

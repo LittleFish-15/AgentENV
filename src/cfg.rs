@@ -495,6 +495,10 @@ pub struct UblkTomlConfig {
 
 #[derive(Debug, Config, Clone)]
 pub struct UblkOverlaybdTomlConfig {
+    /// Maximum ublk I/O size for sandbox rootfs only. Memory snapshots, tools
+    /// and extra drives retain their existing device limits.
+    #[config(default = 256u32)]
+    pub rootfs_max_io_kib: u32,
     #[config(default = "$AENV_HOME/overlaybd/overlaybd-global.json")]
     pub global_config_path: PathBuf,
     #[config(default = false)]
@@ -1033,6 +1037,10 @@ impl AppConfig {
 
     fn validate(&self) -> Result<()> {
         self.validate_pool_config()?;
+        let rootfs_io = self.ublk.overlaybd.rootfs_max_io_kib;
+        if !(4..=256).contains(&rootfs_io) || !rootfs_io.is_power_of_two() {
+            bail!("ublk.overlaybd.rootfs_max_io_kib must be a power of two between 4 and 256");
+        }
         self.image.cache.gc.validate()?;
         NetworkConfig::validate(&self.network)?;
         if self.ublk.overlaybd.resize_timeout_secs == 0 {
@@ -1496,6 +1504,31 @@ impl SandboxProxyConfig {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn rootfs_io_limit_defaults_and_validation() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.ublk.overlaybd.rootfs_max_io_kib, 256);
+        for kib in [4, 8, 16, 32, 64, 128, 256] {
+            config.ublk.overlaybd.rootfs_max_io_kib = kib;
+            config.validate().unwrap();
+        }
+        for kib in [0, 1, 3, 63, 65, 257, 512, u32::MAX] {
+            config.ublk.overlaybd.rootfs_max_io_kib = kib;
+            let error = config.validate().unwrap_err();
+            assert!(error.to_string().contains("rootfs_max_io_kib"));
+        }
+    }
+
+    #[test]
+    fn rootfs_io_limit_loads_from_toml() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "[ublk.overlaybd]\nrootfs_max_io_kib = 64\n")?;
+        let config = ConfigManager::new_from_path(&path)?;
+        assert_eq!(config.config().ublk.overlaybd.rootfs_max_io_kib, 64);
+        Ok(())
+    }
 
     #[test]
     fn bundled_default_config_loads() -> Result<()> {

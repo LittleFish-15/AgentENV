@@ -11,6 +11,16 @@ use tokio::net::UnixStream;
 /// Maximum message size (16 MiB). Protects against corrupt length prefixes.
 const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
+pub const DEFAULT_MAX_IO_BUF_BYTES: u32 = 256 * 1024;
+
+pub fn validate_max_io_buf_bytes(bytes: u32) -> Result<()> {
+    anyhow::ensure!(
+        (4096..=DEFAULT_MAX_IO_BUF_BYTES).contains(&bytes) && bytes.is_power_of_two(),
+        "max_io_buf_bytes must be a power of two between 4096 and 262144"
+    );
+    Ok(())
+}
+
 // ── Request / Response ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +49,21 @@ pub enum DaemonRequest {
         known_source_virtual_size: Option<u64>,
         #[serde(default)]
         allow_shrink: bool,
+    },
+    /// Explicit extension: an old daemon rejects this tag before creating any
+    /// device, instead of silently ignoring a new optional limit field.
+    CreateOverlaybdRuntimeDeviceWithIoLimit {
+        source_image_config: PathBuf,
+        global_config: PathBuf,
+        runtime_dir: PathBuf,
+        read_only: bool,
+        #[serde(default = "default_runtime_upper_mode")]
+        runtime_upper_mode: UpperMode,
+        requested_virtual_size: Option<u64>,
+        known_source_virtual_size: Option<u64>,
+        #[serde(default)]
+        allow_shrink: bool,
+        max_io_buf_bytes: u32,
     },
     Delete {
         dev_id: u32,
@@ -256,6 +281,45 @@ pub async fn recv_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn io_limit_validation_rejects_unaligned_or_oversized_values() {
+        for bytes in [4096, 8192, 16384, 32768, 65536, 131072, 262144] {
+            validate_max_io_buf_bytes(bytes).unwrap();
+        }
+        for bytes in [0, 512, 4095, 65535, 65537, 262145, u32::MAX] {
+            assert!(validate_max_io_buf_bytes(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_io_limit_wire_roundtrip_and_required_limit() {
+        let request = DaemonRequest::CreateOverlaybdRuntimeDeviceWithIoLimit {
+            source_image_config: PathBuf::from("/image.json"),
+            global_config: PathBuf::from("/global.json"),
+            runtime_dir: PathBuf::from("/runtime"),
+            read_only: false,
+            runtime_upper_mode: UpperMode::LogStructured,
+            requested_virtual_size: None,
+            known_source_virtual_size: None,
+            allow_shrink: false,
+            max_io_buf_bytes: 65536,
+        };
+        let mut value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            value["kind"],
+            "create_overlaybd_runtime_device_with_io_limit"
+        );
+        assert!(matches!(
+            serde_json::from_value::<DaemonRequest>(value.clone()).unwrap(),
+            DaemonRequest::CreateOverlaybdRuntimeDeviceWithIoLimit {
+                max_io_buf_bytes: 65536,
+                ..
+            }
+        ));
+        value.as_object_mut().unwrap().remove("max_io_buf_bytes");
+        assert!(serde_json::from_value::<DaemonRequest>(value).is_err());
+    }
 
     // ── Existing serde round-trip tests ─────────────────────────────────
 

@@ -447,6 +447,7 @@ pub(crate) async fn prepare_extra_drives(
             let allow_shrink = mode.allow_shrink();
             let runtime_device = UblkDeviceManager::global()
                 .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                    max_io_buf_bytes: uvm_ublk_daemon::protocol::DEFAULT_MAX_IO_BUF_BYTES,
                     source_image_config: drive.image_config_path(),
                     global_config: global_config_path,
                     runtime_dir: &runtime_dir,

@@ -1801,6 +1801,7 @@ impl FirecrackerSandbox {
         let runtime_dir = work_dir.join("overlaybd");
         let runtime_device = UblkDeviceManager::global()
             .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                max_io_buf_bytes: global_config.ublk.overlaybd.rootfs_max_io_kib * 1024,
                 source_image_config: &rootfs_image_config.image_config_path,
                 global_config: &global_cfg_path,
                 runtime_dir: &runtime_dir,
@@ -2046,6 +2047,7 @@ impl FirecrackerSandbox {
             let runtime_dir = fc_cwd.join("overlaybd");
             let runtime_device = UblkDeviceManager::global()
                 .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                    max_io_buf_bytes: global_config.ublk.overlaybd.rootfs_max_io_kib * 1024,
                     source_image_config: &rootfs_image_config.image_config_path,
                     global_config: &global_cfg_path,
                     runtime_dir: &runtime_dir,

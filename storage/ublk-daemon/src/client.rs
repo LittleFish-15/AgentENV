@@ -64,6 +64,7 @@ pub struct CreateOverlaybdRuntimeDeviceRequest<'a> {
     pub requested_virtual_size: Option<u64>,
     pub known_source_virtual_size: Option<u64>,
     pub allow_shrink: bool,
+    pub max_io_buf_bytes: u32,
 }
 
 #[derive(Debug)]
@@ -492,15 +493,30 @@ impl UblkDaemonClient {
         &self,
         request: CreateOverlaybdRuntimeDeviceRequest<'_>,
     ) -> Result<OverlaybdRuntimeDevice> {
-        let request = DaemonRequest::CreateOverlaybdRuntimeDevice {
-            source_image_config: request.source_image_config.to_path_buf(),
-            global_config: request.global_config.to_path_buf(),
-            runtime_dir: request.runtime_dir.to_path_buf(),
-            read_only: request.read_only,
-            runtime_upper_mode: request.runtime_upper_mode,
-            requested_virtual_size: request.requested_virtual_size,
-            known_source_virtual_size: request.known_source_virtual_size,
-            allow_shrink: request.allow_shrink,
+        crate::protocol::validate_max_io_buf_bytes(request.max_io_buf_bytes)?;
+        let request = if request.max_io_buf_bytes == crate::protocol::DEFAULT_MAX_IO_BUF_BYTES {
+            DaemonRequest::CreateOverlaybdRuntimeDevice {
+                source_image_config: request.source_image_config.to_path_buf(),
+                global_config: request.global_config.to_path_buf(),
+                runtime_dir: request.runtime_dir.to_path_buf(),
+                read_only: request.read_only,
+                runtime_upper_mode: request.runtime_upper_mode,
+                requested_virtual_size: request.requested_virtual_size,
+                known_source_virtual_size: request.known_source_virtual_size,
+                allow_shrink: request.allow_shrink,
+            }
+        } else {
+            DaemonRequest::CreateOverlaybdRuntimeDeviceWithIoLimit {
+                source_image_config: request.source_image_config.to_path_buf(),
+                global_config: request.global_config.to_path_buf(),
+                runtime_dir: request.runtime_dir.to_path_buf(),
+                read_only: request.read_only,
+                runtime_upper_mode: request.runtime_upper_mode,
+                requested_virtual_size: request.requested_virtual_size,
+                known_source_virtual_size: request.known_source_virtual_size,
+                allow_shrink: request.allow_shrink,
+                max_io_buf_bytes: request.max_io_buf_bytes,
+            }
         };
         match self
             .call(request, self.inner.runtime_device_timeout)
@@ -768,6 +784,61 @@ impl UblkDaemonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rootfs_io_limit_selects_explicit_wire_extension() {
+        for limit in [65536, crate::protocol::DEFAULT_MAX_IO_BUF_BYTES] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("limit.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let client = UblkDaemonClient::new_for_test(socket, false);
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = recv_message::<DaemonRequest>(&mut stream)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                match request {
+                    DaemonRequest::CreateOverlaybdRuntimeDeviceWithIoLimit {
+                        max_io_buf_bytes,
+                        ..
+                    } => {
+                        assert_eq!(limit, 65536);
+                        assert_eq!(max_io_buf_bytes, limit);
+                    }
+                    DaemonRequest::CreateOverlaybdRuntimeDevice { .. } => assert_eq!(limit, 262144),
+                    _ => panic!("unexpected runtime request"),
+                }
+                send_message(
+                    &mut stream,
+                    &DaemonResponse::OverlaybdRuntimeDeviceCreated {
+                        dev_id: 7,
+                        device_path: PathBuf::from("/dev/ublkb7"),
+                        actual_virtual_size: 67108864,
+                        runtime_image_config_path: PathBuf::from("/runtime/image.json"),
+                    },
+                )
+                .await
+                .unwrap();
+            });
+            let device = client
+                .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
+                    source_image_config: Path::new("/source.json"),
+                    global_config: Path::new("/global.json"),
+                    runtime_dir: Path::new("/runtime"),
+                    read_only: false,
+                    runtime_upper_mode: UpperMode::LogStructured,
+                    requested_virtual_size: None,
+                    known_source_virtual_size: None,
+                    allow_shrink: false,
+                    max_io_buf_bytes: limit,
+                })
+                .await
+                .unwrap();
+            assert_eq!(device.dev_id, 7);
+            server.await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn shutdown_waits_for_child_exit_after_rpc_ack() {

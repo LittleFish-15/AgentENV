@@ -388,6 +388,11 @@ impl<T: UVMUblkTarget> UVMUblkDev<T> {
         self.ctrl.dev_info.dev_id
     }
 
+    /// The device creation limit, refreshed from the kernel during start.
+    pub fn max_io_buf_bytes(&self) -> u32 {
+        self.ctrl.dev_info.max_io_buf_bytes
+    }
+
     pub async fn wait_for_bg_tasks(&mut self) {
         let tasks = {
             let mut tasks = self.inner.queue_threads.lock().unwrap();
