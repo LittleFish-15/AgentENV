@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('four', HERE / 'A_dsec_four_v2.py')
+spec = importlib.util.spec_from_file_location('four', HERE / 'A_dsec_four_v3.py')
 m = importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 

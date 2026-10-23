@@ -143,6 +143,7 @@ def build_run(args):
             self.args = args
             self.node = 'node-a'
             self.rt, self.engine = module('four_runtime'), module('cohort_engine')
+            module('dsec_fork_check').extend_engine(self.engine)
             self.lifecycle_module = module('four_lifecycle')
             self.replay = module('four_replay')
             self.observer = module('dsec_observer')
@@ -157,7 +158,7 @@ def build_run(args):
             self.root = WORK
             self.root.mkdir(mode=0o700, exist_ok=True)
             need(self.root.resolve(strict=True) == self.root and self.root.stat().st_uid == 1204, 'Work root changed')
-            self.phase = 'parents' if args.mode == 'parents' else args.scenario
+            self.phase = args.mode if args.mode in ('parents', 'fork-check') else args.scenario
             self.work = self.root / self.phase
             self.run_id = uuid.uuid4().hex
             self.states, self.jobs, self.state = {}, [], {'samples': []}
@@ -187,6 +188,16 @@ def build_run(args):
                 ready = self.rt.load(WORK / 'observer-live.json')
                 need(ready.get('planSha256') == self.observer_plan_sha and ready.get('observerRunId') == self.observer_run and
                      0 <= time.monotonic() - ready['monotonic'] < 150, 'Root observer stopped or changed; stop replay')
+
+        def capacity_kind(self, kind):
+            self.cancel_check()
+            if kind != 'fork_pair':
+                return field.capacity(kind)
+            value = field.capacity('fork')
+            need(value['limit'] - value['registered'] >= 6, 'Fork pair requires six free ublk slots')
+            available = self.observer.host_observation().get('memoryBytes', {}).get('MemAvailable')
+            need(type(available) is int and available >= 14 * 1024**3, 'Fork pair RAM/headroom unavailable')
+            return dict(value, requiredFree=6)
 
         def persist_case(self, index, value):
             super().persist_case(index, value)
@@ -241,6 +252,62 @@ def build_run(args):
             except (Exception, KeyboardInterrupt) as error:
                 return interrupted_report(self, error)
 
+        def run_fork_check(self):
+            templates = self.rt.load(self.root / 'templates.json')
+            need(templates.get('context') == self.context and templates.get('status') ==
+                 'FOUR_NATIVE_PARENTS_CAPTURED_OWNED_GUESTS_RELEASED', 'Matching clean parents required')
+            template = templates['templates'][0]
+            need(self.snapshot(0, template['nativeTemplateId']) == template['snapshotEvidence'], 'Parent record changed')
+            self.fresh()
+            report = {'status': 'DSEC_FORK_CHECK_RUNNING', 'coreCommit': CORE, 'context': self.context,
+                      'runId': self.run_id, 'SDK_called': False, 'globalPhysicalSavingBytes': None,
+                      'memfileCrossNodePrivateCowAccepted': False, 'commands': []}
+            base = INPUTS / 'case-0/raw/rootfs.ext4'
+            def verify_base():
+                pins = self.observer.pin_base_files([base])
+                need(pins[0]['size'] == self.binding['bindings'][0]['layers'][0]['bytes'], 'Functional base size differs')
+                digest = 'sha256:' + self.rt.digest_file(base, 8 * 1024**3)
+                need(digest == self.binding['bindings'][0]['layers'][0]['sha256'], 'Functional base content differs')
+                need(pins == self.observer.pin_base_files([base]), 'Base metadata changed during hash')
+                return pins, digest
+            try:
+                self.transport()
+                before = verify_base()
+                case = self.lifecycle.begin_case(0)
+                def execute(sid, label, mode):
+                    result = self.command({'sandboxId': sid, 'index': len(report['commands'])},
+                        module('smoke_actions').guest_action(case.run_id, mode), label)
+                    report['commands'].append(dict(result, sandboxId=sid, label=label))
+                    need(result['returnCode'] == 0, 'Fork Guest functional command failed: ' + label)
+                report['functional'] = module('dsec_fork_check').exercise(case, template, execute)
+                need(before == verify_base(), 'Host base changed during Fork lifecycle')
+                report['baseUnchanged'] = True
+                report['status'] = 'DSEC_FORK_PAIR_PASSED_PENDING_CLEANUP'
+            except (Exception, KeyboardInterrupt) as error:
+                report.update(status='STOPPED_DSEC_FORK_CHECK_PRESERVE_JOURNAL', errorType=type(error).__name__,
+                              reason=re.sub(r'e2b_[A-Za-z0-9._~-]+', '<redacted>', str(error))[:1000])
+            finally:
+                try:
+                    report.update(self.lifecycle.cleanup())
+                except Exception as error:
+                    report.update(ownedGuestsReleased=False, cleanupErrorType=type(error).__name__)
+                try:
+                    if self.credentials is not None and self.credentials.exists():
+                        meta = self.credentials.stat()
+                        need(self.credentials == self.work / 'cli/aenv/credentials' and not self.credentials.is_symlink()
+                             and stat.S_ISREG(meta.st_mode) and meta.st_uid == 1204, 'Functional temporary credential metadata changed')
+                        self.credentials.unlink()
+                    report['temporaryCredentialsRemoved'] = self.credentials is None or not self.credentials.exists()
+                except (OSError, RuntimeError) as error:
+                    report['temporaryCredentialsRemoved'] = False
+                    report['credentialCleanupErrorType'] = type(error).__name__
+                report['cases'] = copy.deepcopy(self.states)
+                report['cleanParentSnapshotsRetained'] = True
+                if report['status'] == 'DSEC_FORK_PAIR_PASSED_PENDING_CLEANUP' and report.get('ownedGuestsReleased') is True and report['temporaryCredentialsRemoved']:
+                    report['status'] = 'DSEC_FORK_PAIR_PASSED_OWNED_GUESTS_RELEASED'
+                self.rt.save(self.work / 'report.json', report)
+            return report
+
         def wait_observer(self):
             templates = self.rt.load(WORK / 'templates.json')['templates']
             memory_files = module('dsec_memory_cache').memory_lower_inventory(self.rt, self.observer, D, templates)
@@ -287,14 +354,15 @@ def root_bootstrap(entry_sha, plan_sha):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('plan', 'parents', 'replay', 'cleanup', 'observe', 'report'))
-    parser.add_argument('--scenario', choices=('parents', 'single-a'), default='single-a')
+    parser.add_argument('mode', choices=('plan', 'parents', 'fork-check', 'replay', 'cleanup', 'observe', 'report'))
+    parser.add_argument('--scenario', choices=('parents', 'single-a', 'fork-check'), default='single-a')
     parser.add_argument('--plan-sha')
     args = parser.parse_args()
     if args.mode == 'plan':
         print(json.dumps({'scope': 'single_host_DSec_four_templates_two_Guests_each',
             'requiresRepairedSmokePass': True, 'noUB': True, 'sourceImagesRebuilt': False,
             'maxConcurrentGuests': 8, 'GuestMiB': 4096, 'newCleanParentCaptures': 4,
+            'optionalForkCheckMaxConcurrentGuests': 3, 'optionalForkCheckNewInstances': 3,
             'servicesChanged': False, 'snapshotsDeleted': False, 'globalPhysicalSavingBytes': None}));return 0
     need(sys.platform == 'linux' and os.uname().machine == 'aarch64' and socket.gethostname() == 'server1',
          'Use intended A ARM64 host')
@@ -321,6 +389,8 @@ def main():
         if args.mode == 'parents':
             result = batch.create_templates()
             batch.rt.save(WORK / 'parents-return.json', result)
+        elif args.mode == 'fork-check':
+            result = batch.run_fork_check()
         elif args.mode == 'replay':
             batch.wait_observer()
             try:
@@ -341,6 +411,7 @@ def main():
             result = batch.cleanup_existing()
         print(json.dumps(result, indent=2))
         passed = result.get('status') in ('FOUR_NATIVE_PARENTS_CAPTURED_OWNED_GUESTS_RELEASED',
+                                          'DSEC_FORK_PAIR_PASSED_OWNED_GUESTS_RELEASED',
                                           'NATIVE_FOUR_REPLAY_COMPLETED_OWNED_GUESTS_RELEASED')
         return 0 if passed or (args.mode == 'cleanup' and result.get('ownedGuestsReleased') is True) else 1
     except (Exception, KeyboardInterrupt) as error:

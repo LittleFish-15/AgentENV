@@ -20,12 +20,12 @@ make a prerequisite pass.
 
 ## Human execution after the prerequisites pass
 
-Use the fixed published `A_dsec_four_v2.py`, as ordinary `jwk` on A:
+Use the fixed published `A_dsec_four_v3.py`, as ordinary `jwk` on A:
 
 ```
-python3 -I -B A_dsec_four_v2.py plan
-python3 -I -B A_dsec_four_v2.py parents
-python3 -I -B A_dsec_four_v2.py replay
+python3 -I -B A_dsec_four_v3.py plan
+python3 -I -B A_dsec_four_v3.py parents
+python3 -I -B A_dsec_four_v3.py replay
 ```
 
 `parents` cold-starts each of the four retained original OCI sources, captures
@@ -60,7 +60,7 @@ Under the isolated deployment's `dsec-four-v1/`:
 Report regeneration is read-only with respect to services and Guests:
 
 ```
-python3 -I -B A_dsec_four_v2.py report
+python3 -I -B A_dsec_four_v3.py report
 ```
 
 After returning the private output, the separate local-only comparator can read
@@ -110,7 +110,7 @@ case's cleanup failure does not prevent attempts on the other owned cases.
 After inspecting the failed phase, explicit owned cleanup is:
 
 ```
-python3 -I -B A_dsec_four_v2.py cleanup --scenario single-a
+python3 -I -B A_dsec_four_v3.py cleanup --scenario single-a
 ```
 
 For an interrupted parent phase use `--scenario parents`. Cleanup preserves
@@ -151,3 +151,36 @@ It cannot overwrite an older run's report when a repeated phase is refused.
 Known temporary CLI credentials are removed within their fixed scoped path;
 unknown credential metadata is preserved and reported. A dead root observer
 is detected immediately from its final receipt, not just a liveness timeout.
+
+
+## v3 optional two-child Fork lifecycle
+
+After `parents` succeeds, the same entry accepts:
+
+```
+python3 -I -B A_dsec_four_v3.py fork-check
+```
+
+This restores one disposable source from the first clean parent snapshot, writes
+only that source's private upper, and sends exactly one Fork request with count2.
+The pinned Runtime starts those two children with join_all. The check verifies
+source resume, both children after source deletion, one child's copy-up while
+its sibling remains unchanged, and the survivor after deleting the writer.
+At most3 Guests coexist; no new catalog snapshots are created, and the retained
+clean parent is not modified. Guest300s/CLI330s limits remain unchanged. Only the
+first raw base is content-checked before/after, which warms it and is reported as
+functional setup rather than a cold-cache performance test.
+
+A successful result is DSEC_FORK_PAIR_PASSED_OWNED_GUESTS_RELEASED. Unknown POST
+outcomes are not retried. A complete two-child acknowledgment is durable before
+GET checks; recovery can use it after client interruption. A partial response
+retains uncertainty about the failed sibling while allowing cleanup of known,
+ownership-verified IDs. It never resolves a partial Fork just because inventory
+is empty. Explicit cleanup is the same entry with `cleanup --scenario fork-check`.
+No unknown object is swept by name or host-wide enumeration.
+
+`parents`, `fork-check`, then `replay` may be chained with shell `&&` after the
+repaired smoke passes. If any phase fails, the next phase must not start. Existing
+phase directories remain non-repeatable; inspect/recover them rather than rerun.
+This function checks single-host pmem lifetimes, not cross-host UB references,
+external provider loss, repository cache eviction or automatic UB republishing.
