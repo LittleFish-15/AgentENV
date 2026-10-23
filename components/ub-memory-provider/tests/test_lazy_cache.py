@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import unittest
 import uuid
@@ -14,6 +15,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aenv_ub_provider import contract, lazy, lazy_service, raw, stored
+
+
+def socket_fixture_root():
+    # Dry validation does not create these paths. Socket names must be short
+    # even when the source checkout (or TMPDIR) is deeply nested on Linux.
+    root = Path('/tmp').resolve() if sys.platform == 'linux' else Path(tempfile.gettempdir()).resolve()
+    return root / ('aenv-lc-' + uuid.uuid4().hex[:12])
 
 
 class Mapping:
@@ -362,7 +370,7 @@ class Compatibility(unittest.TestCase):
                 'fileBytes': len(data), 'chunks': [lazy.digest(data)], 'path': str(source.resolve())}]}
             encoded = json.dumps(value).encode()
             catalog_path.write_bytes(encoded)
-            root = Path(__file__).resolve().parents[3]
+            root = socket_fixture_root()
             config = {'version': 1, 'role': 'publish', 'workDir': str(root / 'new-lazy-work'),
                 'adapter': str(Path(__file__).resolve()), 'adapterSha256': 'sha256:' + 'a' * 64,
                 'region': 'default', 'maxCoverageBytes': 4194304, 'poolBytes': 4194304,
@@ -376,6 +384,11 @@ class Compatibility(unittest.TestCase):
             config['maxConcurrentReads'] = 4
             config_path.write_text(json.dumps(config), encoding='utf-8')
             self.assertEqual(lazy_service.load_config(config_path)[0]['maxConcurrentReads'], 4)
+            bad = dict(config, workDir=str(root / ('x' * 120)))
+            config_path.write_text(json.dumps(bad), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'socket path is too long'):
+                lazy_service.load_config(config_path)
+            config_path.write_text(json.dumps(config), encoding='utf-8')
             with patch.object(sys, 'argv', ['aenv-ub-lazy', 'serve', str(config_path)]), \
                     patch.object(lazy_service, 'serve') as serve, \
                     patch.object(lazy_service.sdk, 'NativeBackend') as sdk, \
@@ -398,7 +411,7 @@ class Compatibility(unittest.TestCase):
             credential = {'cacheId': manifest['cacheId'], 'reader': 'node-b', 'token': 'b' * 64,
                           'manifestSha256': lazy_service.service.identity(manifest)}
             credential_path.write_text(json.dumps(credential), encoding='utf-8')
-            root = Path(__file__).resolve().parents[3]
+            root = socket_fixture_root()
             config = {'version': 1, 'role': 'import', 'workDir': str(root / 'new-lazy-work'),
                 'adapter': str(Path(__file__).resolve()), 'adapterSha256': 'sha256:' + 'a' * 64,
                 'region': 'default', 'maxCoverageBytes': 4194304, 'manifest': str(path),
