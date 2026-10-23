@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('four', HERE / 'A_dsec_four_v1.py')
+spec = importlib.util.spec_from_file_location('four', HERE / 'A_dsec_four_v2.py')
 m = importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 
@@ -178,19 +178,23 @@ class Four(unittest.TestCase):
         plan = {'version': 1, 'entrySha256': hashlib.sha256(raw_entry).hexdigest(),
                 'coreCommit': m.CORE, 'maxSeconds': 10800, 'maxGuests': 8,
                 'runtimeContext': context, 'baseFiles': [], 'allowedLowers': [],
-                'sourceSelectionSha256': 'selection', 'observerRunId': 'a'*32}
+                'sourceSelectionSha256': 'selection', 'observerRunId': 'a'*32,
+                'memoryFiles': [], 'ownerPid': 400, 'ownerTicks': '7'}
         raw_plan = json.dumps(plan).encode()
         request = {'version': 1, 'observerRunId': 'a'*32, 'runtimeContext': context,
                    'runId': 'b'*32, 'phase': 'owner_finished', 'sandboxIds': [], 'jobs': [],
                    'monotonic': time.monotonic()}
-        rt = types.SimpleNamespace(read=lambda p: raw_plan, load=lambda p: request,
+        rt = types.SimpleNamespace(read=lambda p: raw_plan, load=lambda p: {'templates': []} if p.name=='templates.json' else request,
             ticks=lambda pid: '7', unit_fields=lambda u: {'User': 'jwk', 'Group': 'jwk', 'ActiveState': 'active', 'MainPID': '301'})
         observer = types.SimpleNamespace(pin_base_files=lambda p: [],
             host_observation=lambda: {}, cgroup_memory=lambda *a: {}, whole_process_metrics=lambda *a: {},
             collect_ram=lambda *a, **kw: calls.append('read_ram') or {'guests': []},
             base_file_cache=lambda p: {'residentPageBytes': 0})
         api = types.SimpleNamespace(pid=300, ticks='7', stable=lambda: calls.append('stable'))
-        scope = {'module': lambda n: rt if n=='four_runtime' else observer, 'WORK': work, 'D': Path('/d'),
+        memory = types.SimpleNamespace(memory_lower_inventory=lambda *a: [], device_cache=lambda *a: {},
+                                       service_processes=lambda *a: {})
+        modules = {'four_runtime': rt, 'dsec_observer': observer, 'dsec_memory_cache': memory}
+        scope = {'module': modules.__getitem__, 'WORK': work, 'D': Path('/d'),
                  'CORE': m.CORE, '__file__': 'fixture', 'INPUTS': Path('/inputs'), 'PROVIDER': 'own.service',
                  'runtime_contract': lambda rt: (api, context, {}),
                  'input_contract': lambda rt: ({'images': []}, [], {}, 'selection')}
@@ -211,6 +215,27 @@ class Four(unittest.TestCase):
         self.assertEqual(writes['observer-return.json']['sampleCount'], 1)
         self.assertEqual(calls, ['stable', 'read_ram'])
         self.assertEqual(len(journal.getvalue().splitlines()), 1)
+
+    def test_finalizer_failure_retains_pending_without_second_cleanup(self):
+        written = {}
+        batch = types.SimpleNamespace(stop=types.SimpleNamespace(set=lambda:None),run_id='c'*32,
+            context={'pid':300},jobs=[],states={'0':{'openRequests':[{'kind':'create'}]}},
+            root=Path('/owned'),work=Path('/owned/run'),credentials=None,
+            metrics=types.SimpleNamespace(result=lambda:{}),
+            rt=types.SimpleNamespace(load=lambda p:{'runId':'c'*32},save=lambda p,v:written.update({p.name:copy.deepcopy(v)})))
+        with patch.object(Path,'exists',return_value=True):
+            result=m.interrupted_report(batch,RuntimeError('cleanup failed'))
+        self.assertFalse(result['ownedGuestsReleased']);self.assertTrue(result['outcomeUncertain'])
+        self.assertFalse(result['automaticCleanupRetried']);self.assertIn('report.json',written)
+
+    def test_finalizer_cannot_overwrite_previous_run_report(self):
+        written = {}
+        batch = types.SimpleNamespace(stop=types.SimpleNamespace(set=lambda:None),run_id='c'*32,
+            context={},jobs=[],states={},root=Path('/owned'),work=Path('/owned/run'),credentials=None,
+            metrics=types.SimpleNamespace(result=lambda:{}),
+            rt=types.SimpleNamespace(load=lambda p:{'runId':'old'},save=lambda p,v:written.update({p.name:v})))
+        with patch.object(Path,'exists',return_value=True):m.interrupted_report(batch,RuntimeError('old phase retained'))
+        self.assertNotIn('report.json',written);self.assertEqual(len(written),1)
 
 
 import zlib

@@ -122,6 +122,12 @@ def sample_totals(sample, expected_ids):
             'runtimeCgroupChargeBytes': sample.get('runtimeCharge', {}).get('currentBytes'),
             'providerPssBytes': sample.get('provider', {}).get('wholeProcess', {}).get('pss_bytes'),
             'collectorPssBytes': sample.get('collector', {}).get('pss_bytes'),
+            'ownerControllerPssBytes': sample.get('ownerController', {}).get('pss_bytes'),
+            'memoryLowerFileResidentBytes': sample.get('memoryLowerFiles', {}).get('residentPageBytes'),
+            'liveMemoryDeviceResidentBytes': sample.get('memoryDevices', {}).get('uniqueResidentPageBytes'),
+            'runtimeAndUblkPssSumBytes': complete_sum([r.get('wholeProcess', {}).get('pss_bytes')
+                for r in sample.get('runtimeServices', {}).get('processes', [])])
+                if sample.get('runtimeServices', {}).get('available') is True else None,
             'globalPhysicalSavingBytes': None, 'accessResidentIntersectionBytes': None}
 
 
@@ -132,7 +138,8 @@ def summarize(samples, jobs):
               'wholeFcRssSumBytesNonunique', 'fcPssAnonSumBytes', 'fcPssFileSumBytes',
               'fcOutsideGuestRamPssDifferenceBytes', 'wholeHostCachedBytes', 'wholeHostBuffersBytes',
               'immutablePmemFileResidentBytes', 'privateUpperResidentBytes', 'runtimeCgroupChargeBytes',
-              'providerPssBytes', 'collectorPssBytes')
+              'providerPssBytes', 'collectorPssBytes', 'ownerControllerPssBytes', 'memoryLowerFileResidentBytes',
+              'liveMemoryDeviceResidentBytes', 'runtimeAndUblkPssSumBytes')
     per_guest = []
     for job in map(normalize_job, jobs):
         selected = []

@@ -265,7 +265,7 @@ import time
 PROC = Path('/proc')
 MAX_TEXT = 4 * 1024**2
 ROLLUP_FIELDS = ('Rss', 'Pss', 'Pss_Anon', 'Pss_File', 'Pss_Shmem',
-                 'Private_Clean', 'Private_Dirty', 'Shared_Clean', 'Shared_Dirty', 'Swap')
+                 'Private_Clean', 'Private_Dirty', 'Shared_Clean', 'Shared_Dirty', 'Anonymous', 'Swap')
 
 
 def bounded_text(path, limit=MAX_TEXT):
@@ -506,7 +506,7 @@ def sum_vma_metrics(maps):
             if maps and all(name in m['bytes'] for m in maps) else None for name in ROLLUP_FIELDS}
 
 
-def collect_ram(base, runtime_pid, runtime_ticks, sids, *, expected_bytes, pinned_files=(), allowed_lowers=()):
+def collect_ram(base, runtime_pid, runtime_ticks, sids, *, expected_bytes, pinned_files=(), allowed_lowers=(), device_module=None):
     """expected_bytes is an exact SID -> snapshot virtual RAM size contract."""
     result = {'available': False, 'guests': [], 'atomicSnapshot': False,
               'scope': 'actual_guest_ram_vmas_and_separately_identified_pmem',
@@ -547,6 +547,11 @@ def collect_ram(base, runtime_pid, runtime_ticks, sids, *, expected_bytes, pinne
                         'vmaCount': len(maps), 'virtualBytes': sum(m['end'] - m['start'] for m in maps),
                         'binding': 'PEERCRED_FC_API_INTERSECT_SMAPS',
                         'clippedVmas': sum(bool(m.get('smaps_metrics_omitted_due_to_clipping')) for m in maps)}
+                    if device_module is not None:
+                        try:
+                            row['memoryDevice'] = device_module.bind_device(backend, smaps, expected_bytes[sid])
+                        except (OSError, ValueError, RuntimeError) as error:
+                            row['memoryDevice'] = unavailable(error)
                 except (OSError, ValueError, RuntimeError) as error:
                     row['guestRam'] = unavailable(error)
                 try:

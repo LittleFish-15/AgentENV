@@ -67,6 +67,7 @@ def provider_observation(rt, observer, unit):
 
 def run(scope, plan_sha):
     rt, observer = scope['module']('four_runtime'), scope['module']('dsec_observer')
+    memory = scope['module']('dsec_memory_cache')
     work, deployment = scope['WORK'], scope['D']
     need(isinstance(plan_sha, str) and re.fullmatch('[0-9a-f]{64}', plan_sha), 'Explicit observation plan hash required')
     raw = rt.read(work / 'observer-plan.json')
@@ -83,6 +84,10 @@ def run(scope, plan_sha):
     need(pins == plan['baseFiles'], 'Observer base identities changed')
     lowers = sorted({Path(layer['path']) for image in seed['images'] for layer in image['layers']})
     need([str(path) for path in lowers] == plan['allowedLowers'], 'Observer lower allowlist differs')
+    memory_pins = memory.memory_lower_inventory(rt, observer, deployment, rt.load(work / 'templates.json')['templates'])
+    need(memory_pins == plan['memoryFiles'], 'Observer committed memory lower inventory differs')
+    need(type(plan.get('ownerPid')) is int and plan['ownerPid'] > 1 and
+         rt.ticks(plan['ownerPid']) == plan['ownerTicks'], 'Owner controller process changed')
     need(work.resolve(strict=True) == work and work.stat().st_uid == 1204, 'Observer work directory differs')
     need(not any((work / name).exists() for name in ('root-observations.jsonl', 'observer-live.json',
              'observer-latest.json', 'observer-return.json')), 'Previous observer evidence preserved; no blind restart')
@@ -117,6 +122,7 @@ def run(scope, plan_sha):
                       'runId': request['runId'], 'phase': request['phase'], 'host': observer.host_observation(),
                       'runtimeCharge': observer.cgroup_memory(api.pid, api.ticks),
                       'collector': observer.whole_process_metrics(own_pid, own_ticks),
+                      'ownerController': observer.whole_process_metrics(plan['ownerPid'], plan['ownerTicks']),
                       'jobStatesAtCollectionStart': jobs, 'jobStatesAtCollectionEnd': jobs,
                       'jobStatesNotAtomicallyObserved': True, 'atomicSnapshot': False, 'heavySample': False}
             heavy = now >= heavy_at or (request['phase'] != last_phase and
@@ -124,8 +130,14 @@ def run(scope, plan_sha):
             if heavy:
                 api.stable()
                 sample['ram'] = observer.collect_ram(deployment, api.pid, api.ticks, ids,
-                    expected_bytes={sid: 4096 * 1024**2 for sid in ids}, pinned_files=pins, allowed_lowers=lowers)
+                    expected_bytes={sid: 4096 * 1024**2 for sid in ids}, pinned_files=pins, allowed_lowers=lowers,
+                    device_module=memory)
                 sample['hostPmemFiles'] = observer.base_file_cache(pins)
+                sample['memoryLowerFiles'] = observer.base_file_cache(memory_pins)
+                sample['memoryLowerFiles']['scope'] = 'committed_snapshot_memory_lower_files_whole_residency_not_access'
+                sample['memoryDevices'] = memory.device_cache(sample['ram'].get('guests', []), observer)
+                sample['runtimeServices'] = memory.service_processes(api.pid, api.ticks,
+                    {g['pid'] for g in sample['ram'].get('guests', []) if g.get('pid')}, observer)
                 sample['provider'] = provider_observation(rt, observer, scope['PROVIDER'])
                 sample['runtimeProcess'] = observer.whole_process_metrics(api.pid, api.ticks)
                 sample['heavySample'] = True

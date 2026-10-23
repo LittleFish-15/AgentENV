@@ -100,6 +100,42 @@ def runtime_contract(rt, require_smoke=True):
     return api, context, binding
 
 
+def interrupted_report(batch, error):
+    """Persist this run's known state even if the lifecycle finalizer failed.
+
+    This function does not send another cleanup request. The explicit cleanup
+    mode reconciles known journals later; unacknowledged POSTs stay pending.
+    """
+    batch.stop.set()
+    report = {'status': 'STOPPED_DSEC_FOUR_PRESERVE_JOURNAL', 'coreCommit': CORE,
+              'runId': batch.run_id, 'context': batch.context, 'jobs': copy.deepcopy(batch.jobs),
+              'ownedGuestsReleased': False, 'outcomeUncertain': any(s.get('openRequests') for s in batch.states.values()),
+              'cases': copy.deepcopy(batch.states), 'errorType': type(error).__name__,
+              'reason': re.sub(r'e2b_[A-Za-z0-9._~-]+', '<redacted>', str(error))[:1200],
+              'measurementSummary': batch.metrics.result(), 'globalPhysicalSavingBytes': None,
+              'automaticCleanupRetried': False}
+    credential = getattr(batch, 'credentials', None)
+    if credential is not None:
+        try:
+            need(credential == batch.work / 'cli/aenv/credentials' and not credential.is_symlink(),
+                 'Temporary credential path changed')
+            if credential.exists():
+                meta = credential.stat()
+                need(stat.S_ISREG(meta.st_mode) and meta.st_uid == 1204, 'Temporary credential ownership changed')
+                credential.unlink()
+            report['temporaryCredentialsRemoved'] = True
+        except (OSError, RuntimeError) as credential_error:
+            report['temporaryCredentialsRemoved'] = False
+            report['credentialCleanupErrorType'] = type(credential_error).__name__
+    # Do not replace an older run's report when a repeated phase was refused.
+    state_path = batch.work / 'state.json'
+    if state_path.exists() and batch.rt.load(state_path).get('runId') == batch.run_id:
+        batch.rt.save(batch.work / 'report.json', report)
+    else:
+        batch.rt.save(batch.root / ('entry-stop-' + batch.run_id + '.json'), report)
+    return report
+
+
 def build_run(args):
     field = base_class()
     class Run(field.FieldBatch):
@@ -146,6 +182,8 @@ def build_run(args):
         def cancel_check(self):
             need(not self.stop.is_set(), 'Cohort interrupted')
             if args.mode == 'replay':
+                returned = WORK / 'observer-return.json'
+                need(not returned.exists(), 'Root observer exited; stop replay and retain evidence')
                 ready = self.rt.load(WORK / 'observer-live.json')
                 need(ready.get('planSha256') == self.observer_plan_sha and ready.get('observerRunId') == self.observer_run and
                      0 <= time.monotonic() - ready['monotonic'] < 150, 'Root observer stopped or changed; stop replay')
@@ -197,11 +235,20 @@ def build_run(args):
         def cleanup_existing(self):
             return super().cleanup_existing()
 
+        def run_replay(self):
+            try:
+                return super().run_replay()
+            except (Exception, KeyboardInterrupt) as error:
+                return interrupted_report(self, error)
+
         def wait_observer(self):
+            templates = self.rt.load(WORK / 'templates.json')['templates']
+            memory_files = module('dsec_memory_cache').memory_lower_inventory(self.rt, self.observer, D, templates)
             plan = {'version': 1, 'runtimeContext': self.context, 'coreCommit': CORE,
                     'entrySha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     'baseFiles': self.base_pins, 'allowedLowers': [str(p) for p in self.allowed_lowers],
-                    'sourceSelectionSha256': self.selection_sha, 'maxGuests': 8,
+                    'sourceSelectionSha256': self.selection_sha, 'maxGuests': 8, 'memoryFiles': memory_files,
+                    'ownerPid': os.getpid(), 'ownerTicks': self.rt.ticks(os.getpid()),
                     'observerRunId': uuid.uuid4().hex, 'maxSeconds': 10800}
             path = WORK / 'observer-plan.json'
             need(not path.exists(), 'Previous observation plan retained; no blind observer restart')
@@ -283,7 +330,13 @@ def main():
                 deadline = time.monotonic() + 120
                 while not (WORK / 'observer-return.json').exists() and time.monotonic() < deadline:
                     time.sleep(1)
-            module('dsec_four_finish').report(globals())
+            try:
+                module('dsec_four_finish').report(globals())
+            except Exception as error:
+                # Raw replay and observer journals remain authoritative. Report
+                # derivation failure must not erase the operation's final state.
+                batch.rt.save(WORK / 'report-generation-stop.json', {'errorType': type(error).__name__,
+                    'reason': str(error)[:500], 'replayReportPreserved': True, 'automaticReplayRetry': False})
         else:
             result = batch.cleanup_existing()
         print(json.dumps(result, indent=2))
@@ -296,6 +349,8 @@ def main():
         if batch is not None and batch.lifecycle is not None:
             try: result['cleanup'] = batch.lifecycle.cleanup()
             except Exception as cleanup: result['cleanupErrorType'] = type(cleanup).__name__
+        if batch is not None:
+            batch.rt.save(batch.root / ('entry-stop-' + uuid.uuid4().hex + '.json'), result)
         print(json.dumps(result, indent=2))
         return 1
     finally:

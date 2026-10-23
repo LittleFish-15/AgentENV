@@ -20,12 +20,12 @@ make a prerequisite pass.
 
 ## Human execution after the prerequisites pass
 
-Use the fixed published `A_dsec_four_v1.py`, as ordinary `jwk` on A:
+Use the fixed published `A_dsec_four_v2.py`, as ordinary `jwk` on A:
 
 ```
-python3 -I -B A_dsec_four_v1.py plan
-python3 -I -B A_dsec_four_v1.py parents
-python3 -I -B A_dsec_four_v1.py replay
+python3 -I -B A_dsec_four_v2.py plan
+python3 -I -B A_dsec_four_v2.py parents
+python3 -I -B A_dsec_four_v2.py replay
 ```
 
 `parents` cold-starts each of the four retained original OCI sources, captures
@@ -60,7 +60,7 @@ Under the isolated deployment's `dsec-four-v1/`:
 Report regeneration is read-only with respect to services and Guests:
 
 ```
-python3 -I -B A_dsec_four_v1.py report
+python3 -I -B A_dsec_four_v2.py report
 ```
 
 After returning the private output, the separate local-only comparator can read
@@ -110,7 +110,7 @@ case's cleanup failure does not prevent attempts on the other owned cases.
 After inspecting the failed phase, explicit owned cleanup is:
 
 ```
-python3 -I -B A_dsec_four_v1.py cleanup --scenario single-a
+python3 -I -B A_dsec_four_v2.py cleanup --scenario single-a
 ```
 
 For an interrupted parent phase use `--scenario parents`. Cleanup preserves
@@ -127,3 +127,27 @@ native repaired build, current deployment activation and real workload replay
 have not been executed by the assistant. The target machines are accessible
 only through the user's manual relay. Passing local tests is not target
 acceptance or evidence of positive savings.
+
+
+## v2 memory accounting and failure preservation
+
+v2 additionally identifies the memory block device through an actual private
+Guest file VMA's dev/inode, checks its block capacity and process lifetime,
+then deduplicates mincore observations across Guests sharing that device.
+Missing or replaced bindings are NA. When Guests exit it never reopens their
+former device numbers. Compare this device-cache ledger with Host Buffers;
+it can overlap Guest file-backed RAM and must not be added again to PSS.
+
+Committed memory lower files come from the four pinned parent records and the
+exact managed-layer repository naming rule. Their identity/size is checked;
+cache measurement does not rehash or read payloads. These files are tracked
+separately from the block-device cache and from the raw PMEM rootfs files.
+Runtime and descendant ublk daemon PSS, provider PSS, observer and ordinary
+controller PSS are explicit categories that overlap their cgroup charges.
+
+If a replay finalizer fails, v2 writes a stopped report with the pending case
+journals, does not send a second implicit cleanup, and preserves uncertainty.
+It cannot overwrite an older run's report when a repeated phase is refused.
+Known temporary CLI credentials are removed within their fixed scoped path;
+unknown credential metadata is preserved and reported. A dead root observer
+is detected immediately from its final receipt, not just a liveness timeout.
