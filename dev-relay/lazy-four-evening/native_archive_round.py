@@ -585,6 +585,62 @@ def validate_reports(reports,error=None):
         if not peer_match:issues.append('native_peer_command_results_or_inputs_differ')
     return {'complete':not issues,'issues':issues,'nativePeerCommandResultsMatch':peer_match}
 
+def measurement_markdown(reports,pools):
+    def cell(value):return str(value).replace('|','\\|').replace('\r',' ').replace('\n',' ')
+    def numeric(value):
+        return type(value) in (int,float) and value>=0 and value<float('inf')
+    def mib(value):return f'{value/1024**2:.3f}' if numeric(value) else 'NA'
+    def seconds(start,end):return f'{end-start:.3f}' if numeric(start) and numeric(end) and end>=start else 'NA'
+    def stat_cell(stats):
+        if type(stats.get('count')) is not int or stats['count']<=0:return 'NA'
+        return mib(stats.get('mean'))+' / '+mib(stats.get('max'))+' / '+str(stats['count'])+' / '+str(stats.get('missing','NA'))
+    lines=['','## Task durations and outcomes','',
+        'Elapsed seconds use recorded wall-clock endpoints and include replay delays. They are not monotonic CPU/service time; missing or reversed endpoints remain NA.',
+        '', '| Node | Template | Slot | Sandbox | Replay elapsed s | Actions completed / expected | Nonzero | State |',
+        '|---|---:|---:|---|---:|---|---:|---|']
+    for report in reports:
+        for job in report.get('jobs',[]):
+            lines.append('| '+' | '.join(cell(x) for x in (report.get('node'),job.get('templateIndex'),job.get('slot'),
+                job.get('sandboxId'),seconds(job.get('replayStartedUnix'),job.get('replayFinishedUnix')),
+                str(job.get('stepsCompleted','NA'))+' / '+str(job.get('expectedSteps','NA')),job.get('failedCommands','NA'),job.get('state')))+' |')
+    lines+=['','## Memory observations','',
+        'Cells are mean MiB / peak MiB / valid samples / missing samples. Only both_replaying samples are shown. Each metric has its own sampled peak; columns and peaks must not be summed. Actual Guest RAM is a subset of whole FC; upper/Host/cgroup/provider observations overlap other accounting layers.',
+        '', '| Node | Template | Whole FC RSS pair | Whole FC PSS pair | Actual Guest RAM PSS pair | Private upper resident pair |',
+        '|---|---:|---|---|---|---|']
+    for report in reports:
+        rows={row.get('templateIndex'):row for row in report.get('measurementSummary',{}).get('templateRows',[]) if row.get('phase')=='both_replaying'}
+        for index in range(4):
+            metrics=rows.get(index,{}).get('metrics',{})
+            lines.append('| '+' | '.join([cell(report.get('node')),str(index)]+[stat_cell(metrics.get(name,{})) for name in
+                ('wholeFcRssSumBytes','wholeFcPssSumBytes','actualGuestRamPssSumBytes','privateUpperResidentBytes')])+' |')
+    lines+=['','Per-sandbox PSS, also restricted to both_replaying; this is not a memfile-only physical-page attribution.','',
+        '| Node | Template | Slot | Sandbox | Whole FC PSS | Actual Guest RAM PSS |','|---|---:|---:|---|---|---|']
+    for report in reports:
+        for row in report.get('measurementSummary',{}).get('guestRows',[]):
+            if row.get('phase')!='both_replaying':continue
+            metrics=row.get('metrics',{})
+            lines.append('| '+' | '.join([cell(report.get('node')),cell(row.get('templateIndex')),cell(row.get('slot')),cell(row.get('sandboxId'))]+
+                [stat_cell(metrics.get(name,{})) for name in ('wholeFcPssBytes','actualGuestRamPssBytes')])+' |')
+    lines+=['','Provider and Runtime statistics use the collector summary window, not only both_replaying. They are not additional disjoint memory costs.','',
+        '| Node | Runtime cgroup | Provider PSS | Provider cgroup |','|---|---|---|---|']
+    for report in reports:
+        host=report.get('measurementSummary',{}).get('hostObservations',{})
+        lines.append('| '+' | '.join([cell(report.get('node'))]+[stat_cell(host.get(name,{})) for name in
+            ('runtimeCgroupBytes','providerPssBytes','providerCgroupBytes')])+' |')
+    lines+=['','Host values below are absolute completed-sample observations, not deltas or workload attribution. Node samples are not atomic across machines.','',
+        '| Node | Cached MiB | MemAvailable MiB | Dirty MiB | Shmem MiB |','|---|---:|---:|---:|---:|']
+    for report in reports:
+        host=report.get('completedSample',{}).get('host',{}).get('memoryBytes',{})
+        lines.append('| '+' | '.join([cell(report.get('node'))]+[mib(host.get(name)) for name in ('Cached','MemAvailable','Dirty','Shmem')])+' |')
+    lines+=['','## UB accounting boundary','',
+        '| Owner generation | Manifest identity consistent | Owner SDK coverage MiB (once) | Physical incremental MiB |','|---|---|---:|---|']
+    for pool in pools:
+        lines.append('| '+' | '.join((cell(pool.get('ownerId')),str(pool.get('manifestIdentityConsistent')),
+            mib(pool.get('ownerReportedCoverageBytes')),'NA'))+' |')
+    lines+=['','SDK coverage is not physical incremental allocation. Complete DAX access/residency attribution, Guest file-cache decomposition, complete auxiliary cost and global net saving remain NA. Detailed auxiliary observations and raw samples remain in JSON/sample logs. No original-version counterfactual or positive saving is inferred.']
+    return lines
+
+
 def emit_report(reports,cleanup,error=None):
     validation=validate_reports(reports,error)
     complete=validation['complete'] and cleanup.get('status')=='OWN_NATIVE_ROUND_QUIESCED_AND_UB_RELEASED'
@@ -617,6 +673,7 @@ def emit_report(reports,cleanup,error=None):
            '| Node | Template | Slot | Completed actions | Nonzero actions | State |','|---|---|---:|---:|---:|---|']
     for report in reports:
         for job in report.get('jobs',[]):lines.append('| '+' | '.join(str(x) for x in [report.get('node'),job.get('templateIndex'),job.get('slot'),job.get('stepsCompleted'),job.get('failedCommands'),job.get('state')])+' |')
+    lines+=measurement_markdown(reports,list(pools.values()))
     lines+=['','Cleanup: '+cleanup['status'],'','Full per-command results, measurement summaries and preserved diagnostics: comparison.json and logs/.']
     with (WORK/'comparison.md').open('x') as output:output.write('\n'.join(lines)+'\n')
     return result
