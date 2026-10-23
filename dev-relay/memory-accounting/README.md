@@ -1,5 +1,27 @@
 # Paired original AgentENV memory accounting relay
 
+## Explicit original256 repeat after the first pair
+
+`../cow4_memory_recheck256.py` is a separate entry for the user-requested repeat
+after possible concurrent compilation during the first256 group. It requires
+the completed enhanced pair IDs `8701803e...` and `a2a2e2a1...`, verifies their
+cleanup, and reuses the exact executed `cow4_memory_pair_2bc47b8.py` by SHA-256.
+It runs **only original256**, eight Guests, with **two** ordered cache drops.
+The existing64 result is the reference; neither old group receipt is replaced.
+
+The new controller receipt is `cow4-memory-256-recheck-controller-node-a.pending.json`;
+the new group receipt is `cow4-memory-recheck-256-node-a.pending.json`. The root
+literal ends with `COW4_MEMORY_256_RECHECK_ROOT`. Expected success statuses are
+`MEMORY_256_RECHECK_RELEASED_ACCOUNTING_COLLECTED` and
+`MEMORY_256_RECHECK_ROOT_RESTORED`. Return `memory-recheck256.json/md` and both
+final receipts. Possible compilation is recorded as user-reported context,
+not proven causation. All measurement functions remain the same as the paired
+experiment, including occupancy, PFN budgets, lifecycle points and rootfs reads.
+No recompile, download of images,64 launch, UB call or B access is added.
+
+Build/check with `make_recheck.py` and `test_recheck.py` in this directory.
+Portable repeat checks do not claim new target execution.
+
 Development-only measurement tooling. This directory is separate from the
 upstream-facing implementation. It contains target-specific paths and pins;
 remove it when preparing the core contribution for upstream review.
