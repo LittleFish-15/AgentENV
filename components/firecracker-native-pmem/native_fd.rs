@@ -15,6 +15,7 @@ pub struct NativePmemFd {
     bytes: u64,
     content_sha256: Option<String>,
     fs_dax: bool,
+    host_pagecache: bool,
 }
 
 pub fn is_native_pmem_path(path: &str) -> bool {
@@ -48,10 +49,14 @@ impl NativePmemFd {
                 "native descriptor exceeds bounded segment metadata",
             ));
         }
-        if let Some(value) = value.strip_prefix("v4:") {
+        let file_descriptor = value
+            .strip_prefix("v4:")
+            .map(|v| (v, true))
+            .or_else(|| value.strip_prefix("v5:").map(|v| (v, false)));
+        if let Some((value, fs_dax)) = file_descriptor {
             let parts: Vec<_> = value.split(':').collect();
             if parts.len() != 4
-                || parts[2] != "fsdax"
+                || parts[2] != if fs_dax { "fsdax" } else { "hostfile" }
                 || parts[0].len() != 64
                 || !parts[0]
                     .bytes()
@@ -72,7 +77,8 @@ impl NativePmemFd {
                 segments: vec![(fd, bytes)],
                 bytes,
                 content_sha256: Some(parts[0].to_owned()),
-                fs_dax: true,
+                fs_dax,
+                host_pagecache: !fs_dax,
             }));
         }
         if let Some(value) = value.strip_prefix("v3:") {
@@ -158,6 +164,7 @@ impl NativePmemFd {
             bytes,
             content_sha256: None,
             fs_dax: false,
+            host_pagecache: false,
         }))
     }
 
@@ -199,6 +206,8 @@ impl NativePmemFd {
             }
             if self.fs_dax {
                 validate_fs_dax_file(&file, *length)?;
+            } else if self.host_pagecache {
+                validate_host_file(&file, *length)?;
             } else if flags & libc::O_ACCMODE != libc::O_RDONLY
                 || flags & libc::O_SYNC != libc::O_SYNC
                 || !file.metadata()?.file_type().is_char_device()
@@ -290,23 +299,20 @@ impl NativePmemFd {
     }
 }
 
-/// FS-DAX is a separate contract from an NC character FD or ordinary cached file.
-/// This proves local file properties, not UB provenance or cross-node identity.
+/// Validate readonly regular-file metadata against the open descriptor itself.
 #[cfg(target_os = "linux")]
-pub fn validate_fs_dax_file(file: &std::fs::File, bytes: u64) -> io::Result<()> {
+fn readonly_file_stat(file: &std::fs::File, bytes: u64) -> io::Result<libc::statx> {
     use std::os::fd::AsRawFd;
-    const ATTR_DAX: u64 = 0x0020_0000;
-    // SAFETY: the borrowed descriptor remains open during this check.
+    // SAFETY: file remains open throughout this descriptor-only check.
     let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
     if flags < 0 || flags & libc::O_ACCMODE != libc::O_RDONLY || flags & libc::O_SYNC != 0 {
         return Err(invalid(
-            "FS-DAX backing requires an exact-length readonly regular file",
+            "backing requires a readonly regular file without NC flags",
         ));
     }
-    // SAFETY: zero is a valid initial value for this C output structure.
+    // SAFETY: zero is valid initialization of this writable C output structure.
     let mut st: libc::statx = unsafe { std::mem::zeroed() };
-    // SAFETY: valid output and NUL-terminated empty path. AT_EMPTY_PATH binds
-    // the check to the inherited open file, not a pathname.
+    // SAFETY: the FD, NUL-terminated empty path and output buffer are valid.
     if unsafe {
         libc::statx(
             file.as_raw_fd(),
@@ -321,15 +327,38 @@ pub fn validate_fs_dax_file(file: &std::fs::File, bytes: u64) -> io::Result<()> 
     }
     if st.stx_mask & (libc::STATX_TYPE | libc::STATX_SIZE) != (libc::STATX_TYPE | libc::STATX_SIZE)
         || st.stx_mode as libc::mode_t & libc::S_IFMT != libc::S_IFREG
-        || st.stx_attributes_mask & ATTR_DAX == 0
-        || st.stx_attributes & ATTR_DAX == 0
         || st.stx_size != bytes
     {
+        return Err(invalid("backing is not an exact-length regular file"));
+    }
+    Ok(st)
+}
+
+/// Explicit ordinary Host page-cache backend; never claims cross-node UB identity.
+#[cfg(target_os = "linux")]
+pub fn validate_host_file(file: &std::fs::File, bytes: u64) -> io::Result<()> {
+    let st = readonly_file_stat(file, bytes)?;
+    const ATTR_DAX: u64 = 0x0020_0000;
+    if st.stx_attributes_mask & ATTR_DAX == 0 || st.stx_attributes & ATTR_DAX != 0 {
+        return Err(invalid(
+            "Host page-cache backing requires observed inactive S_DAX",
+        ));
+    }
+    Ok(())
+}
+
+/// FS-DAX is a separate contract from an ordinary cached file or NC character FD.
+#[cfg(target_os = "linux")]
+pub fn validate_fs_dax_file(file: &std::fs::File, bytes: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const ATTR_DAX: u64 = 0x0020_0000;
+    let st = readonly_file_stat(file, bytes)?;
+    if st.stx_attributes_mask & ATTR_DAX == 0 || st.stx_attributes & ATTR_DAX == 0 {
         return Err(invalid("inherited file does not have active S_DAX"));
     }
-    // SAFETY: zero is a valid initial value for this C output structure.
+    // SAFETY: zero is valid initialization of this writable C output structure.
     let mut fs: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: valid open FD and writable statvfs output structure.
+    // SAFETY: valid open FD and writable output structure.
     if unsafe { libc::fstatvfs(file.as_raw_fd(), &mut fs) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -346,6 +375,24 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_pagecache_descriptor_is_distinct_from_fs_dax_and_nc() {
+        let digest = "a".repeat(64);
+        let path = format!("aenv-pmem-fd:v5:{digest}:2097152:hostfile:10");
+        let value = NativePmemFd::parse(&path).unwrap().unwrap();
+        assert!(value.host_pagecache && !value.is_fs_dax());
+        assert_eq!(
+            value.snapshot_reference().unwrap(),
+            format!("aenv-pmem-content:v1:{digest}:2097152")
+        );
+        for wrong in [
+            path.replace("hostfile", "fsdax"),
+            path.replace("v5", "v4"),
+            path.replace(":10", ":42"),
+        ] {
+            assert!(NativePmemFd::parse(&wrong).is_err());
+        }
+    }
     #[test]
     fn fs_dax_descriptors_bind_content_and_reject_raw_device_syntax() {
         let digest = "a".repeat(64);

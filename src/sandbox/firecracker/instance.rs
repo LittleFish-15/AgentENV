@@ -188,6 +188,27 @@ impl FirecrackerInstance {
         Ok(path)
     }
 
+    pub async fn acquire_host_pagecache(
+        &mut self,
+        spec: BackingSpec,
+        child_fd: RawFd,
+        runtime: DeviceRuntime,
+    ) -> Result<PathBuf> {
+        anyhow::ensure!(
+            self.process.is_none() && !self.backings.iter().any(|b| b.child_fd == child_fd),
+            "Host file backing must use a fresh slot before FC spawn"
+        );
+        let acquire = spec.clone();
+        let backing = tokio::task::spawn_blocking(move || {
+            PinnedBacking::acquire_host_pagecache(&acquire, child_fd)
+        })
+        .await??;
+        let backing = super::direct_verifier::verify(backing, spec, runtime).await?;
+        let path = backing.child_path();
+        self.backings.push(backing);
+        Ok(path)
+    }
+
     pub async fn add_acquired_pmem(&self, id: &str, child_fd: RawFd) -> Result<()> {
         let backing = self
             .backings
@@ -224,10 +245,11 @@ impl FirecrackerInstance {
                 .find(|b| b.child_fd == slot)
                 .context("missing verified pmem lease")?;
             let path = backing.child_path();
-            if binding.version == 4 {
+            if matches!(binding.version, 4 | 5) {
                 anyhow::ensure!(
-                    path.to_str()
-                        .is_some_and(|p| p.starts_with("aenv-pmem-fd:v4:")),
+                    path.to_str().is_some_and(
+                        |p| p.starts_with(&format!("aenv-pmem-fd:v{}:", binding.version))
+                    ),
                     "FS-DAX snapshot requires verified FS-DAX backing"
                 );
                 paths.insert(slot, path);

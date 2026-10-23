@@ -14,6 +14,17 @@ from aenv_ub_provider import fsdax, raw
 
 
 class FsDaxTests(unittest.TestCase):
+    def test_host_pagecache_provider_has_separate_protocol_and_refuses_ram(self):
+        provider = fsdax.HostPagecacheProvider([(self.spec, [(80, 4096)])])
+        request = dict(self.request, version=4, privateCow=False)
+        with patch.object(fsdax, 'validate_fd') as validate:
+            _, response = provider.prepare_handoff(request)
+            validate.assert_called_once_with(80, 4096, fs_dax=False)
+        self.assertEqual(response['source'], 'host-pagecache')
+        self.assertEqual(response['cacheMode'], 'host-pagecache')
+        self.assertIs(response['privateCow'], False)
+        with self.assertRaises(ValueError): provider.prepare_handoff(dict(request, privateCow=True))
+        with self.assertRaises(ValueError): provider.prepare_handoff(dict(request, version=3))
     def test_active_dax_type_size_and_readonly_mount_are_independent_gates(self):
         # Exercise the actual ABI decoding with synthetic statx output. This is
         # intentionally not called a successful DAX mapping test.

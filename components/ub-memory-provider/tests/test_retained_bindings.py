@@ -13,6 +13,19 @@ from aenv_ub_provider import bindings
 
 
 class RetainedBindingTests(unittest.TestCase):
+    def test_ordinary_host_file_binding_uses_v5_without_fs_dax_or_sdk(self):
+        binding, catalog = bindings.rootfs_plan(self.source, [self.image], '/private/host.sock',
+            len(self.data), self.runtime, 'ext4', retain_snapshot_bases=True, host_pagecache=True)
+        self.assertEqual(binding['version'], 5)
+        self.assertEqual(binding['layers'][0]['sha256'], self.digest)
+        path = self.root/'binding-v5.json'; path.write_text(json.dumps(binding))
+        relocated = bindings.relocate(path, '/private/other.sock', self.runtime,
+            self.root/'relocated-v5', [str(self.image)])
+        self.assertEqual(relocated['version'], 5)
+        self.assertEqual(relocated['sourceImage'], binding['sourceImage'])
+        with self.assertRaises(ValueError):
+            bindings.rootfs_plan(self.source, [self.image], '/private/host.sock',
+                len(self.data), self.runtime, fs_dax=True, host_pagecache=True)
     def test_fsdax_rootfs_relocation_preserves_version_and_snapshot_identity(self):
         binding, catalog = bindings.rootfs_plan(self.source, [self.image], '/private/fsdax.sock',
             len(self.data), self.runtime, 'ext4', retain_snapshot_bases=True, fs_dax=True)

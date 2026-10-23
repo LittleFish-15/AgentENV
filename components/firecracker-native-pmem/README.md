@@ -1,4 +1,13 @@
-# Firecracker NC device-FD and FS-DAX pmem backends
+# Firecracker NC, FS-DAX and ordinary Host-file pmem backends
+
+The ordinary Host-file backend is the DSec-style page-cache sharing path. It
+requires neither Host FS-DAX nor physical persistent-memory hardware. Version 5
+is `aenv-pmem-fd:v5:SHA256_HEX:BYTES:hostfile:FD`; it validates an exact readonly
+regular file with inactive Host S_DAX and maps it shared/readonly. It uses the
+same content-only snapshot references and fresh-FD restore checks as v3/v4.
+This shares Host file pages among local Guests, not RAM across nodes. See
+[Host page-cache provider](../ub-memory-provider/HOST-PAGECACHE.md) for the
+matching Runtime v5 binding, provider protocol and immutability contract.
 
 Apply `native-pmem-fd-v2.patch` only in an isolated checkout whose input
 files match `baseline.json`. Hashes refer to the LF-normalized reviewed source;

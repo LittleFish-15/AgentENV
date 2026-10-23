@@ -313,7 +313,10 @@ def main():
     bind.add_argument('--lower-filesystem', choices=['erofs', 'ext4'], default='erofs')
     bind.add_argument('--snapshot-references', action='store_true',
                       help='Emit v3 content references; requires matching Runtime/FC and retained immutable bases')
-    bind.add_argument('--fs-dax', action='store_true',
+    transport = bind.add_mutually_exclusive_group()
+    transport.add_argument('--host-pagecache', action='store_true',
+                           help='Emit v5 for immutable ordinary Host files shared by Guest pmem/DAX')
+    transport.add_argument('--fs-dax', action='store_true',
                       help='Emit v4 for existing readonly FS-DAX files; no pmem device is created')
     bind.add_argument('--retain-snapshot-bases', action='store_true',
                       help='Pin local raw sources and archive exact bases with snapshots; requires matching Runtime')
@@ -326,7 +329,10 @@ def main():
     relocate.add_argument('--snapshot-source', action='append',
                           help='Matching node-local raw image for each layer of an archived-capture binding')
     archived = commands.add_parser('bind-retained-snapshot')
-    archived.add_argument('--fs-dax', action='store_true',
+    archive_transport = archived.add_mutually_exclusive_group()
+    archive_transport.add_argument('--host-pagecache', action='store_true',
+                                   help='Emit v5 for retained ordinary Host files; no UB publication')
+    archive_transport.add_argument('--fs-dax', action='store_true',
                           help='Use v4; retained images must be explicitly published on an existing readonly FS-DAX volume')
     archived.add_argument('--manifest', required=True)
     archived.add_argument('--artifact-root', required=True)
@@ -394,7 +400,7 @@ def main():
         return 0
     if args.command == 'bind-retained-snapshot':
         value = bindings.retained_snapshot(args.manifest, args.artifact_root, args.socket, args.max_bytes,
-                                          read_json(args.device_runtime), args.output, args.fs_dax)
+                                          read_json(args.device_runtime), args.output, args.fs_dax, args.host_pagecache)
         print(json.dumps({'state': 'archived_binding_prepared_no_sdk', 'bytes': sum(x['bytes'] for x in value['layers'])}))
         return 0
     if args.command == 'bind-fsdax-memory':
@@ -407,7 +413,7 @@ def main():
         runtime = read_json(args.device_runtime)
         if args.command == 'bind-rootfs':
             value = bindings.rootfs(args.source, args.image, args.socket, args.max_bytes,
-                                    runtime, args.output, args.lower_filesystem, args.snapshot_references, args.retain_snapshot_bases, args.fs_dax)
+                                    runtime, args.output, args.lower_filesystem, args.snapshot_references, args.retain_snapshot_bases, args.fs_dax, args.host_pagecache)
         else:
             value = bindings.relocate(args.binding, args.socket, runtime, args.output, args.snapshot_source)
         print(json.dumps({'state': 'binding_prepared_no_sdk', 'bytes': sum(layer['bytes'] for layer in value['layers'])}))

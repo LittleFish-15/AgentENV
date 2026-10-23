@@ -4,6 +4,13 @@ This branch is an opt-in implementation candidate. It is not an end-to-end
 validated implementation of globally shared Guest RAM and rootfs. Existing
 sandbox behavior is retained when the new environment variables are absent.
 
+The separate [ordinary Host-file rootfs backend](../../../components/ub-memory-provider/HOST-PAGECACHE.md)
+implements the DSec-style local sharing path: Host file page cache → virtio-pmem
+→ Guest filesystem DAX. It uses explicit rootfs binding v5 and preserves native
+snapshot content rebinding. It does not require Host FS-DAX or a UB presenter,
+and does not claim shared physical RAM between Hosts. It is distinct from the
+stored-layer UB cache and native UB mappings described below.
+
 The separate [lazy rootfs cache](lazy-rootfs-cache.md) adds demand filling and
 bounded, pinned eviction to the stored-layer path. It does not add a missing-page
 handler to native pmem/DAX, and its preallocated cache capacity must be counted

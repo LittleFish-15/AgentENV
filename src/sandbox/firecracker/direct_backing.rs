@@ -165,7 +165,7 @@ impl RootfsFilesystem {
     }
 }
 
-/// Versions 1/2 are cold-boot only. Versions 3 (NC) and 4 (FS-DAX) snapshot portable content
+/// Versions 1/2 are cold-boot only. Versions 3 (NC), 4 (FS-DAX) and 5 (Host file) snapshot portable content
 /// references. Optional snapshot sources become repository-owned archives;
 /// otherwise operators retain bases externally. Every restore still needs
 /// fresh local bindings. An absent base is a hard restore error.
@@ -182,7 +182,7 @@ pub struct RootfsBinding {
     /// Immutable lower filesystem; omitted legacy bindings remain EROFS.
     #[serde(default)]
     pub lower_filesystem: RootfsFilesystem,
-    /// Required by versions 2..4: explicitly pinned backing-aware executables.
+    /// Required by versions 2..5: explicitly pinned backing-aware executables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_runtime: Option<DeviceRuntime>,
     /// Optional exact raw images to retain as repository-owned snapshot artifacts.
@@ -360,22 +360,22 @@ impl RootfsBinding {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.snapshot_sources.is_empty()
-                || (matches!(self.version, 3 | 4)
+                || (matches!(self.version, 3 | 4 | 5)
                     && self.snapshot_sources.len() == self.layers.len()
                     && self.snapshot_sources.iter().all(|p| p.is_absolute())),
-            "native snapshot sources require one absolute source for every v3/v4 layer"
+            "native snapshot sources require one absolute source for every v3/v4/v5 layer"
         );
         ensure!(
-            matches!(self.version, 1..=4)
+            matches!(self.version, 1..=5)
                 && !self.layers.is_empty()
                 && self.layers.len() <= MAX_PMEM_LAYERS,
-            "native rootfs requires 1..8 version-1/2/3/4 layers"
+            "native rootfs requires 1..8 version-1/2/3/4/5 layers"
         );
         match (self.version, &self.device_runtime) {
             (1, None) => (),
-            (2 | 3 | 4, Some(runtime)) => runtime.validate()?,
+            (2 | 3 | 4 | 5, Some(runtime)) => runtime.validate()?,
             _ => anyhow::bail!(
-                "version-2/3/4 rootfs requires pinned device runtime; version-1 must omit it"
+                "version-2/3/4/5 rootfs requires pinned device runtime; version-1 must omit it"
             ),
         }
         let mut total = 0u64;
@@ -414,8 +414,8 @@ impl RootfsBinding {
         use crate::sandbox::manifest::{NativeRootfsLayer, NativeRootfsSnapshot};
         self.validate()?;
         ensure!(
-            matches!(self.version, 3 | 4),
-            "pmem capture/fork requires version-3/4 content rebinding support"
+            matches!(self.version, 3 | 4 | 5),
+            "pmem capture/fork requires version-3/4/5 content rebinding support"
         );
         let mut unique = std::collections::HashSet::new();
         ensure!(
@@ -508,20 +508,29 @@ mod linux {
 
     /// The connection is a lease: provider must pin the object until it closes.
     /// The FD is kept CLOEXEC in aenv and duped only into the selected FC child.
+    #[derive(Clone, Copy)]
+    enum BackingMode {
+        LegacyCc,
+        NcPmem,
+        FsDax,
+        HostPagecache,
+    }
+
     pub struct PinnedBacking {
         pub file: File,
         pub child_fd: RawFd,
         lease_file: File,
         _lease: UnixStream,
         nc_pmem_bytes: Option<u64>,
-        fs_dax: Option<(String, u64, bool)>,
+        file_backing: Option<(String, u64, bool)>,
+        mode: BackingMode,
         extra_files: Vec<File>,
         segment_lengths: Vec<u64>,
     }
 
     impl PinnedBacking {
         pub fn acquire(spec: &BackingSpec, child_fd: RawFd, private_cow: bool) -> Result<Self> {
-            Self::acquire_mode(spec, child_fd, private_cow, false, false)
+            Self::acquire_mode(spec, child_fd, private_cow, BackingMode::LegacyCc)
         }
 
         /// Only the isolated verifier may read this mapping before FC startup.
@@ -531,7 +540,7 @@ mod linux {
                     && spec.bytes.is_multiple_of(PMEM_ALIGNMENT),
                 "invalid NC pmem slot/length"
             );
-            Self::acquire_mode(spec, child_fd, false, true, false)
+            Self::acquire_mode(spec, child_fd, false, BackingMode::NcPmem)
         }
 
         pub fn acquire_fs_dax(
@@ -539,16 +548,26 @@ mod linux {
             child_fd: RawFd,
             private_cow: bool,
         ) -> Result<Self> {
-            Self::acquire_mode(spec, child_fd, private_cow, false, true)
+            Self::acquire_mode(spec, child_fd, private_cow, BackingMode::FsDax)
+        }
+
+        pub fn acquire_host_pagecache(spec: &BackingSpec, child_fd: RawFd) -> Result<Self> {
+            Self::acquire_mode(spec, child_fd, false, BackingMode::HostPagecache)
         }
 
         fn acquire_mode(
             spec: &BackingSpec,
             child_fd: RawFd,
             private_cow: bool,
-            nc_pmem: bool,
-            fs_dax: bool,
+            mode: BackingMode,
         ) -> Result<Self> {
+            let nc_pmem = matches!(mode, BackingMode::NcPmem);
+            let fs_dax = matches!(mode, BackingMode::FsDax);
+            let host_pagecache = matches!(mode, BackingMode::HostPagecache);
+            ensure!(
+                !host_pagecache || !private_cow,
+                "Host page-cache provider is rootfs-only"
+            );
             spec.validate()?;
             ensure!(
                 (FIRST_BACKING_FD..FIRST_BACKING_FD + 16).contains(&child_fd),
@@ -577,7 +596,9 @@ mod linux {
                 cred.uid == unsafe { libc::geteuid() },
                 "native provider must run as the runtime UID"
             );
-            let protocol_version = if fs_dax {
+            let protocol_version = if host_pagecache {
+                4
+            } else if fs_dax {
                 3
             } else if nc_pmem {
                 2
@@ -619,7 +640,14 @@ mod linux {
                 !private_cow || response.private_cow,
                 "provider does not support RAM private CoW"
             );
-            if fs_dax {
+            if host_pagecache {
+                ensure!(
+                    response.source == "host-pagecache"
+                        && response.cache_mode == "host-pagecache"
+                        && !response.private_cow,
+                    "Host page-cache requires its explicit rootfs contract"
+                );
+            } else if fs_dax {
                 ensure!(
                     response.source == "fs-dax"
                         && response.cache_mode == "fs-dax"
@@ -688,7 +716,9 @@ mod linux {
                 }
             }
             let mut file = File::from(received.remove(0));
-            if fs_dax {
+            if host_pagecache {
+                native_fd::validate_host_file(&file, spec.bytes)?;
+            } else if fs_dax {
                 native_fd::validate_fs_dax_file(&file, spec.bytes)?;
             } else if !nc_pmem {
                 ensure!(
@@ -749,15 +779,21 @@ mod linux {
                 lease_file,
                 _lease: stream,
                 nc_pmem_bytes: nc_pmem.then_some(spec.bytes),
-                fs_dax: fs_dax.then(|| (spec.sha256[7..].to_owned(), spec.bytes, private_cow)),
+                file_backing: (fs_dax || host_pagecache)
+                    .then(|| (spec.sha256[7..].to_owned(), spec.bytes, private_cow)),
+                mode,
                 extra_files,
                 segment_lengths: lengths,
             })
         }
 
         pub fn child_path(&self) -> PathBuf {
-            if self.fs_dax.as_ref().is_some_and(|(_, _, private)| !private) {
-                return self.fs_dax_path(self.child_fd);
+            if self
+                .file_backing
+                .as_ref()
+                .is_some_and(|(_, _, private)| !private)
+            {
+                return self.readonly_file_path(self.child_fd);
             }
             match self.nc_pmem_bytes {
                 Some(_) => self.segmented_path(self.segment_child_start()),
@@ -765,13 +801,19 @@ mod linux {
             }
         }
 
-        fn fs_dax_path(&self, fd: RawFd) -> PathBuf {
-            let (digest, bytes, _) = self.fs_dax.as_ref().expect("FS-DAX backing");
-            PathBuf::from(format!("aenv-pmem-fd:v4:{digest}:{bytes}:fsdax:{fd}"))
+        fn readonly_file_path(&self, fd: RawFd) -> PathBuf {
+            let (digest, bytes, _) = self.file_backing.as_ref().expect("readonly file backing");
+            if matches!(self.mode, BackingMode::HostPagecache) {
+                PathBuf::from(format!("aenv-pmem-fd:v5:{digest}:{bytes}:hostfile:{fd}"))
+            } else {
+                PathBuf::from(format!("aenv-pmem-fd:v4:{digest}:{bytes}:fsdax:{fd}"))
+            }
         }
 
         pub fn requires_private_cow_verification(&self) -> bool {
-            self.fs_dax.as_ref().is_some_and(|(_, _, private)| *private)
+            self.file_backing
+                .as_ref()
+                .is_some_and(|(_, _, private)| *private)
         }
 
         fn segment_child_start(&self) -> RawFd {
@@ -812,8 +854,8 @@ mod linux {
         }
 
         pub fn verification_path(&self) -> PathBuf {
-            if self.fs_dax.is_some() {
-                return self.fs_dax_path(FIRST_SEGMENT_FD);
+            if self.file_backing.is_some() {
+                return self.readonly_file_path(FIRST_SEGMENT_FD);
             }
             self.segmented_path(FIRST_SEGMENT_FD)
         }
@@ -966,6 +1008,17 @@ mod tests {
         ram.version = 2;
         ram.device_runtime = None;
         assert!(ram.validate(&image, PMEM_ALIGNMENT).is_err());
+    }
+    #[test]
+    fn host_pagecache_rootfs_keeps_content_identity_and_requires_runtime_pins() {
+        let previous = catalog_binding("source");
+        let identity = previous.snapshot_identity().unwrap();
+        let mut host = previous;
+        host.version = 5;
+        host.layers[0].socket = "/run/host-pagecache.sock".into();
+        host.validate_restore_identity(&identity).unwrap();
+        host.device_runtime = None;
+        assert!(host.validate().is_err());
     }
     #[test]
     fn device_version_requires_explicit_binary_pins_and_cannot_downgrade() {

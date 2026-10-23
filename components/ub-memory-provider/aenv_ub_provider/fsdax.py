@@ -17,7 +17,7 @@ from . import contract as n
 from .raw import RawProvider
 
 
-def validate_fd(fd, length):
+def validate_fd(fd, length, fs_dax=True):
     import fcntl
     info = os.fstat(fd)
     flags = fcntl.fcntl(fd, fcntl.F_GETFL)
@@ -35,34 +35,56 @@ def validate_fd(fd, length):
     attributes = struct.unpack_from('=Q', data.raw, 8)[0]
     size = struct.unpack_from('=Q', data.raw, 40)[0]
     supported = struct.unpack_from('=Q', data.raw, 56)[0]
-    if not supported & 0x200000 or not attributes & 0x200000 or size != length:
-        raise ValueError('File does not have active S_DAX')
-    if not os.fstatvfs(fd).f_flag & os.ST_RDONLY:
+    if not supported & 0x200000 or bool(attributes & 0x200000) != fs_dax or size != length:
+        raise ValueError('File does not have the required S_DAX state')
+    readonly_mount = bool(os.fstatvfs(fd).f_flag & os.ST_RDONLY)
+    if fs_dax and not readonly_mount:
         raise ValueError('FS-DAX publication must be on a readonly mount')
     return {'device': info.st_dev, 'inode': info.st_ino, 'bytes': size,
-            'activeDax': True, 'readonlyMount': True,
+            'activeDax': fs_dax, 'readonlyMount': readonly_mount,
             'crossNodePhysicalIdentityAccepted': False}
 
 
 class FsDaxProvider(RawProvider):
+    protocol = 3
+    source = 'fs-dax'
+    private_cow = True
+
+    @staticmethod
+    def validate_source(fd, length):
+        return validate_fd(fd, length)
+
     def prepare_handoff(self, request):
         if (not isinstance(request, dict)
                 or set(request) != {'version', 'operation', 'objectId', 'generation', 'sha256', 'bytes', 'privateCow'}
-                or type(request['version']) is not int or request['version'] != 3
+                or type(request['version']) is not int or request['version'] != self.protocol
                 or request['operation'] != 'acquire' or type(request['privateCow']) is not bool):
-            raise ValueError('FS-DAX requires explicit protocol version 3')
+            raise ValueError('Readonly file provider requires its explicit protocol version')
+        if request['privateCow'] and not self.private_cow:
+            raise ValueError('Host page-cache provider is rootfs-only')
         spec, segments = self.objects[request['objectId']]
         if (len(segments) != 1 or segments[0][1] != spec['bytes']
                 or type(request['bytes']) is not int
                 or any(request[k] != spec[k] for k in ('objectId', 'generation', 'sha256', 'bytes'))):
             raise ValueError('FS-DAX publication identity/layout differs')
-        validate_fd(segments[0][0], spec['bytes'])
-        return segments, {'version': 3, 'state': 'ready', 'backing': spec,
-                          'privateCow': request['privateCow'], 'source': 'fs-dax',
-                          'cacheMode': 'fs-dax'}
+        self.validate_source(segments[0][0], spec['bytes'])
+        return segments, {'version': self.protocol, 'state': 'ready', 'backing': spec,
+                          'privateCow': request['privateCow'], 'source': self.source,
+                          'cacheMode': self.source}
 
 
-def open_catalog(catalog, socket_path, budget):
+class HostPagecacheProvider(FsDaxProvider):
+    """Ordinary Host file pages shared by local Guests; no global UB RAM claim."""
+    protocol = 4
+    source = 'host-pagecache'
+    private_cow = False
+
+    @staticmethod
+    def validate_source(fd, length):
+        return validate_fd(fd, length, fs_dax=False)
+
+
+def open_catalog(catalog, socket_path, budget, validator=validate_fd):
     if set(catalog) != {'version', 'objects'}:
         raise ValueError('Unexpected FS-DAX catalog fields')
     entries = n.validate_catalog(catalog, socket_path, budget)
@@ -76,7 +98,7 @@ def open_catalog(catalog, socket_path, budget):
                 raise ValueError('FS-DAX path must be absolute without symlinks')
             fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
             opened.append((entry['backing'], [(fd, entry['backing']['bytes'])]))
-            observed.append(validate_fd(fd, entry['backing']['bytes']))
+            observed.append(validator(fd, entry['backing']['bytes']))
         return opened, observed
     except BaseException:
         for _, segments in opened:
@@ -84,8 +106,10 @@ def open_catalog(catalog, socket_path, budget):
         raise
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(host_pagecache=False):
+    provider_type = HostPagecacheProvider if host_pagecache else FsDaxProvider
+    parser = argparse.ArgumentParser(description=('Serve immutable ordinary Host files for Guest pmem/DAX.'
+                                                  if host_pagecache else __doc__))
     parser.add_argument('--catalog', required=True)
     parser.add_argument('--socket', required=True)
     parser.add_argument('--max-bytes', required=True, type=int)
@@ -95,8 +119,8 @@ def main():
         raw = stream.read(1024 * 1024 + 1)
     if len(raw) > 1024 * 1024:
         raise ValueError('FS-DAX catalog exceeds 1MiB')
-    entries, observed = open_catalog(json.loads(raw), args.socket, args.max_bytes)
-    provider = FsDaxProvider(entries)
+    entries, observed = open_catalog(json.loads(raw), args.socket, args.max_bytes, provider_type.validate_source)
+    provider = provider_type(entries)
     stop = threading.Event()
     started = False
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -104,7 +128,7 @@ def main():
     try:
         provider.start(args.socket)
         started = True
-        print(json.dumps({'state': 'serving', 'source': 'fs-dax', 'files': observed,
+        print(json.dumps({'state': 'serving', 'source': provider.source, 'files': observed,
                           'SDK_called': False, 'KVM_tested': False,
                           'externalPublicationMustRemainImmutableAndRetained': True}), flush=True)
         stop.wait()

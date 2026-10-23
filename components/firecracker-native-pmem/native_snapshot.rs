@@ -152,4 +152,20 @@ mod tests {
     fn ordinary_file_snapshot_path_is_unchanged() {
         assert_eq!(saved_path("base.ext4").unwrap(), "base.ext4");
     }
+    #[test]
+    fn host_file_snapshot_rebinds_content_without_host_path_or_old_fd() {
+        let digest = "a".repeat(64);
+        let first = format!("aenv-pmem-fd:v5:{digest}:2097152:hostfile:10");
+        let next = format!("aenv-pmem-fd:v5:{digest}:2097152:hostfile:11");
+        let saved = saved_path(&first).unwrap();
+        assert_eq!(saved, saved_path(&path('a', 64)).unwrap());
+        let table = serde_json::json!({"version":1,"paths":[next.clone()]});
+        assert_eq!(
+            resolve(&saved, &serde_json::to_vec(&table).unwrap()).unwrap(),
+            next
+        );
+        let table =
+            serde_json::json!({"version":1,"paths":[next.replace(&digest,&"b".repeat(64))]});
+        assert!(resolve(&saved, &serde_json::to_vec(&table).unwrap()).is_err());
+    }
 }

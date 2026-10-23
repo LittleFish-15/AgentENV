@@ -931,7 +931,7 @@ impl FirecrackerSandbox {
                 .common()
                 .direct_rootfs
                 .as_ref()
-                .is_some_and(|binding| matches!(binding.version, 3 | 4))
+                .is_some_and(|binding| matches!(binding.version, 3 | 4 | 5))
             {
                 // DAX reads alone do not establish instruction-fetch support
                 // for imported device PFNs. Run code from the immutable lower,
@@ -1908,7 +1908,18 @@ impl FirecrackerSandbox {
                 .await??;
             }
             for (index, layer) in binding.layers.iter().enumerate() {
-                if binding.version == 4 {
+                if binding.version == 5 {
+                    self.fc_instance
+                        .acquire_host_pagecache(
+                            layer.clone(),
+                            super::direct_backing::FIRST_BACKING_FD + index as i32,
+                            binding
+                                .device_runtime
+                                .clone()
+                                .context("Host page-cache runtime missing")?,
+                        )
+                        .await?;
+                } else if binding.version == 4 {
                     self.fc_instance
                         .acquire_fs_dax(
                             layer.clone(),
@@ -1938,7 +1949,7 @@ impl FirecrackerSandbox {
                         .await?;
                 }
             }
-            if matches!(binding.version, 3 | 4) {
+            if matches!(binding.version, 3 | 4 | 5) {
                 self.fc_instance.prepare_snapshot_pmem(binding)?;
             }
         }
