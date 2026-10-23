@@ -2,7 +2,7 @@
 import argparse,base64,hashlib,json,os,socket,stat,sys,time,urllib.error,urllib.request,uuid
 from pathlib import Path
 
-RELEASE={'commit': '7f6b3ce0ed7758fd9459b6331b5fc793b22c4d18', 'sha256': 'c863211c869f45b547c884d5528548bbb5ef2e99077bf3b4b0abe20e90954846', 'bytes': 3675901, 'blob': 'afedb5fae77bbc01ce095a19b625f39e52a3efe8'}
+RELEASE={'commit': '095d02c0e821419b0177d6598bfb89c1cd10fe40', 'sha256': '6a620b41d86089a878dd46b07eacde5fe531289ed33b0df275641e4d75be5713', 'bytes': 3681027, 'blob': '95415df71deccca16c468bd5ad48b502e3457d49'}
 ROOT=Path('/home/jwk/agent')
 
 class OfficialOnly(urllib.request.HTTPRedirectHandler):

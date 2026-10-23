@@ -41,6 +41,8 @@ python3 -I -B native_archive_round.py run-a --scenario dual-ab --run
 
 报告保留逐模板/slot/step的实际退出码、任务时间、失败或超时、4GiB实际Guest RAM VMA、整FC、Host/PSI、private upper、Runtime/provider charge和辅助进程。native观察器已纠正旧512MiB尺寸假设，仍用FC API区间与smaps核对；不能用大小猜VMA。辅助采集限定collector、匹配命令的父coordinator及精确Runtime host proxy，缺项NA；SSH及kernel/driver开销未穷尽。
 
+Markdown现直接列出逐Guest任务耗时/完成数/非零/状态，both_replaying阶段的每模板和逐Guest RAM/整FC观测，Runtime/provider统计、末次Host绝对值和唯一UB owner覆盖。内存统计单元为均值MiB/峰值MiB/有效样本/缺失样本；各列独立峰值不能相加。任务耗时按既有墙钟端点计算、含回放等待，不冒称单调CPU时间；缺失、逆序或非有限值显示NA。辅助详细项仍在JSON与样本日志，不因此宣称全部成本齐全。
+
 UB按ownerId归组，owner覆盖只记录一次，保留各节点观察，不把A/B同对象覆盖相加。覆盖仍不是物理增量。Guest文件缓存包含在Guest RAM中，尚无完整独立归因；DAX逐文件完整访问集合／驻留物理计量和整体净节省为NA。
 
 本native入口没有重新跑原版Runtime。已有原版数据只作历史参考；`completeCounterfactualAccepted=false`。必须匹配逐命令结果、环境与不重复的内存账目，才能接受完整原版／新版收益结论。普通rootfs缓存的同版本off/lazy对照继续用c56082c单／双入口；其off也不是ae9原版。
@@ -55,12 +57,12 @@ UB按ownerId归组，owner覆盖只记录一次，保留各节点观察，不把
 
 默认不带`--run`仅打印计划，无Host访问或改动。夜间开发未连接两台机器、未启动SDK或Guest。脚本通过本地编译与模型/文件集成检查；Linux部署、KVM/DAX和真实收益留待用户现场验收。
 
-本地196项交付检查通过，包括单节点禁止B操作、双节点阶段顺序、capture失败进入收尾、未知状态不退役、唯一owner覆盖不重复计、4GiB RAM绑定和helper版本闭合。模型执行不能代替目标部署或硬件验收。
+本地198项交付检查通过，包括单节点禁止B操作、双节点阶段顺序、capture失败进入收尾、未知状态不退役、唯一owner覆盖不重复计、4GiB RAM绑定和helper版本闭合。模型执行不能代替目标部署或硬件验收。
 
 
 ## 固定下载入口
 
-主入口固定提交 `7f6b3ce0ed7758fd9459b6331b5fc793b22c4d18`，SHA256 `c863211c869f45b547c884d5528548bbb5ef2e99077bf3b4b0abe20e90954846`。使用同目录 [A单节点脚本](A_run_native_single.sh)、[A双节点脚本](A_run_native_dual.sh)；下载器为 [native_round_bootstrap.py](native_round_bootstrap.py)。旧ac9入口保留在Git历史，未新增实机验收。
+主入口固定提交 `095d02c0e821419b0177d6598bfb89c1cd10fe40`，SHA256 `6a620b41d86089a878dd46b07eacde5fe531289ed33b0df275641e4d75be5713`。使用同目录 [A单节点脚本](A_run_native_single.sh)、[A双节点脚本](A_run_native_dual.sh)；下载器为 [native_round_bootstrap.py](native_round_bootstrap.py)。旧ac9入口保留在Git历史，未新增实机验收。
 
 ## 完整性判定修正
 
