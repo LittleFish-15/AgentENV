@@ -63,6 +63,22 @@ Report regeneration is read-only with respect to services and Guests:
 python3 -I -B A_dsec_four_v1.py report
 ```
 
+After returning the private output, the separate local-only comparator can read
+the original memory-recheck JSON without modifying it:
+
+```
+python compare_dsec_reference.py --candidate comparison-input.private.json --original memory-recheck256.json --original-sha256 VERIFIED_ORIGINAL_SHA256 --output-directory new-private-comparison
+```
+
+This comparator needs `dsec_report.py` beside it. It preserves observed signed
+differences and labels them historical. It requires explicit CPU/RAM evidence
+and exact per-command outcomes for full same-workload acceptance. Original
+aggregate-only reports do not supply those missing fields: they remain gaps,
+even if their 8 jobs, replay hashes and aggregate nonzero counts match.
+`--original-events` optionally reads a private JSON list of
+`{instanceId, slot, events:[{step, returnCode, ...}]}` records. It does not fetch
+or regenerate historical results. Missing data is not repaired by guessing.
+
 Return the private JSON/Markdown to the existing chat for local comparison with
 the latest original reference. Do not publish those files, the workload data,
 or command logs to GitHub. Reference per-command results are not embedded in
