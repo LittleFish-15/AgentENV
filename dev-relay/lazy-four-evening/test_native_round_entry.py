@@ -3,8 +3,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-H=Path(__file__).resolve().parent.parent
-spec=importlib.util.spec_from_file_location('native_round',H/'delivery/native_archive_round.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+HERE=Path(__file__).resolve().parent
+H=HERE.parent if HERE.name=='delivery' else HERE
+ENTRY=H/'delivery/native_archive_round.py'
+if not ENTRY.exists():ENTRY=H/'native_archive_round.py'
+spec=importlib.util.spec_from_file_location('native_round',ENTRY);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 class NativeRoundEntryTests(unittest.TestCase):
  def test_memory_markdown_uses_recorded_phase_values_and_retains_missing(self):
