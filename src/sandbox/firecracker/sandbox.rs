@@ -56,6 +56,12 @@ const VM_STATE_FILE_NAME: &str = "vm_state.bin";
 const ROOTFS_DRIVE_PATH: &str = "rootfs.ext4";
 const USER_ROOTFS_DRIVE_PATH: &str = "user-rootfs";
 
+// The pmem API validates this as a resource ID, not a filename. In particular,
+// hyphens are rejected even though they are valid in backing descriptor paths.
+fn native_pmem_resource_id(index: usize) -> String {
+    format!("aenv_ro_{index}")
+}
+
 /// Firecracker's `TokenBucket::size` is the number of tokens replenished every
 /// `refill_time`, not a per-second rate. Pinning the refill period to 1000 ms
 /// makes the configured `*_per_sec` values equal the sustained per-second rate.
@@ -2709,7 +2715,7 @@ impl FirecrackerSandbox {
             for index in 0..binding.layers.len() {
                 self.fc_instance
                     .add_acquired_pmem(
-                        &format!("aenv-ro-{index}"),
+                        &native_pmem_resource_id(index),
                         super::direct_backing::FIRST_BACKING_FD + index as i32,
                     )
                     .await?;
@@ -3143,6 +3149,19 @@ mod tests {
     use crate::sandbox::{SandboxAccessTokenGenerator, SandboxExecutor};
     use crate::snapshot::{CommittedSnapshot, RunnableSnapshot, SnapshotRecord};
     use std::collections::HashMap;
+
+    #[test]
+    fn native_pmem_resource_ids_are_unique_api_path_segments() {
+        let ids: Vec<_> = (0..super::super::direct_backing::MAX_PMEM_LAYERS)
+            .map(native_pmem_resource_id)
+            .collect();
+        assert_eq!(ids.first().map(String::as_str), Some("aenv_ro_0"));
+        assert!(ids
+            .iter()
+            .all(|id| !id.is_empty() && id.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())));
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len());
+    }
 
     fn fresh_config() -> FirecrackerSandboxConfig {
         FirecrackerSandboxConfig::new(
