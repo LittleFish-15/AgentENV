@@ -23,6 +23,11 @@ pub fn validate(descriptor: &str, expected: &str) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn verify(descriptor: &str, expected: &str) -> io::Result<()> {
+    verify_mode(descriptor, expected, false)
+}
+
+#[cfg(target_os = "linux")]
+pub fn verify_mode(descriptor: &str, expected: &str, private_cow: bool) -> io::Result<()> {
     use sha2::{Digest, Sha256};
     validate(descriptor, expected)?;
     let limit = libc::rlimit {
@@ -58,7 +63,21 @@ pub fn verify(descriptor: &str, expected: &str) -> io::Result<()> {
         ));
     }
     let backing = native_fd::NativePmemFd::parse(descriptor)?.expect("validated descriptor");
-    let (_file, _, pointer, bytes) = backing.map(true)?;
+    if private_cow && !backing.is_fs_dax() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private mapping verification requires FS-DAX",
+        ));
+    }
+    if let Some(reference) = backing.snapshot_reference() {
+        if reference != format!("aenv-pmem-content:v1:{expected}:{}", backing.bytes()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "descriptor digest differs",
+            ));
+        }
+    }
+    let (file, _, pointer, bytes) = backing.map(true)?;
     struct Mapping(*mut libc::c_void, usize);
     impl Drop for Mapping {
         fn drop(&mut self) {
@@ -85,6 +104,57 @@ pub fn verify(descriptor: &str, expected: &str) -> io::Result<()> {
             io::ErrorKind::InvalidData,
             "native content SHA256 mismatch",
         ));
+    }
+    if private_cow {
+        use std::os::fd::AsRawFd;
+        // Two private views exercise first-write isolation without modifying the
+        // readonly base. This is a Host VM test, not Guest/KVM or UB attestation.
+        let make_private = || -> io::Result<Mapping> {
+            // SAFETY: validated file covers bytes; the guard owns the new range.
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    bytes as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Mapping(ptr, bytes as usize))
+        };
+        let first = make_private()?;
+        let second = make_private()?;
+        for offset in [0, bytes as usize - 1] {
+            // SAFETY: all pointers are inside owned mappings. Volatile accesses
+            // force actual faults and reads. No signal recovery or fallback.
+            unsafe {
+                let base = mapped.0.cast::<u8>().add(offset);
+                let a = first.0.cast::<u8>().add(offset);
+                let b = second.0.cast::<u8>().add(offset);
+                let original = base.read_volatile();
+                if a.read_volatile() != original || b.read_volatile() != original {
+                    return Err(io::Error::other("private views differ before write"));
+                }
+                a.write_volatile(original ^ 0x5a);
+                if a.read_volatile() != original ^ 0x5a
+                    || b.read_volatile() != original
+                    || base.read_volatile() != original
+                {
+                    return Err(io::Error::other("private write changed peer or base"));
+                }
+                b.write_volatile(original ^ 0xa5);
+                if a.read_volatile() != original ^ 0x5a
+                    || b.read_volatile() != original ^ 0xa5
+                    || base.read_volatile() != original
+                {
+                    return Err(io::Error::other("second private write was not isolated"));
+                }
+            }
+        }
     }
     Ok(())
 }

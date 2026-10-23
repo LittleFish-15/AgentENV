@@ -120,13 +120,20 @@ pub fn memory_identity(config: &[u8], virtual_bytes: u64) -> Result<String> {
 pub struct MemoryBinding {
     pub version: u32,
     pub memory_image: String,
+    /// Version 2 uses FS-DAX and isolated private-mapping verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_runtime: Option<DeviceRuntime>,
     /// Full linear, uncompressed RAM bytes, not an OverlayBD stored layer.
     pub backing: BackingSpec,
 }
 
 impl MemoryBinding {
     pub fn validate(&self, image: &[u8], virtual_bytes: u64) -> Result<()> {
-        ensure!(self.version == 1, "unsupported native RAM binding version");
+        match (self.version, &self.device_runtime) {
+            (1, None) => (),
+            (2, Some(runtime)) => runtime.validate()?,
+            _ => anyhow::bail!("RAM v1 must omit runtime; FS-DAX v2 requires pinned runtime"),
+        }
         self.backing.validate()?;
         ensure!(
             self.backing.bytes == virtual_bytes,
@@ -158,7 +165,7 @@ impl RootfsFilesystem {
     }
 }
 
-/// Versions 1/2 are cold-boot only. Version 3 snapshots portable content
+/// Versions 1/2 are cold-boot only. Versions 3 (NC) and 4 (FS-DAX) snapshot portable content
 /// references. Optional snapshot sources become repository-owned archives;
 /// otherwise operators retain bases externally. Every restore still needs
 /// fresh local bindings. An absent base is a hard restore error.
@@ -175,7 +182,7 @@ pub struct RootfsBinding {
     /// Immutable lower filesystem; omitted legacy bindings remain EROFS.
     #[serde(default)]
     pub lower_filesystem: RootfsFilesystem,
-    /// Required only by version 2: explicitly pinned device-aware executables.
+    /// Required by versions 2..4: explicitly pinned backing-aware executables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_runtime: Option<DeviceRuntime>,
     /// Optional exact raw images to retain as repository-owned snapshot artifacts.
@@ -353,22 +360,22 @@ impl RootfsBinding {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.snapshot_sources.is_empty()
-                || (self.version == 3
+                || (matches!(self.version, 3 | 4)
                     && self.snapshot_sources.len() == self.layers.len()
                     && self.snapshot_sources.iter().all(|p| p.is_absolute())),
-            "native snapshot sources require one absolute source for every v3 layer"
+            "native snapshot sources require one absolute source for every v3/v4 layer"
         );
         ensure!(
-            (self.version == 1 || self.version == 2 || self.version == 3)
+            matches!(self.version, 1..=4)
                 && !self.layers.is_empty()
                 && self.layers.len() <= MAX_PMEM_LAYERS,
-            "native rootfs requires 1..8 version-1/2/3 layers"
+            "native rootfs requires 1..8 version-1/2/3/4 layers"
         );
         match (self.version, &self.device_runtime) {
             (1, None) => (),
-            (2 | 3, Some(runtime)) => runtime.validate()?,
+            (2 | 3 | 4, Some(runtime)) => runtime.validate()?,
             _ => anyhow::bail!(
-                "version-2/3 rootfs requires pinned device runtime; version-1 must omit it"
+                "version-2/3/4 rootfs requires pinned device runtime; version-1 must omit it"
             ),
         }
         let mut total = 0u64;
@@ -407,8 +414,8 @@ impl RootfsBinding {
         use crate::sandbox::manifest::{NativeRootfsLayer, NativeRootfsSnapshot};
         self.validate()?;
         ensure!(
-            self.version == 3,
-            "pmem capture/fork requires version-3 content rebinding support"
+            matches!(self.version, 3 | 4),
+            "pmem capture/fork requires version-3/4 content rebinding support"
         );
         let mut unique = std::collections::HashSet::new();
         ensure!(
@@ -482,6 +489,11 @@ pub fn read_binding<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 #[cfg(target_os = "linux")]
+#[path = "../../../components/firecracker-native-pmem/native_fd.rs"]
+#[allow(dead_code)]
+mod native_fd;
+
+#[cfg(target_os = "linux")]
 pub use linux::PinnedBacking;
 
 #[cfg(target_os = "linux")]
@@ -502,13 +514,14 @@ mod linux {
         lease_file: File,
         _lease: UnixStream,
         nc_pmem_bytes: Option<u64>,
+        fs_dax: Option<(String, u64, bool)>,
         extra_files: Vec<File>,
         segment_lengths: Vec<u64>,
     }
 
     impl PinnedBacking {
         pub fn acquire(spec: &BackingSpec, child_fd: RawFd, private_cow: bool) -> Result<Self> {
-            Self::acquire_mode(spec, child_fd, private_cow, false)
+            Self::acquire_mode(spec, child_fd, private_cow, false, false)
         }
 
         /// Only the isolated verifier may read this mapping before FC startup.
@@ -518,7 +531,15 @@ mod linux {
                     && spec.bytes.is_multiple_of(PMEM_ALIGNMENT),
                 "invalid NC pmem slot/length"
             );
-            Self::acquire_mode(spec, child_fd, false, true)
+            Self::acquire_mode(spec, child_fd, false, true, false)
+        }
+
+        pub fn acquire_fs_dax(
+            spec: &BackingSpec,
+            child_fd: RawFd,
+            private_cow: bool,
+        ) -> Result<Self> {
+            Self::acquire_mode(spec, child_fd, private_cow, false, true)
         }
 
         fn acquire_mode(
@@ -526,6 +547,7 @@ mod linux {
             child_fd: RawFd,
             private_cow: bool,
             nc_pmem: bool,
+            fs_dax: bool,
         ) -> Result<Self> {
             spec.validate()?;
             ensure!(
@@ -555,7 +577,13 @@ mod linux {
                 cred.uid == unsafe { libc::geteuid() },
                 "native provider must run as the runtime UID"
             );
-            let protocol_version = if nc_pmem { 2 } else { 1 };
+            let protocol_version = if fs_dax {
+                3
+            } else if nc_pmem {
+                2
+            } else {
+                1
+            };
             let request = serde_json::json!({"version": protocol_version, "operation": "acquire", "objectId": spec.object_id,
                 "generation": spec.generation, "sha256": spec.sha256, "bytes": spec.bytes,
                 "privateCow": private_cow});
@@ -591,8 +619,14 @@ mod linux {
                 !private_cow || response.private_cow,
                 "provider does not support RAM private CoW"
             );
-            ensure!(response.source == "ub", "unknown native backing source");
-            if nc_pmem {
+            if fs_dax {
+                ensure!(
+                    response.source == "fs-dax"
+                        && response.cache_mode == "fs-dax"
+                        && response.private_cow == private_cow,
+                    "FS-DAX requires its own explicit provider contract"
+                );
+            } else if nc_pmem {
                 ensure!(
                     response.source == "ub" && response.cache_mode == "nc" && !response.private_cow,
                     "NC pmem requires a UB device provider without a RAM CoW claim"
@@ -654,7 +688,9 @@ mod linux {
                 }
             }
             let mut file = File::from(received.remove(0));
-            if !nc_pmem {
+            if fs_dax {
+                native_fd::validate_fs_dax_file(&file, spec.bytes)?;
+            } else if !nc_pmem {
                 ensure!(
                     file.seek(SeekFrom::End(0))? == spec.bytes,
                     "native FD capacity differs from declared full image"
@@ -713,16 +749,29 @@ mod linux {
                 lease_file,
                 _lease: stream,
                 nc_pmem_bytes: nc_pmem.then_some(spec.bytes),
+                fs_dax: fs_dax.then(|| (spec.sha256[7..].to_owned(), spec.bytes, private_cow)),
                 extra_files,
                 segment_lengths: lengths,
             })
         }
 
         pub fn child_path(&self) -> PathBuf {
+            if self.fs_dax.as_ref().is_some_and(|(_, _, private)| !private) {
+                return self.fs_dax_path(self.child_fd);
+            }
             match self.nc_pmem_bytes {
                 Some(_) => self.segmented_path(self.segment_child_start()),
                 None => PathBuf::from(format!("/proc/self/fd/{}", self.child_fd)),
             }
+        }
+
+        fn fs_dax_path(&self, fd: RawFd) -> PathBuf {
+            let (digest, bytes, _) = self.fs_dax.as_ref().expect("FS-DAX backing");
+            PathBuf::from(format!("aenv-pmem-fd:v4:{digest}:{bytes}:fsdax:{fd}"))
+        }
+
+        pub fn requires_private_cow_verification(&self) -> bool {
+            self.fs_dax.as_ref().is_some_and(|(_, _, private)| *private)
         }
 
         fn segment_child_start(&self) -> RawFd {
@@ -763,6 +812,9 @@ mod linux {
         }
 
         pub fn verification_path(&self) -> PathBuf {
+            if self.fs_dax.is_some() {
+                return self.fs_dax_path(FIRST_SEGMENT_FD);
+            }
             self.segmented_path(FIRST_SEGMENT_FD)
         }
 
@@ -888,6 +940,33 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fs_dax_uses_explicit_versions_and_preserves_snapshot_content_identity() {
+        let legacy = catalog_binding("source");
+        let identity = legacy.snapshot_identity().unwrap();
+        let mut dax = legacy.clone();
+        dax.version = 4;
+        dax.layers[0].socket = "/run/fsdax.sock".into();
+        dax.validate_restore_identity(&identity).unwrap();
+        dax.device_runtime = None;
+        assert!(dax.validate().is_err());
+        let image = serde_json::to_vec(&serde_json::json!({"lowers": [{
+            "digest": format!("sha256:{}", "b".repeat(64)), "size": 4096
+        }]}))
+        .unwrap();
+        let mut ram = MemoryBinding {
+            version: 2,
+            backing: spec(),
+            memory_image: memory_identity(&image, PMEM_ALIGNMENT).unwrap(),
+            device_runtime: legacy.device_runtime,
+        };
+        ram.validate(&image, PMEM_ALIGNMENT).unwrap();
+        ram.version = 1;
+        assert!(ram.validate(&image, PMEM_ALIGNMENT).is_err());
+        ram.version = 2;
+        ram.device_runtime = None;
+        assert!(ram.validate(&image, PMEM_ALIGNMENT).is_err());
+    }
     #[test]
     fn device_version_requires_explicit_binary_pins_and_cannot_downgrade() {
         let mut root = RootfsBinding {
@@ -1131,6 +1210,7 @@ mod tests {
             "a".repeat(64)
         );
         let binding = MemoryBinding {
+            device_runtime: None,
             version: 1,
             memory_image: memory_identity(image.as_bytes(), 4096).unwrap(),
             backing: spec(),
@@ -1174,6 +1254,7 @@ mod tests {
             "b".repeat(64)
         );
         let binding = MemoryBinding {
+            device_runtime: None,
             version: 1,
             memory_image: memory_identity(image.as_bytes(), PMEM_ALIGNMENT).unwrap(),
             backing: spec(),

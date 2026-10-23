@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "source_note": "Exact reviewed source capture. Input hashes do not attest installed binaries. Version-3 native descriptors snapshot content references and require explicit verified local FD rebindings; PmemConfig and snapshot serialization schemas are unchanged.",
+  "source_note": "Exact source inputs; native v3 NC and v4 FS-DAX use portable content references. Both ARM64 policies add FD-scoped FS-DAX metadata checks. No target capability or deployed binary attestation.",
   "files": {
     "src/vmm/src/devices/virtio/pmem/mod.rs": "87f0d7926e0dd735ab011bf70a6cd7d3284e33d3488620e6421a08f5e48ea461",
     "src/vmm/src/devices/virtio/pmem/device.rs": "f54bfaeb32c52a16387223007f1420c5c0944417b0b8cca5218b1eb9ee13155d",
@@ -9,8 +9,8 @@
     "resources/seccomp/aarch64-unknown-linux-musl.json": "4569eb0a3bb7019977698df0fd0fb30c7029ceb6403139d2e2718b257b7828ad",
     "src/firecracker/build.rs": "d7312497726509400d7a267bc87c0c03698fe76ea67ae09a32f46e352180efea"
   },
-  "native_module_sha256": "9eb4afcc710dec4e5d496b8502d88b36d57f6f7305c1bd869b0a826b19a2f467",
+  "native_module_sha256": "c91fe790edd896d15fc29d8b1e70c80278ac360f0cb6d86977b0954b15df9876",
   "patch": "native-pmem-fd-v2.patch",
-  "gnu_seccomp_policy_sha256": "d5ad15cec885f4f8508095fa6a42c22d470943976e96a4e64e88b43e198f9f1a",
-  "native_snapshot_module_sha256": "af2e19c8794b3fbe20f225c2c928c8e51d6ee3879f19977c602f8306bb1d8294"
+  "gnu_seccomp_policy_sha256": "67e09adbde94bca445d53d42cc6df447f280ff4e2bd3de7e582f082143910c60",
+  "native_snapshot_module_sha256": "22b808320f4f9340fa4dc58a28df815bcfb8c9dd277632e3913d795513f54dd2"
 }

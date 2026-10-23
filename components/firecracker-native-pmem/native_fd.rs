@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Readonly inherited NC segments, mapped into one aligned pmem address range.
+//! Readonly inherited NC segments or an explicitly validated FS-DAX file.
 //! Shared with the isolated verifier; the FC patch embeds the same source.
 use std::io;
 
@@ -14,6 +14,7 @@ pub struct NativePmemFd {
     segments: Vec<(i32, u64)>,
     bytes: u64,
     content_sha256: Option<String>,
+    fs_dax: bool,
 }
 
 pub fn is_native_pmem_path(path: &str) -> bool {
@@ -46,6 +47,33 @@ impl NativePmemFd {
             return Err(invalid(
                 "native descriptor exceeds bounded segment metadata",
             ));
+        }
+        if let Some(value) = value.strip_prefix("v4:") {
+            let parts: Vec<_> = value.split(':').collect();
+            if parts.len() != 4
+                || parts[2] != "fsdax"
+                || parts[0].len() != 64
+                || !parts[0]
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(invalid("invalid FS-DAX content descriptor"));
+            }
+            let bytes = number(parts[1])?;
+            let fd = i32::try_from(number(parts[3])?).map_err(|_| invalid("FD overflow"))?;
+            if bytes == 0
+                || bytes % 4096 != 0
+                || bytes > isize::MAX as u64 - ALIGNMENT
+                || !((10..26).contains(&fd) || (64..320).contains(&fd))
+            {
+                return Err(invalid("invalid FS-DAX length or inherited FD"));
+            }
+            return Ok(Some(Self {
+                segments: vec![(fd, bytes)],
+                bytes,
+                content_sha256: Some(parts[0].to_owned()),
+                fs_dax: true,
+            }));
         }
         if let Some(value) = value.strip_prefix("v3:") {
             let (digest, rest) = value
@@ -129,6 +157,7 @@ impl NativePmemFd {
             segments,
             bytes,
             content_sha256: None,
+            fs_dax: false,
         }))
     }
 
@@ -143,6 +172,10 @@ impl NativePmemFd {
         self.bytes
     }
 
+    pub fn is_fs_dax(&self) -> bool {
+        self.fs_dax
+    }
+
     #[cfg(target_os = "linux")]
     pub fn map(self, read_only: bool) -> io::Result<(std::fs::File, u64, u64, u64)> {
         use std::os::fd::{AsRawFd, FromRawFd};
@@ -151,7 +184,7 @@ impl NativePmemFd {
             return Err(invalid("native device pmem is read-only"));
         }
         let mut files = Vec::new();
-        for (fd, _) in &self.segments {
+        for (fd, length) in &self.segments {
             // SAFETY: fcntl validates fd and returns a newly owned descriptor.
             let raw = unsafe { libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 512) };
             if raw < 0 {
@@ -164,7 +197,9 @@ impl NativePmemFd {
             if flags < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if flags & libc::O_ACCMODE != libc::O_RDONLY
+            if self.fs_dax {
+                validate_fs_dax_file(&file, *length)?;
+            } else if flags & libc::O_ACCMODE != libc::O_RDONLY
                 || flags & libc::O_SYNC != libc::O_SYNC
                 || !file.metadata()?.file_type().is_char_device()
             {
@@ -255,6 +290,55 @@ impl NativePmemFd {
     }
 }
 
+/// FS-DAX is a separate contract from an NC character FD or ordinary cached file.
+/// This proves local file properties, not UB provenance or cross-node identity.
+#[cfg(target_os = "linux")]
+pub fn validate_fs_dax_file(file: &std::fs::File, bytes: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const ATTR_DAX: u64 = 0x0020_0000;
+    // SAFETY: the borrowed descriptor remains open during this check.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_ACCMODE != libc::O_RDONLY || flags & libc::O_SYNC != 0 {
+        return Err(invalid(
+            "FS-DAX backing requires an exact-length readonly regular file",
+        ));
+    }
+    // SAFETY: zero is a valid initial value for this C output structure.
+    let mut st: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: valid output and NUL-terminated empty path. AT_EMPTY_PATH binds
+    // the check to the inherited open file, not a pathname.
+    if unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_BASIC_STATS,
+            &mut st,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if st.stx_mask & (libc::STATX_TYPE | libc::STATX_SIZE) != (libc::STATX_TYPE | libc::STATX_SIZE)
+        || st.stx_mode as libc::mode_t & libc::S_IFMT != libc::S_IFREG
+        || st.stx_attributes_mask & ATTR_DAX == 0
+        || st.stx_attributes & ATTR_DAX == 0
+        || st.stx_size != bytes
+    {
+        return Err(invalid("inherited file does not have active S_DAX"));
+    }
+    // SAFETY: zero is a valid initial value for this C output structure.
+    let mut fs: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: valid open FD and writable statvfs output structure.
+    if unsafe { libc::fstatvfs(file.as_raw_fd(), &mut fs) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if fs.f_flag as u64 & 1 == 0 {
+        return Err(invalid("FS-DAX base must be on a readonly mount"));
+    }
+    Ok(())
+}
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -262,6 +346,30 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fs_dax_descriptors_bind_content_and_reject_raw_device_syntax() {
+        let digest = "a".repeat(64);
+        let descriptor = format!("aenv-pmem-fd:v4:{digest}:4096:fsdax:18");
+        let parsed = NativePmemFd::parse(&descriptor).unwrap().unwrap();
+        assert!(parsed.is_fs_dax());
+        assert_eq!(
+            parsed.snapshot_reference().unwrap(),
+            format!("aenv-pmem-content:v1:{digest}:4096")
+        );
+        for (bytes, mode, fd) in [
+            (0, "fsdax", 18),
+            (4095, "fsdax", 18),
+            (4096, "nc", 18),
+            (4096, "fsdax", 3),
+            (4096, "fsdax", 320),
+        ] {
+            assert!(
+                NativePmemFd::parse(&format!("aenv-pmem-fd:v4:{digest}:{bytes}:{mode}:{fd}"))
+                    .is_err()
+            );
+        }
+        assert!(NativePmemFd::parse(&descriptor.replace(&digest, &"G".repeat(64))).is_err());
+    }
     #[test]
     fn ordinary_files_keep_the_existing_backend() {
         assert!(NativePmemFd::parse("/tmp/base.erofs").unwrap().is_none());

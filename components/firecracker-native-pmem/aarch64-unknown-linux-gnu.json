@@ -537,6 +537,42 @@
                         "val": 4294967295
                     }
                 ]
+            },
+            {
+                "syscall": "statx",
+                "args": [
+                    {
+                        "index": 0,
+                        "type": "dword",
+                        "op": "ge",
+                        "val": 512
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 4096
+                    },
+                    {
+                        "index": 3,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 2047
+                    }
+                ],
+                "comment": "Inspect active S_DAX on a duplicated inherited backing FD"
+            },
+            {
+                "syscall": "fstatfs",
+                "args": [
+                    {
+                        "index": 0,
+                        "type": "dword",
+                        "op": "ge",
+                        "val": 512
+                    }
+                ],
+                "comment": "Check the inherited FS-DAX file mount is readonly"
             }
         ]
     },

@@ -18,7 +18,7 @@ pub fn saved_path(runtime: &str) -> io::Result<String> {
     match NativePmemFd::parse(runtime)? {
         Some(native) => native
             .snapshot_reference()
-            .ok_or_else(|| invalid("native pmem snapshots require v3 content identity")),
+            .ok_or_else(|| invalid("native pmem snapshots require v3/v4 content identity")),
         None if runtime.starts_with(PREFIX) => {
             Err(invalid("unresolved content reference is not a live device"))
         }
@@ -103,6 +103,21 @@ mod tests {
             "aenv-pmem-fd:v3:{}:2097152:nc:{fd}@2097152",
             sha.to_string().repeat(64)
         )
+    }
+    #[test]
+    fn fs_dax_restore_rebinds_content_without_persisting_node_fd_or_backend() {
+        let digest = "a".repeat(64);
+        let first = format!("aenv-pmem-fd:v4:{digest}:2097152:fsdax:10");
+        let next = format!("aenv-pmem-fd:v4:{digest}:2097152:fsdax:11");
+        let reference = saved_path(&first).unwrap();
+        let table = serde_json::json!({"version": 1, "paths": [next.clone()]});
+        assert_eq!(
+            resolve(&reference, &serde_json::to_vec(&table).unwrap()).unwrap(),
+            next
+        );
+        assert_eq!(reference, saved_path(&path('a', 64)).unwrap());
+        let duplicate = serde_json::json!({"version": 1, "paths": [first, next]});
+        assert!(resolve(&reference, &serde_json::to_vec(&duplicate).unwrap()).is_err());
     }
     #[test]
     fn saved_reference_omits_fd_and_restores_with_new_descriptor() {

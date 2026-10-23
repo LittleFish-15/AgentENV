@@ -1,4 +1,4 @@
-# Firecracker NC device-FD pmem backend
+# Firecracker NC device-FD and FS-DAX pmem backends
 
 Apply `native-pmem-fd-v2.patch` only in an isolated checkout whose input
 files match `baseline.json`. Hashes refer to the LF-normalized reviewed source;
@@ -18,14 +18,19 @@ pmem keeps its original behavior. There is no seek, pread, path reopen, SDK call
 local memfd substitution or disabling of seccomp in this backend.
 
 The patch includes `resources/seccomp/aarch64-unknown-linux-gnu.json` for the
-ARM64 GNU target. It preserves the pinned ARM64 musl policy and adds only these
-VMM rules for GNU libc thread signalling and thread join:
+ARM64 GNU target. GNU adds these VMM rules for libc thread signalling and join:
 
 - `getpid`;
 - `tgkill`, restricted to signal argument 2 equal to 34;
 - `futex`, restricted to operation argument 1 equal to 265
   (`FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME`) and argument 5 equal to
   `FUTEX_BITSET_MATCH_ANY`.
+
+Both ARM64 GNU and musl additionally allow `statx` on FD >= 512 with exactly
+`AT_EMPTY_PATH` and `STATX_BASIC_STATS`, and `fstatfs` on FD >= 512. These check
+active FS-DAX and the readonly mount of duplicated inherited files. They do not
+permit new writes, change vCPU policy, or disable filtering. FS-DAX support on
+other architectures requires a corresponding reviewed policy before use.
 
 Default actions remain `trap`. API and vCPU thread policies are unchanged.
 The GNU resource is embedded by the normal FC build for that target, including
@@ -70,3 +75,26 @@ the same file for the separate FC checkout; its normalized SHA256 is pinned in
 `baseline.json`. Do not edit either copy without regenerating the patch.
 The process FD limit must leave room above FD 512 for private source duplicates;
 insufficient limits fail without changing host settings.
+
+## FS-DAX transport
+
+Version 4 is `aenv-pmem-fd:v4:SHA256_HEX:BYTES:fsdax:FD`. It names one inherited
+readonly regular file, not a character-device mapping. The shared parser accepts
+4KiB multiples for the RAM verifier; the FC pmem device requires 2MiB multiples.
+`statx(AT_EMPTY_PATH)` must report active S_DAX, exact length, and `fstatvfs` must
+report a readonly mount. Ordinary files and raw device-DAX/NC FDs fail. Mapping
+uses the existing shared readonly pmem VMA; private RAM uses the Runtime's
+separate memory binding and standard private snapshot mapping.
+
+Version-4 snapshots use the same portable content references as v3. New local
+FDs and live provider leases are mandatory on restore. Do not serialize an old
+FD, infer a physical UB identity from a content hash, or use a local-file copy as
+a shared-base fallback. The isolated verifier performs the full hash and, for
+RAM, two private-view first-write checks before FC starts. These checks establish
+neither KVM execution support nor two-node physical sharing.
+
+An existing supported UB-to-pmem/FS-DAX presenter is still required. This code
+does not create that device, change OBMM/KVM, mount a shared filesystem writable,
+or upgrade firmware. In particular, an ARM64 kernel may classify a DAX PFN as a
+device and refuse Guest instruction fetch even though Host private CoW works.
+The three Guest acceptance gates remain required before calling this shared RAM.

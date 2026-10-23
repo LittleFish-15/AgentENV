@@ -15,16 +15,20 @@ pub async fn verify(
     // Dropping the caller's JoinHandle detaches this supervisor; it does not
     // cancel verification and drop its lease. The child also inherits a lease.
     let job = tokio::spawn(async move {
+        let mut argv = vec![
+            CString::new(runtime.verifier.as_os_str().as_bytes())?,
+            CString::new(backing.verification_path().as_os_str().as_bytes())?,
+            CString::new(
+                spec.sha256
+                    .strip_prefix("sha256:")
+                    .context("missing digest prefix")?,
+            )?,
+        ];
+        if backing.requires_private_cow_verification() {
+            argv.push(CString::new("--private-cow")?);
+        }
         let mut child = spawn_scoped(ScopedSpawnSpec {
-            argv: vec![
-                CString::new(runtime.verifier.as_os_str().as_bytes())?,
-                CString::new(backing.verification_path().as_os_str().as_bytes())?,
-                CString::new(
-                    spec.sha256
-                        .strip_prefix("sha256:")
-                        .context("missing digest prefix")?,
-                )?,
-            ],
+            argv,
             cwd: None,
             stdout: None,
             stderr: None,
@@ -35,7 +39,7 @@ pub async fn verify(
             capabilities: &[],
         })
         .await
-        .context("spawn isolated NC device verifier")?;
+        .context("spawn isolated native backing verifier")?;
         let status = match timeout(Duration::from_secs(deadline), child.wait()).await {
             Ok(Ok(status)) => status,
             result => {

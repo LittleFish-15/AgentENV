@@ -13,6 +13,31 @@ from aenv_ub_provider import bindings
 
 
 class RetainedBindingTests(unittest.TestCase):
+    def test_fsdax_rootfs_relocation_preserves_version_and_snapshot_identity(self):
+        binding, catalog = bindings.rootfs_plan(self.source, [self.image], '/private/fsdax.sock',
+            len(self.data), self.runtime, 'ext4', retain_snapshot_bases=True, fs_dax=True)
+        self.assertEqual(binding['version'], 4)
+        self.assertEqual(binding['snapshotSources'], [str(self.image.resolve())])
+        path = self.root/'binding-v4.json'
+        path.write_text(json.dumps(binding))
+        restored = bindings.relocate(path, '/private/peer.sock', self.runtime,
+            self.root/'relocated-v4', [str(self.image)])
+        self.assertEqual(restored['version'], 4)
+        self.assertEqual(restored['sourceImage'], binding['sourceImage'])
+        self.assertEqual(restored['layers'][0]['sha256'], binding['layers'][0]['sha256'])
+        self.assertEqual(restored['layers'][0]['socket'], '/private/peer.sock')
+
+    def test_fsdax_memory_binding_is_explicit_and_rejects_compressed_length(self):
+        binding = bindings.fsdax_memory(self.source, self.image, len(self.data),
+            '/private/fsdax.sock', self.runtime, self.root/'ram')
+        self.assertEqual(binding['version'], 2)
+        self.assertEqual(binding['backing']['sha256'], self.digest)
+        self.assertEqual(binding['deviceRuntime'], self.runtime)
+        with self.assertRaises(ValueError):
+            bindings.fsdax_memory(self.source, self.image, len(self.data)+4096,
+                '/private/fsdax.sock', self.runtime, self.root/'invalid-ram')
+        self.assertFalse((self.root/'invalid-ram').exists())
+
     def setUp(self):
         self.root = Path(tempfile.gettempdir()).resolve() / ('native-archive-test-' + uuid.uuid4().hex)
         self.root.mkdir(mode=0o777)

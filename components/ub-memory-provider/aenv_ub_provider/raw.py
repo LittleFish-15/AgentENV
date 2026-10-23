@@ -220,30 +220,35 @@ class RawProvider:
         self.listener = None
         self.semaphore = threading.BoundedSemaphore(64)
 
+    def prepare_handoff(self, request):
+        if (not isinstance(request, dict)
+                or set(request) != {'version', 'operation', 'objectId', 'generation', 'sha256', 'bytes', 'privateCow'}
+                or type(request['version']) is not int or request['version'] != 2
+                or request['operation'] != 'acquire' or request['privateCow'] is not False):
+            raise ValueError('Native pmem provider refuses RAM CoW requests')
+        spec, segments = self.objects[request['objectId']]
+        if (not 1 <= len(segments) <= 32 or sum(length for _, length in segments) != spec['bytes']
+                or any(length <= 0 or length % n.ALIGN for _, length in segments)):
+            raise ValueError('Native provider segment coverage differs')
+        if any(request[k] != spec[k] for k in ('objectId', 'generation', 'sha256', 'bytes')):
+            raise ValueError('Native backing generation/content mismatch')
+        return segments, {'version': 2, 'state': 'ready', 'backing': spec,
+                          'privateCow': False, 'source': 'ub', 'cacheMode': 'nc',
+                          'segmentLengths': [length for _, length in segments]}
+
     def handle(self, stream):
         acquired = False
         try:
             stream.settimeout(10)
             n.same_uid(stream)
             request = n.receive_json(stream)
-            if (set(request) != {'version', 'operation', 'objectId', 'generation', 'sha256', 'bytes', 'privateCow'}
-                    or type(request['version']) is not int or request['version'] != 2
-                    or request['operation'] != 'acquire' or request['privateCow'] is not False):
-                raise ValueError('Native pmem provider refuses RAM CoW requests')
-            spec, segments = self.objects[request['objectId']]
-            if (not 1 <= len(segments) <= 32 or sum(length for _, length in segments) != spec['bytes']
-                    or any(length <= 0 or length % n.ALIGN for _, length in segments)):
-                raise ValueError('Native provider segment coverage differs')
-            if any(request[k] != spec[k] for k in ('objectId', 'generation', 'sha256', 'bytes')):
-                raise ValueError('Native backing generation/content mismatch')
+            segments, response = self.prepare_handoff(request)
             with self.condition:
                 if self.retiring:
                     raise ValueError('Native provider is retiring')
                 self.active += 1
                 acquired = True
-            n.send_json(stream, {'version': 2, 'state': 'ready', 'backing': spec,
-                                'privateCow': False, 'source': 'ub', 'cacheMode': 'nc',
-                                'segmentLengths': [length for _, length in segments]})
+            n.send_json(stream, response)
             if stream.sendmsg([b'F'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                                       array.array('i', [fd for fd, _ in segments]))]) != 1:
                 raise OSError('Short native FD handoff')

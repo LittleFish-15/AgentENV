@@ -6,9 +6,26 @@ from . import contract
 from .io import atomic_json, read_json
 
 
-def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_filesystem='erofs', snapshot_references=False, retain_snapshot_bases=False):
+def fsdax_memory(source, image, virtual_bytes, socket_path, runtime, output):
+    """Bind an existing full linear RAM image; FS-DAX is checked on acquisition."""
+    contract.validate_device_runtime(runtime)
+    path = Path(image).resolve(strict=True)
+    spec = contract.make_spec(path, socket_path)
+    if type(virtual_bytes) is not int or spec['bytes'] != virtual_bytes:
+        raise ValueError('FS-DAX RAM image differs from full snapshot memory layout')
+    binding = {'version': 2, 'memoryImage': contract.image_identity(source, virtual_bytes),
+               'backing': spec, 'deviceRuntime': runtime}
+    output = Path(output)
+    output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
+    atomic_json(output / 'binding.json', binding)
+    atomic_json(output / 'image-catalog.json', {'version': 1,
+        'objects': [{'path': str(path), 'backing': spec}]})
+    return binding
+
+
+def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_filesystem='erofs', snapshot_references=False, retain_snapshot_bases=False, fs_dax=False):
     binding, catalog = rootfs_plan(source, image_paths, socket_path, max_bytes, runtime, lower_filesystem,
-                                  snapshot_references, retain_snapshot_bases)
+                                  snapshot_references, retain_snapshot_bases, fs_dax)
     output = Path(output)
     output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
     atomic_json(output / 'binding.json', binding)
@@ -16,12 +33,12 @@ def rootfs(source, image_paths, socket_path, max_bytes, runtime, output, lower_f
     return binding
 
 
-def rootfs_plan(source, image_paths, socket_path, max_bytes, runtime, lower_filesystem='erofs', snapshot_references=False, retain_snapshot_bases=False):
+def rootfs_plan(source, image_paths, socket_path, max_bytes, runtime, lower_filesystem='erofs', snapshot_references=False, retain_snapshot_bases=False, fs_dax=False):
     """Read prebuilt immutable inputs without publishing a directory or SDK object."""
     if lower_filesystem not in ('erofs', 'ext4'):
         raise ValueError('Native lower filesystem must be erofs or ext4')
     contract.validate_device_runtime(runtime)
-    if retain_snapshot_bases and not snapshot_references:
+    if retain_snapshot_bases and not (snapshot_references or fs_dax):
         raise ValueError('Snapshot base archives require portable v3 snapshot references')
     entries = []
     for image in image_paths:
@@ -31,7 +48,7 @@ def rootfs_plan(source, image_paths, socket_path, max_bytes, runtime, lower_file
             raise ValueError('Prebuilt DAX image must be padded to 2MiB')
         entries.append({'path': str(path), 'backing': backing})
     contract.validate_catalog({'version': 1, 'objects': entries}, socket_path, max_bytes)
-    binding = {'version': 3 if snapshot_references else 2, 'sourceImage': contract.image_identity(source, 0),
+    binding = {'version': 4 if fs_dax else (3 if snapshot_references else 2), 'sourceImage': contract.image_identity(source, 0),
                'layers': [entry['backing'] for entry in entries],
                'maxPmemBytes': max_bytes, 'deviceRuntime': runtime,
                'lowerFilesystem': lower_filesystem}
@@ -45,8 +62,8 @@ def relocate(binding_path, socket_path, runtime, output, snapshot_sources=None):
     required = {'version', 'sourceImage', 'layers', 'maxPmemBytes', 'deviceRuntime'}
     if (not isinstance(binding, dict) or not required <= set(binding)
             or set(binding) - required - {'lowerFilesystem', 'snapshotSources'}
-            or type(binding['version']) is not int or binding['version'] not in (2, 3)):
-        raise ValueError('Only native device rootfs v2/v3 can be relocated')
+            or type(binding['version']) is not int or binding['version'] not in (2, 3, 4)):
+        raise ValueError('Only native rootfs v2/v3/v4 can be relocated')
     lower_filesystem = binding.get('lowerFilesystem', 'erofs')
     if lower_filesystem not in ('erofs', 'ext4'):
         raise ValueError('Native lower filesystem must be erofs or ext4')
@@ -57,7 +74,7 @@ def relocate(binding_path, socket_path, runtime, output, snapshot_sources=None):
     contract.validate_catalog({'version': 1, 'objects': [{'backing': layer} for layer in layers]},
                               socket_path, binding['maxPmemBytes'])
     if binding.get('snapshotSources') or snapshot_sources is not None:
-        if binding['version'] != 3 or not isinstance(snapshot_sources, list) or len(snapshot_sources) != len(layers):
+        if binding['version'] not in (3, 4) or not isinstance(snapshot_sources, list) or len(snapshot_sources) != len(layers):
             raise ValueError('Relocating archived-capture bindings requires every node-local snapshot source')
         local = []
         for image, layer in zip(snapshot_sources, layers):
@@ -104,7 +121,7 @@ def retained_metadata(manifest_path, max_bytes):
     return native
 
 
-def retained_snapshot_plan(manifest_path, artifact_root, socket_path, max_bytes, runtime):
+def retained_snapshot_plan(manifest_path, artifact_root, socket_path, max_bytes, runtime, fs_dax=False):
     """Verify every retained base and return a plan without creating files or SDK state."""
     native = retained_metadata(manifest_path, max_bytes)
     contract.validate_device_runtime(runtime)
@@ -122,15 +139,15 @@ def retained_snapshot_plan(manifest_path, artifact_root, socket_path, max_bytes,
             raise ValueError('Native snapshot archive contents differ')
         entries.append({'path': str(path), 'backing': spec})
     contract.validate_catalog({'version': 1, 'objects': entries}, socket_path, max_bytes)
-    binding = {'version': 3, 'sourceImage': native['sourceImage'], 'layers': [x['backing'] for x in entries],
+    binding = {'version': 4 if fs_dax else 3, 'sourceImage': native['sourceImage'], 'layers': [x['backing'] for x in entries],
                'maxPmemBytes': max_bytes, 'deviceRuntime': runtime, 'lowerFilesystem': native['filesystem'],
                'snapshotSources': [x['path'] for x in entries]}
     return binding, {'version': 1, 'objects': entries}
 
 
-def retained_snapshot(manifest_path, artifact_root, socket_path, max_bytes, runtime, output):
+def retained_snapshot(manifest_path, artifact_root, socket_path, max_bytes, runtime, output, fs_dax=False):
     """Prepare a fresh binding/catalog; publication remains explicit."""
-    binding, catalog = retained_snapshot_plan(manifest_path, artifact_root, socket_path, max_bytes, runtime)
+    binding, catalog = retained_snapshot_plan(manifest_path, artifact_root, socket_path, max_bytes, runtime, fs_dax)
     output = Path(output)
     output.mkdir(mode=0o777 if os.name == 'nt' else 0o700, exist_ok=False)
     atomic_json(output / 'binding.json', binding)

@@ -931,7 +931,7 @@ impl FirecrackerSandbox {
                 .common()
                 .direct_rootfs
                 .as_ref()
-                .is_some_and(|binding| binding.version == 3)
+                .is_some_and(|binding| matches!(binding.version, 3 | 4))
             {
                 // DAX reads alone do not establish instruction-fetch support
                 // for imported device PFNs. Run code from the immutable lower,
@@ -1908,7 +1908,19 @@ impl FirecrackerSandbox {
                 .await??;
             }
             for (index, layer) in binding.layers.iter().enumerate() {
-                if let Some(runtime) = &binding.device_runtime {
+                if binding.version == 4 {
+                    self.fc_instance
+                        .acquire_fs_dax(
+                            layer.clone(),
+                            super::direct_backing::FIRST_BACKING_FD + index as i32,
+                            false,
+                            binding
+                                .device_runtime
+                                .clone()
+                                .context("FS-DAX runtime missing")?,
+                        )
+                        .await?;
+                } else if let Some(runtime) = &binding.device_runtime {
                     self.fc_instance
                         .acquire_nc_pmem(
                             layer.clone(),
@@ -1926,7 +1938,7 @@ impl FirecrackerSandbox {
                         .await?;
                 }
             }
-            if binding.version == 3 {
+            if matches!(binding.version, 3 | 4) {
                 self.fc_instance.prepare_snapshot_pmem(binding)?;
             }
         }
@@ -2163,16 +2175,28 @@ impl FirecrackerSandbox {
                 super::direct_backing::read_binding(Path::new(&path))?;
             let image = tokio::fs::read(&config.mem_overlaybd_config.image_config_path).await?;
             binding.validate(&image, config.mem_virtual_size)?;
-            Some(
-                self.fc_instance
-                    .acquire_backing(
-                        binding.backing,
-                        super::direct_backing::FIRST_BACKING_FD
-                            + super::direct_backing::MAX_PMEM_LAYERS as i32,
-                        true,
-                    )
-                    .await?,
-            )
+            let slot = super::direct_backing::FIRST_BACKING_FD
+                + super::direct_backing::MAX_PMEM_LAYERS as i32;
+            if let Some(runtime) = binding.device_runtime {
+                let check = runtime.clone();
+                let firecracker = config.common.firecracker_binary.clone();
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    super::direct_backing::verify_binary(&check.verifier, &check.verifier_sha256)?;
+                    super::direct_backing::verify_binary(&firecracker, &check.firecracker_sha256)
+                })
+                .await??;
+                Some(
+                    self.fc_instance
+                        .acquire_fs_dax(binding.backing, slot, true, runtime)
+                        .await?,
+                )
+            } else {
+                Some(
+                    self.fc_instance
+                        .acquire_backing(binding.backing, slot, true)
+                        .await?,
+                )
+            }
         } else {
             None
         };

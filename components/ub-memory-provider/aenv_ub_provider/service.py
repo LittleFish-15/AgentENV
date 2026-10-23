@@ -297,6 +297,13 @@ def main():
     retire = commands.add_parser('retire')
     retire.add_argument('work_dir')
     retire.add_argument('--peer-receipt', action='append', default=[])
+    ram = commands.add_parser('bind-fsdax-memory')
+    ram.add_argument('--source', required=True)
+    ram.add_argument('--image', required=True)
+    ram.add_argument('--virtual-bytes', required=True, type=int)
+    ram.add_argument('--socket', required=True)
+    ram.add_argument('--device-runtime', required=True)
+    ram.add_argument('--output', required=True)
     bind = commands.add_parser('bind-rootfs')
     bind.add_argument('--source', required=True)
     bind.add_argument('--image', action='append', required=True)
@@ -306,6 +313,8 @@ def main():
     bind.add_argument('--lower-filesystem', choices=['erofs', 'ext4'], default='erofs')
     bind.add_argument('--snapshot-references', action='store_true',
                       help='Emit v3 content references; requires matching Runtime/FC and retained immutable bases')
+    bind.add_argument('--fs-dax', action='store_true',
+                      help='Emit v4 for existing readonly FS-DAX files; no pmem device is created')
     bind.add_argument('--retain-snapshot-bases', action='store_true',
                       help='Pin local raw sources and archive exact bases with snapshots; requires matching Runtime')
     bind.add_argument('--output', required=True)
@@ -317,6 +326,8 @@ def main():
     relocate.add_argument('--snapshot-source', action='append',
                           help='Matching node-local raw image for each layer of an archived-capture binding')
     archived = commands.add_parser('bind-retained-snapshot')
+    archived.add_argument('--fs-dax', action='store_true',
+                          help='Use v4; retained images must be explicitly published on an existing readonly FS-DAX volume')
     archived.add_argument('--manifest', required=True)
     archived.add_argument('--artifact-root', required=True)
     archived.add_argument('--socket', required=True)
@@ -383,14 +394,20 @@ def main():
         return 0
     if args.command == 'bind-retained-snapshot':
         value = bindings.retained_snapshot(args.manifest, args.artifact_root, args.socket, args.max_bytes,
-                                          read_json(args.device_runtime), args.output)
+                                          read_json(args.device_runtime), args.output, args.fs_dax)
         print(json.dumps({'state': 'archived_binding_prepared_no_sdk', 'bytes': sum(x['bytes'] for x in value['layers'])}))
+        return 0
+    if args.command == 'bind-fsdax-memory':
+        value = bindings.fsdax_memory(args.source, args.image, args.virtual_bytes, args.socket,
+                                      read_json(args.device_runtime), args.output)
+        print(json.dumps({'state': 'fsdax_ram_binding_prepared_no_sdk', 'bytes': value['backing']['bytes'],
+                          'KVM_tested': False, 'physicalSharingAccepted': False}))
         return 0
     if args.command in ('bind-rootfs', 'relocate-rootfs'):
         runtime = read_json(args.device_runtime)
         if args.command == 'bind-rootfs':
             value = bindings.rootfs(args.source, args.image, args.socket, args.max_bytes,
-                                    runtime, args.output, args.lower_filesystem, args.snapshot_references, args.retain_snapshot_bases)
+                                    runtime, args.output, args.lower_filesystem, args.snapshot_references, args.retain_snapshot_bases, args.fs_dax)
         else:
             value = bindings.relocate(args.binding, args.socket, runtime, args.output, args.snapshot_source)
         print(json.dumps({'state': 'binding_prepared_no_sdk', 'bytes': sum(layer['bytes'] for layer in value['layers'])}))
