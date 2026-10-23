@@ -185,14 +185,26 @@ def main():
     parser.add_argument('--original', required=True)
     parser.add_argument('--original-sha256', required=True)
     parser.add_argument('--original-events')
+    parser.add_argument('--original-supplement')
     parser.add_argument('--output-directory', required=True)
     args = parser.parse_args()
     candidate, candidate_sha = read_json(args.candidate)
     original, original_sha = read_json(args.original)
     need(original_sha == args.original_sha256, 'Original input hash differs')
     old_events = read_json(args.original_events, 32*1024**2)[0] if args.original_events else None
+    supplement_sha = None
+    if args.original_supplement or candidate.get('originalReferenceSupplement') is not None:
+        need(not args.original_events, 'Choose bound supplement or separate original events')
+        if args.original_supplement:
+            supplement, supplement_sha = read_json(args.original_supplement, 32*1024**2)
+        else:
+            supplement = candidate['originalReferenceSupplement']
+            supplement_sha = hashlib.sha256(json.dumps(supplement,sort_keys=True).encode()).hexdigest()
+        extra_spec = importlib.util.spec_from_file_location('original_outcomes', HERE / 'export_original_outcomes.py')
+        extra = importlib.util.module_from_spec(extra_spec);extra_spec.loader.exec_module(extra)
+        original, old_events = extra.apply_supplement(original, supplement)
     result = compare(candidate, original, old_events)
-    result.update(candidateInputSha256=candidate_sha, originalInputSha256=original_sha)
+    result.update(candidateInputSha256=candidate_sha, originalInputSha256=original_sha, originalSupplementSha256=supplement_sha)
     target = Path(args.output_directory).absolute()
     need(not target.exists(), 'Existing analysis output preserved')
     target.mkdir(mode=0o777)

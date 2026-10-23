@@ -20,12 +20,12 @@ make a prerequisite pass.
 
 ## Human execution after the prerequisites pass
 
-Use the fixed published `A_dsec_four_v3.py`, as ordinary `jwk` on A:
+Use the fixed published `A_dsec_four_v4.py`, as ordinary `jwk` on A:
 
 ```
-python3 -I -B A_dsec_four_v3.py plan
-python3 -I -B A_dsec_four_v3.py parents
-python3 -I -B A_dsec_four_v3.py replay
+python3 -I -B A_dsec_four_v4.py plan
+python3 -I -B A_dsec_four_v4.py parents
+python3 -I -B A_dsec_four_v4.py replay
 ```
 
 `parents` cold-starts each of the four retained original OCI sources, captures
@@ -60,7 +60,7 @@ Under the isolated deployment's `dsec-four-v1/`:
 Report regeneration is read-only with respect to services and Guests:
 
 ```
-python3 -I -B A_dsec_four_v3.py report
+python3 -I -B A_dsec_four_v4.py report
 ```
 
 After returning the private output, the separate local-only comparator can read
@@ -110,7 +110,7 @@ case's cleanup failure does not prevent attempts on the other owned cases.
 After inspecting the failed phase, explicit owned cleanup is:
 
 ```
-python3 -I -B A_dsec_four_v3.py cleanup --scenario single-a
+python3 -I -B A_dsec_four_v4.py cleanup --scenario single-a
 ```
 
 For an interrupted parent phase use `--scenario parents`. Cleanup preserves
@@ -158,7 +158,7 @@ is detected immediately from its final receipt, not just a liveness timeout.
 After `parents` succeeds, the same entry accepts:
 
 ```
-python3 -I -B A_dsec_four_v3.py fork-check
+python3 -I -B A_dsec_four_v4.py fork-check
 ```
 
 This restores one disposable source from the first clean parent snapshot, writes
@@ -184,3 +184,29 @@ repaired smoke passes. If any phase fails, the next phase must not start. Existi
 phase directories remain non-repeatable; inspect/recover them rather than rerun.
 This function checks single-host pmem lifetimes, not cross-host UB references,
 external provider loss, repository cache eviction or automatic UB republishing.
+
+
+## v4 read-only original-outcome supplement
+
+The same entry can read a previously finalized original256 report, its existing
+commands/NNN-events.jsonl files, and the hash-bound parent catalog resources:
+
+```
+python3 -I -B A_dsec_four_v4.py reference --original-report /home/jwk/agent/relay/reports/EXACT_ORIGINAL_REPORT/combined-summary.json --original-sha256 VERIFIED_REPORT_SHA256
+```
+
+The concrete path/hash belong in the user's local launch command, not in this
+public packet. Only the declared node-a-memory-256-* report scope is accepted.
+This mode does not call any service API, start Guests, rebuild templates, read
+command stdout/stderr, or modify the original report/catalog. It writes one
+private supplement in the new experiment directory. Missing event files or
+changed catalog hashes remain explicit gaps; CPU/RAM values are not filled
+from constants. Existing supplements are preserved rather than overwritten.
+
+The candidate report includes that private supplement when present, so the
+user can return the normal single candidate JSON. The local comparator binds
+it to the original wrapper's full-evidence report hash, run, Sandbox IDs,
+replay hashes and catalog hashes before merging copied resource/event fields.
+It never rewrites the original source JSON. A separate --original-supplement
+file is also accepted. No old experiment needs rerunning merely to retrieve
+its still-existing recorded outcomes.

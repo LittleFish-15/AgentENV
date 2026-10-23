@@ -54,6 +54,9 @@ def report(scope):
               'rawObservations': samples,
               'rootfsActualAccessResidentIntersectionBytes': None, 'globalPhysicalSavingBytes': None,
               'memfileCrossNodePrivateCowAccepted': False, 'rootfsCrossNodePhysicalSharingAccepted': False}
+    supplement = work / 'original-reference-supplement.private.json'
+    if supplement.exists():
+        result['originalReferenceSupplement'] = json.loads(rt.read(supplement, 32 * 1024**2))
     rt.save(work / 'comparison-input.private.json', result)
     text = analysis.markdown(result)
     # Uses the same bounded atomic writer (JSON) for the source of truth. The

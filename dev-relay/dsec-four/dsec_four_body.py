@@ -354,9 +354,11 @@ def root_bootstrap(entry_sha, plan_sha):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('plan', 'parents', 'fork-check', 'replay', 'cleanup', 'observe', 'report'))
+    parser.add_argument('mode', choices=('plan', 'reference', 'parents', 'fork-check', 'replay', 'cleanup', 'observe', 'report'))
     parser.add_argument('--scenario', choices=('parents', 'single-a', 'fork-check'), default='single-a')
     parser.add_argument('--plan-sha')
+    parser.add_argument('--original-report')
+    parser.add_argument('--original-sha256')
     args = parser.parse_args()
     if args.mode == 'plan':
         print(json.dumps({'scope': 'single_host_DSec_four_templates_two_Guests_each',
@@ -371,6 +373,19 @@ def main():
         return module('dsec_root_observer').run(globals(), args.plan_sha)
     need(os.getuid() == os.geteuid() == 1204, 'Use ordinary jwk')
     os.umask(0o077)
+    if args.mode == 'reference':
+        need(args.original_report and args.original_sha256, 'Explicit original report path and SHA required')
+        rt = module('four_runtime')
+        value = module('export_original_outcomes').export(rt, ROOT, args.original_report, args.original_sha256)
+        need(D.resolve(strict=True) == D and D.stat().st_uid == 1204, 'Scoped output deployment differs')
+        WORK.mkdir(mode=0o700, exist_ok=True)
+        need(WORK.resolve(strict=True) == WORK and WORK.stat().st_uid == 1204, 'Scoped output directory differs')
+        output = WORK / 'original-reference-supplement.private.json'
+        need(not output.exists(), 'Existing original supplement preserved')
+        rt.save(output, value)
+        print(json.dumps({'status': 'ORIGINAL_RECEIPTS_EXPORTED_READONLY', 'complete': value['complete'],
+                          'output': str(output), 'Guest_created': False, 'servicesChanged': False}))
+        return 0
     if args.mode == 'report':
         return module('dsec_four_finish').report(globals())
     import fcntl
