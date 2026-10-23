@@ -237,11 +237,20 @@ def cgroup_empty(group):
             candidates.append(Path(a[4])/group.lstrip('/'))
     need(0<len(candidates)<=8,'No bounded systemd cgroup hierarchy')
     for parent in candidates:
-        if not parent.exists():continue
-        need(parent.resolve(strict=True)==parent,'Redirected cgroup')
-        files=list(parent.rglob('cgroup.procs'));need(len(files)<=1024 and files,'Unexpected cgroup subtree')
-        need(all(p.resolve(strict=True)==p and p.is_relative_to(parent) for p in files),'Redirected cgroup member list')
-        if any(p.read_text().strip() for p in files):return False
+        for attempt in range(3):
+            if not parent.exists():break
+            try:
+                need(parent.resolve(strict=True)==parent,'Redirected cgroup')
+                files=list(parent.rglob('cgroup.procs'))
+                if not files and not parent.exists():break
+                need(len(files)<=1024 and files,'Unexpected cgroup subtree')
+                need(all(p.resolve(strict=True)==p and p.is_relative_to(parent) for p in files),'Redirected cgroup member list')
+                if any(p.read_text().strip() for p in files):return False
+                break
+            except FileNotFoundError:
+                # systemd --collect can remove an empty group during this scan.
+                # Retry the scoped hierarchy, never infer emptiness from EACCES.
+                if attempt==2:raise
     return True
 
 def stop_owned(name,expected):
