@@ -417,18 +417,21 @@ def main():
                     time.sleep(1)
             try:
                 module('dsec_four_finish').report(globals())
+                result['reportGenerationPassed'] = True
             except Exception as error:
                 # Raw replay and observer journals remain authoritative. Report
                 # derivation failure must not erase the operation's final state.
                 batch.rt.save(WORK / 'report-generation-stop.json', {'errorType': type(error).__name__,
                     'reason': str(error)[:500], 'replayReportPreserved': True, 'automaticReplayRetry': False})
+                result['reportGenerationPassed'] = False
         else:
             result = batch.cleanup_existing()
         print(json.dumps(result, indent=2))
         passed = result.get('status') in ('FOUR_NATIVE_PARENTS_CAPTURED_OWNED_GUESTS_RELEASED',
                                           'DSEC_FORK_PAIR_PASSED_OWNED_GUESTS_RELEASED',
                                           'NATIVE_FOUR_REPLAY_COMPLETED_OWNED_GUESTS_RELEASED')
-        return 0 if passed or (args.mode == 'cleanup' and result.get('ownedGuestsReleased') is True) else 1
+        return 0 if (passed and result.get('reportGenerationPassed') is not False) or (
+            args.mode == 'cleanup' and result.get('ownedGuestsReleased') is True) else 1
     except (Exception, KeyboardInterrupt) as error:
         result = {'status': 'STOPPED_DSEC_FOUR_PRESERVE_JOURNALS', 'errorType': type(error).__name__,
                   'reason': re.sub(r'e2b_[A-Za-z0-9._~-]+', '<redacted>', str(error))[:1200]}
