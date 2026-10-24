@@ -1,0 +1,40 @@
+{
+  "entry": "A_parent_cache_control_v1.py",
+  "bytes": 1424984,
+  "sha256": "49d1d8f8f370d2d4a05c3f7ee08609d04426c00e1bddde566395239a11b9714b",
+  "helpers": {
+    "pcc-helper-arm64": {
+      "sha256": "88d90ae18b9bdbf890edc5a77bccbbc99553f2f1ce2675c8a1b1f9bc3f70639f",
+      "bytes": 2687136
+    },
+    "parent-init.sh": {
+      "sha256": "a73a5904653c1b2ff695d1c10365396088956afbd19ecdb1d7d1861e2f330788",
+      "bytes": 1495
+    },
+    "observer": {
+      "sha256": "b0b71644c06c37da08487960a31ff40915ddad00aa748ada1cd99b06521622d1",
+      "bytes": 31899
+    },
+    "cgroup": {
+      "sha256": "ad105320475121dc8056ed4a04dd83268d2ac6a1a6df6a9c827011eb9a935ef3",
+      "bytes": 13263
+    }
+  },
+  "specificationSha256": "58ddc7b4d47321a7960ff7a741530e6ed9e21ee80adee47bdeac15ba9ed46db9",
+  "matrixSha256": "8a63a1799f9a8c68d90ca811d2bf524c67bfab3d36bb45d0616eb38532598a87",
+  "GuestBinaryStaticARM64": true,
+  "targetExecuted": false,
+  "localKVMExecution": false,
+  "published": false,
+  "localTestsPassed": 17,
+  "localValidation": {
+    "ARM64StaticCrossCompile": true,
+    "Python311Syntax": true,
+    "tests": 17,
+    "GuestLifecycleSimulated": true,
+    "LinuxKVMExecuted": false,
+    "WSLAvailable": false,
+    "phaseMeasurements": true,
+    "physicalNetAttributionImplemented": false
+  }
+}
