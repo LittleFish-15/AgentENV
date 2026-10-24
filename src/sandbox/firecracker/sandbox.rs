@@ -920,6 +920,36 @@ impl FirecrackerSandbox {
                 self.runtime_policy.envd_poll_interval,
             )
             .await?;
+        if let Some(tools) = &self.tools_ublk_device {
+            let _ = UblkDeviceManager::global()
+                .notify_sandbox_ready(tools.image_config_path())
+                .await;
+        }
+        if let Some(device_key) = &self.mem_snapshot_image_config_path {
+            // envd is up: release held background downloads for this memory
+            // device. Best-effort — downloads would also start after the
+            // fallback timeout.
+            UblkDeviceManager::global()
+                .notify_sandbox_ready(device_key)
+                .await;
+        }
+        if let Some(device_key) = &self.rootfs_image_config_path {
+            // Same release for the rootfs image's background download.
+            UblkDeviceManager::global()
+                .notify_sandbox_ready(device_key)
+                .await;
+        }
+        envd_instance
+            .init(
+                self.launch.common().env_vars.clone(),
+                self.launch.common().default_workdir.clone(),
+                self.launch.common().default_user.clone(),
+            )
+            .await?;
+
+        // A restored envd still carries its source instance's authentication
+        // state. Complete the standard per-instance init before invoking any
+        // authenticated native-rootfs readiness commands with the new token.
         if self.launch.common().direct_rootfs.is_some() {
             let output = Self::run_native_readiness_command(
                 envd_instance.clone(),
@@ -968,33 +998,6 @@ impl FirecrackerSandbox {
                 );
             }
         }
-        if let Some(tools) = &self.tools_ublk_device {
-            let _ = UblkDeviceManager::global()
-                .notify_sandbox_ready(tools.image_config_path())
-                .await;
-        }
-        if let Some(device_key) = &self.mem_snapshot_image_config_path {
-            // envd is up: release held background downloads for this memory
-            // device. Best-effort — downloads would also start after the
-            // fallback timeout.
-            UblkDeviceManager::global()
-                .notify_sandbox_ready(device_key)
-                .await;
-        }
-        if let Some(device_key) = &self.rootfs_image_config_path {
-            // Same release for the rootfs image's background download.
-            UblkDeviceManager::global()
-                .notify_sandbox_ready(device_key)
-                .await;
-        }
-        envd_instance
-            .init(
-                self.launch.common().env_vars.clone(),
-                self.launch.common().default_workdir.clone(),
-                self.launch.common().default_user.clone(),
-            )
-            .await?;
-
         // The snapshot already carries mount state for its existing drives.
         // Only drives newly supplied for this launch need a guest-side mount.
         if !self.initial_guest_drive_mounts.is_empty() {
@@ -3699,6 +3702,89 @@ mod tests {
             .await
             .expect_err("envd should be missing");
         assert!(err.to_string().contains("envd instance not initialized"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_readiness_initializes_current_auth_before_process_requests() -> Result<()> {
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        for reject_init in [false, true] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let token = SandboxAccessTokenGenerator::new("native-readiness-auth-test")?
+                .generate(SandboxId::new());
+            let health_calls = calls.clone();
+            let init_calls = calls.clone();
+            let process_calls = calls.clone();
+            let expected_token = token.clone();
+            let app = Router::new()
+                .route(
+                    "/health",
+                    get(move || async move {
+                        health_calls.lock().unwrap().push("health");
+                        StatusCode::NO_CONTENT
+                    }),
+                )
+                .route(
+                    "/init",
+                    post(
+                        move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                            let calls = init_calls.clone();
+                            let token = expected_token.clone();
+                            async move {
+                                assert_eq!(headers["x-access-token"], token.expose());
+                                assert_eq!(body["accessToken"], token.expose());
+                                calls.lock().unwrap().push("init");
+                                if reject_init {
+                                    StatusCode::UNAUTHORIZED
+                                } else {
+                                    StatusCode::NO_CONTENT
+                                }
+                            }
+                        },
+                    ),
+                )
+                .fallback(move || async move {
+                    // A deliberate probe error makes the check prove that init
+                    // precedes process RPCs without launching a Guest command.
+                    process_calls.lock().unwrap().push("process");
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "{\"error\":\"test probe refused\"}",
+                    )
+                });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut config = fresh_config();
+            let hash = format!("sha256:{}", "a".repeat(64));
+            config.common.direct_rootfs = Some(serde_json::from_value(serde_json::json!({
+                "version": 5, "sourceImage": hash, "maxPmemBytes": 2097152,
+                "lowerFilesystem": "ext4",
+                "layers": [{"objectId": "test-base", "generation": "test-generation",
+                    "sha256": hash, "bytes": 2097152, "socket": "/unused/provider.sock"}],
+                "deviceRuntime": {"verifier": "/unused/verifier", "verifierSha256": hash,
+                    "firecrackerSha256": hash, "verificationTimeoutSecs": 10}
+            }))?);
+            let mut sandbox = FirecrackerSandbox::new(config)?;
+            sandbox.envd_instance =
+                Some(EnvdInstance::new(format!("http://{address}"), Some(token)));
+            let result = sandbox.wait_for_ready().await;
+            server.abort();
+            assert!(
+                result.is_err(),
+                "failed auth/probe must still reject readiness"
+            );
+            let calls = calls.lock().unwrap();
+            if reject_init {
+                assert_eq!(*calls, ["health", "init"]);
+            } else {
+                assert_eq!(*calls, ["health", "init", "process"]);
+            }
+        }
         Ok(())
     }
 
