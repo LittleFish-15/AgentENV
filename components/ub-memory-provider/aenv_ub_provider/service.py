@@ -43,13 +43,13 @@ def validate_config(config):
     role = config.get('role')
     mode = config.get('mode')
     if role == 'publish':
-        extra = {'readers', 'sourceRoot', 'images'} if mode == 'stored' else {'readers', 'catalog'}
+        extra = {'readers', 'sourceRoot', 'images'} if mode in ('stored', 'stored-direct') else {'readers', 'catalog'}
     elif role == 'import':
         extra = {'readerId', 'manifest'}
     else:
         raise ValueError('Provider role must be publish or import')
     if (set(config) != common | extra or type(config['version']) is not int or config['version'] != 1
-            or mode not in ('stored', 'pmem')):
+            or mode not in ('stored', 'stored-direct', 'pmem')):
         raise ValueError('Unsupported provider configuration')
     for key in ('logicalBudgetBytes', 'maxCoverageBytes'):
         if type(config[key]) is not int or not 0 < config[key] < 2**63:
@@ -98,6 +98,8 @@ def inputs(config):
         replicas = [stored.Replica(brokerSocket=data_socket, **r).validate() for r in manifest['replicas']]
         if not 1 <= len(replicas) <= 64 or len({r.objectName for r in replicas}) != len(replicas):
             raise ValueError('Invalid stored import generation')
+        if config['mode'] == 'stored-direct' and any(r.allowRepositoryFallback for r in replicas):
+            raise ValueError('Direct UB import forbids repository fallback')
         if sum(r.mappingBytes for r in replicas) > config['logicalBudgetBytes']:
             raise ValueError('Imported generation exceeds logical budget')
         return replicas, manifest
@@ -192,6 +194,8 @@ def serve(config, selected, manifest):
         backend = backend_type(adapter, config['maxCoverageBytes'])
         backend.configure_region(config['region'])
         socket_path = str(work / 'data.sock')
+        from . import direct
+        stored_provider = direct if config['mode'] == 'stored-direct' else stored
         if config['mode'] == 'pmem':
             images = raw.RawImages(backend, journal, config['maxCoverageBytes'])
             if config['role'] == 'publish':
@@ -201,10 +205,10 @@ def serve(config, selected, manifest):
                 replicas = manifest['replicas']
             provider = raw.RawProvider(images.entries)
         elif config['role'] == 'publish':
-            images = stored.Publisher(backend, work / 'stored-owner.json')
+            images = stored_provider.Publisher(backend, work / 'stored-owner.json')
             local, mappings = images.publish(selected, socket_path, config['logicalBudgetBytes'])
             replicas = [{k: v for k, v in asdict(r).items() if k != 'brokerSocket'} for r in local]
-            provider = stored.Broker(local, mappings)
+            provider = stored_provider.Broker(local, mappings)
         else:
             mappings = []
             backend.initialize()
@@ -214,14 +218,14 @@ def serve(config, selected, manifest):
                 stored.verify_mapping(replica, mapping)
                 mappings.append(mapping)
             replicas = manifest['replicas']
-            provider = stored.Broker(selected, mappings)
+            provider = stored_provider.Broker(selected, mappings)
             local = selected
         published = True
         if manifest is None:
             manifest = {'version': 1, 'ownerId': uuid.uuid4().hex, 'mode': config['mode'],
                         'readers': config['readers'], 'replicas': replicas}
         atomic_json(work / 'replicas.json', manifest)
-        if config['mode'] == 'stored':
+        if config['mode'] in ('stored', 'stored-direct'):
             atomic_json(work / 'runtime-index.json', stored.index_for(local))
         provider.start(socket_path)
         control = socket.socket(socket.AF_UNIX)
@@ -238,6 +242,10 @@ def serve(config, selected, manifest):
                 try:
                     contract.same_uid(stream)
                     request = contract.receive_json(stream)
+                    if config['mode'] == 'stored-direct' and request == {'operation': 'status'}:
+                        control_reply(stream, dict(provider.status(), ownerId=manifest['ownerId'],
+                                                   manifestSha256=identity(manifest)))
+                        continue
                     if config['role'] == 'publish':
                         release_receipts(request, manifest)
                     elif request != {'operation': 'retire', 'peerReceipts': []}:

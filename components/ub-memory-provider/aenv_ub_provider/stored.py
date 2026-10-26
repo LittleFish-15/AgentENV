@@ -142,14 +142,7 @@ class Broker:
                 offset, count = struct.unpack('>QI', recv_exact(stream, 12))
                 if not 0 < count <= CHUNK or offset > size or count > size - offset:
                     raise ValueError('Invalid bounded read range')
-                data = mapping.read(HEADER_BYTES + offset, count)
-                if len(data) != count:
-                    raise ValueError('Short mapping read')
-                stream.settimeout(30)
-                stream.sendall(RESPONSE.pack(MAGIC, 0, count) + data)
-                # A lease can remain idle for the Guest's whole lifetime.
-                # Do not retain its last response as a per-connection cache.
-                del data
+                self.send_payload(stream, mapping, offset, count)
                 with self.condition:
                     self.reads += 1
                     self.bytes += count
@@ -168,6 +161,14 @@ class Broker:
                     self.active -= 1
                 self.connections.discard(stream)
                 self.condition.notify_all()
+
+    def send_payload(self, stream, mapping, offset, count):
+        data = mapping.read(HEADER_BYTES + offset, count)
+        if len(data) != count:
+            raise ValueError('Short mapping read')
+        stream.settimeout(30)
+        stream.sendall(RESPONSE.pack(MAGIC, 0, count) + data)
+        # Returning drops payload references before waiting for the next read.
 
     def start(self, path):
         self.path = Path(path)
@@ -280,7 +281,8 @@ class Publisher:
     def save(self):
         atomic_json(self.journal, self.state)
 
-    def publish(self, sources, socket_path, logical_budget, reuse=(), allow_fallback=False):
+    def publish(self, sources, socket_path, logical_budget, reuse=(), allow_fallback=False,
+                source_open=None):
         if self.journal.exists():
             previous_state = read_json(self.journal)
             previous_objects = previous_state.get('objects', [])
@@ -327,7 +329,7 @@ class Publisher:
             self.save()
             writable = self.backend.map(replica, writable=True)
             digest_now = hashlib.sha256()
-            with Path(source).open('rb') as stream:
+            with (source_open(source) if source_open else Path(source).open('rb')) as stream:
                 before = os.fstat(stream.fileno())
                 for offset in range(0, size, CHUNK):
                     part = stream.read(min(CHUNK, size - offset))
