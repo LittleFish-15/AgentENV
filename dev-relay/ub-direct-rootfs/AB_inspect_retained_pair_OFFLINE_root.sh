@@ -1,0 +1,69 @@
+#!/bin/sh
+# Read existing records only. A or B root, after human relay resumes.
+python3 -I -B - <<'UB_RETAINED_PAIR_INSPECTION'
+import base64,hashlib,os,platform,sys,zlib
+if sys.platform != 'linux' or os.getuid() != 0 or os.geteuid() != 0:
+    raise SystemExit('STOP: root on the declared Linux node is required; no action')
+node = {'server1':'a','agent1':'b'}.get(platform.node())
+if node is None:
+    raise SystemExit('STOP: unknown node; no action')
+PAYLOAD = """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
+t9hCmbseP2SVb4Jz0Ps/Xdx2Nw=="""
+encoded = ''.join(PAYLOAD.split())
+packed = base64.b64decode(encoded,validate=True)
+reader = zlib.decompressobj()
+raw = reader.decompress(packed,7770)
+if len(raw) != 7769 or not reader.eof or reader.unused_data or reader.unconsumed_tail:
+    raise SystemExit('STOP: invalid bounded entry payload; no action')
+if hashlib.sha256(raw).hexdigest() != 'c652460cf1c8099fe30ad128867c4f05a51b52510e6f487b17eb343bcaf77214':
+    raise SystemExit('STOP: entry digest mismatch; no action')
+print('RETAINED_PAIR_OFFLINE_ENTRY_VERIFIED')
+sys.argv = ['AB_inspect_retained_pair_v1.py','--node',node,'--inspect']
+exec(compile(raw,'<verified-retained-pair-inspection>','exec'),
+     {'__name__':'__main__','__file__':'<verified-retained-pair-inspection>'})
+UB_RETAINED_PAIR_INSPECTION
