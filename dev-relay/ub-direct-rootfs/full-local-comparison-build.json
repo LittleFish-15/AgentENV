@@ -1,0 +1,20 @@
+{
+  "entry": "AB_full_local_comparison_v1.py",
+  "bytes": 104438,
+  "sha256": "1fdd764fd0337a5362a16f402f181261d8eccb0ba0d96b728d230d44fcf9c38d",
+  "components": {
+    "ready": "145ddd8b86c3cb8a1d1cb61278b01cbf0039668827a83e340e550f11e7c53c30",
+    "continue_pair": "6c01a15e36a056b29a400e52f33f38981ff0abf3ca939185e6a4074dd9fda1fa",
+    "admission": "319eaf61779b077641a1d82c5791ff02c10da96f218c7bbab3696f3420621418",
+    "inputs": "4def90ce7b150ef2d9fc71beb6c3e99b9d416be7130ad2ce37dc0509df066260",
+    "sampler": "8efd02869237d0d9e960706912b2f994f58d3012414b2478c8ef187421781ce2",
+    "native_replay": "49c650a4fd7383d4cf24876b440bb2dbd9460719b4ef980778ed688ee9a9e095",
+    "cohort": "04ef00d4ac141168ba4aab8f3b288d30a3449716dbfba980bfa6ed7f79ce0b00",
+    "ram": "fb675b345713ef0faa1e2470e2b5b2588d3162c14176054640608519c30dcef7",
+    "journal": "af67fd2e6ae1f3623c01af633d956995b21180e6e6faccd1d7fe7cb3dc41faa8",
+    "pair_verify": "9656469f8338e81cc73815b8bcb8aeb29d51a49e7d094193f49d37079ab542eb"
+  },
+  "nativeRunValidated": false,
+  "fourTemplateCoverageReady": false,
+  "automaticCrossNodeCoordination": false
+}
