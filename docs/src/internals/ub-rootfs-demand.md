@@ -20,6 +20,11 @@ checks its committed digest. This preprocessing is not demand filling: it
 produces hashes but fills no UB payload. Both preprocessing and subsequent
 owner misses reject direct-I/O failure instead of falling back to buffered
 source reads. Importers have no source-file payload reader.
+Direct source buffers use the supported host page size (4, 16 or 64 KiB),
+including the short final chunk, matching the full-mode DirectFile policy.
+This is an alignment contract, not evidence that a particular target filesystem
+accepts O_DIRECT; the native scratch-file test and actual source preparation
+must still pass without a buffered fallback.
 
 The existing coordinator admits one loader per `(layer digest, chunk index)`.
 It verifies source bytes, writes the shared slot and verifies readback before

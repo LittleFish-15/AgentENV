@@ -12,6 +12,30 @@ from test_lazy_cache import Harness
 
 
 class DirectCatalog(unittest.TestCase):
+    def test_tail_io_buffer_uses_supported_host_page_alignment(self):
+        meta = type('Meta', (), dict(st_dev=1, st_ino=2, st_size=lazy.CHUNK+137,
+                                    st_mtime_ns=3, st_ctime_ns=4))()
+        identity = lazy.file_identity(meta)
+        for page in (4096, 16384, 65536):
+            with self.subTest(page=page), patch.object(lazy.mmap, 'PAGESIZE', page), \
+                    patch.object(lazy.os, 'fstat', return_value=meta), \
+                    patch.object(lazy.os, 'preadv', create=True) as read:
+                def fill(fd, buffers, offset):
+                    self.assertEqual(offset, lazy.CHUNK)
+                    self.assertEqual(len(buffers[0]), page)
+                    buffers[0][:137] = b'T' * 137
+                    return 137
+                read.side_effect = fill
+                self.assertEqual(lazy.direct_range(91, identity, lazy.CHUNK, 137), b'T'*137)
+
+    def test_unsupported_alignment_does_not_issue_source_io(self):
+        meta = type('Meta', (), dict(st_dev=1, st_ino=2, st_size=137, st_mtime_ns=3, st_ctime_ns=4))()
+        with patch.object(lazy.mmap, 'PAGESIZE', 8192), patch.object(lazy.os, 'fstat', return_value=meta), \
+                patch.object(lazy.os, 'preadv', create=True) as read:
+            with self.assertRaisesRegex(ValueError, 'alignment'):
+                lazy.direct_range(91, lazy.file_identity(meta), 0, 137)
+            read.assert_not_called()
+
     @unittest.skipUnless(sys.platform == 'linux', 'Native Linux O_DIRECT validation required')
     def test_native_direct_catalog_and_partial_tail(self):
         """Own scratch file only; this is not a PageCache or UB benefit test."""

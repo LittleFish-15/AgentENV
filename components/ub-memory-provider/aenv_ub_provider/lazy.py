@@ -90,7 +90,12 @@ def direct_range(fd, identity, offset, count):
             or type(count) is not int or not 0 < count <= CHUNK
             or file_identity(os.fstat(fd)) != identity):
         raise ValueError('Direct source identity changed or range is invalid')
-    aligned = (count + 4095) // 4096 * 4096
+    # Match the full-mode DirectFile's supported host-page alignment, including
+    # ARM64 16/64 KiB pages. The final chunk can be shorter than one host page.
+    page = mmap.PAGESIZE
+    if page not in (4096, 16384, 65536):
+        raise ValueError('Unsupported direct source buffer alignment')
+    aligned = (count + page - 1) // page * page
     with mmap.mmap(-1, aligned) as buffer:
         got = os.preadv(fd, [buffer], offset)
         if got != count or file_identity(os.fstat(fd)) != identity:
