@@ -111,6 +111,7 @@ fn make_orchestrator_without_background_with_factory_and_persister<
         factory,
         persister,
         sandboxes: RwLock::new(HashMap::new()),
+        unresolved_launch_handles: Mutex::new(Vec::new()),
         template_build_ids: RwLock::new(HashSet::new()),
         deletions: tokio::sync::Mutex::new(HashMap::new()),
         proxy_routes: RwLock::new(ProxyRouteTable::default()),
@@ -1028,6 +1029,219 @@ async fn cleanup_failed_launch_removes_created_running_metadata() {
         .await;
 
     assert!(orchestrator.store.get(&sandbox_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn ub_failed_launch_and_failed_stop_retain_runtime_for_delete_retry() -> Result<()> {
+    for operation in [MockOperation::StartNowait, MockOperation::WaitForReady] {
+        let behavior = Arc::new(MockBehavior::new());
+        behavior.push_action(
+            operation,
+            MockAction::Fail {
+                message: "launch failure".into(),
+            },
+        );
+        behavior.push_action(
+            MockOperation::Stop,
+            MockAction::Fail {
+                message: "unconfirmed stop".into(),
+            },
+        );
+        let mut orchestrator = make_orchestrator_without_background_with_factory(
+            InMemoryMetadataStore::new(),
+            MockBackendFactory::with_behavior(behavior.clone()),
+        );
+        let image_refs = Arc::new(RecordingRuntimeImageRefs::default());
+        Arc::get_mut(&mut orchestrator).unwrap().image_refs = image_refs.clone();
+        let id = SandboxId::new();
+        assert!(orchestrator
+            .launch_sandbox(create_launch_plan_with_resources(id))
+            .await
+            .is_err());
+        assert_eq!(
+            orchestrator.store.get(&id).await?.unwrap().state,
+            SandboxState::Killing
+        );
+        let retained = Arc::downgrade(orchestrator.sandboxes.read().await.get(&id).unwrap());
+        assert!(retained.upgrade().is_some());
+        assert_eq!(behavior.stop_calls(), 1);
+        if matches!(operation, MockOperation::StartNowait) {
+            assert!(!image_refs
+                .unpinned()
+                .contains(&RuntimeImageOwner::StartingSandbox(id)));
+        }
+        assert!(proxy_target_for(&orchestrator, &id).await?.is_none());
+        orchestrator.delete_sandbox(id).await?;
+        assert_eq!(behavior.stop_calls(), 2);
+        assert!(orchestrator.store.get(&id).await?.is_none());
+        assert!(retained.upgrade().is_none());
+        assert!(image_refs
+            .unpinned()
+            .contains(&RuntimeImageOwner::StartingSandbox(id)));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn ub_failed_launch_resume_stop_does_not_restore_paused_or_allow_resume() -> Result<()> {
+    let behavior = Arc::new(MockBehavior::new());
+    let orchestrator = make_orchestrator_without_background_with_factory(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::with_behavior(behavior.clone()),
+    );
+    let created = orchestrator
+        .create_sandbox(create_request(Some(60), &[]))
+        .await?;
+    orchestrator.pause_sandbox(created.id).await?;
+    behavior.push_action(
+        MockOperation::StartNowait,
+        MockAction::Fail {
+            message: "resume failure".into(),
+        },
+    );
+    behavior.push_action(
+        MockOperation::Stop,
+        MockAction::Fail {
+            message: "stop failure".into(),
+        },
+    );
+    assert!(orchestrator
+        .resume_sandbox(created.id, NewTimeout::UseExisting)
+        .await
+        .is_err());
+    assert_eq!(
+        orchestrator.store.get(&created.id).await?.unwrap().state,
+        SandboxState::Killing
+    );
+    assert!(orchestrator
+        .resume_sandbox(created.id, NewTimeout::UseExisting)
+        .await
+        .is_err());
+    orchestrator.delete_sandbox(created.id).await?;
+    assert!(orchestrator.store.get(&created.id).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ub_failed_launch_metadata_error_preserves_ownership_and_blocks_blind_delete() -> Result<()>
+{
+    let control = Arc::new(ScriptedStoreControl::default());
+    control.push_add_action(StoreAction::Fail(StoreError::Backend {
+        source: anyhow::anyhow!("metadata unavailable"),
+    }));
+    let behavior = Arc::new(MockBehavior::new());
+    behavior.push_action(
+        MockOperation::StartNowait,
+        MockAction::Fail {
+            message: "start failure".into(),
+        },
+    );
+    behavior.push_action(
+        MockOperation::Stop,
+        MockAction::Fail {
+            message: "stop failure".into(),
+        },
+    );
+    let orchestrator = make_orchestrator_without_background_with_factory(
+        ScriptedStore::new(control),
+        MockBackendFactory::with_behavior(behavior.clone()),
+    );
+    let id = SandboxId::new();
+    assert!(orchestrator
+        .launch_sandbox(create_launch_plan_with_resources(id))
+        .await
+        .is_err());
+    assert!(orchestrator.store.get(&id).await?.is_none());
+    assert!(orchestrator.sandboxes.read().await.contains_key(&id));
+    assert_eq!(orchestrator.unresolved_launch_handles.lock().await.len(), 1);
+    assert!(orchestrator.delete_sandbox(id).await.is_err());
+    assert!(orchestrator.shutdown().await.is_err());
+    assert_eq!(behavior.stop_calls(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ub_failed_launch_identity_conflict_retains_old_handle_without_replacing_new() -> Result<()>
+{
+    let orchestrator = make_orchestrator().await;
+    let id = SandboxId::new();
+    let behavior = Arc::new(MockBehavior::new());
+    behavior.push_action(
+        MockOperation::Stop,
+        MockAction::Fail {
+            message: "old stop failure".into(),
+        },
+    );
+    let old: SandboxHandle = Arc::new(Mutex::new(Box::new(MockSandboxBackend::new(behavior))));
+    let old_weak = Arc::downgrade(&old);
+    let replacement: SandboxHandle = Arc::new(Mutex::new(Box::new(MockSandboxBackend::new(
+        Arc::new(MockBehavior::new()),
+    ))));
+    orchestrator
+        .sandboxes
+        .write()
+        .await
+        .insert(id, replacement.clone());
+    orchestrator
+        .store
+        .add(SandboxMetadata {
+            id,
+            state: SandboxState::Running,
+            ..Default::default()
+        })
+        .await?;
+    let route = ProxyTarget::new(Ipv4Addr::new(10, 11, 0, 42));
+    orchestrator.upsert_proxy_route(id, route.clone()).await;
+    orchestrator
+        .cleanup_failed_launch(
+            &create_launch_plan_with_resources(id),
+            old,
+            FailedLaunchStage::RunningPersisted,
+        )
+        .await;
+    assert!(old_weak.upgrade().is_some());
+    assert!(Arc::ptr_eq(
+        orchestrator.sandboxes.read().await.get(&id).unwrap(),
+        &replacement
+    ));
+    assert_eq!(proxy_target_for(&orchestrator, &id).await?, Some(route));
+    assert_eq!(
+        orchestrator.store.get(&id).await?.unwrap().state,
+        SandboxState::Running
+    );
+    assert!(orchestrator.delete_sandbox(id).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ub_failed_launch_shutdown_retries_retained_stop() -> Result<()> {
+    let behavior = Arc::new(MockBehavior::new());
+    behavior.push_action(
+        MockOperation::StartNowait,
+        MockAction::Fail {
+            message: "start failure".into(),
+        },
+    );
+    behavior.push_action(
+        MockOperation::Stop,
+        MockAction::Fail {
+            message: "first stop failed".into(),
+        },
+    );
+    let orchestrator = make_orchestrator_without_background_with_factory(
+        InMemoryMetadataStore::new(),
+        MockBackendFactory::with_behavior(behavior.clone()),
+    );
+    let id = SandboxId::new();
+    assert!(orchestrator
+        .launch_sandbox(create_launch_plan_with_resources(id))
+        .await
+        .is_err());
+    orchestrator.shutdown().await?;
+    assert_eq!(behavior.stop_calls(), 2);
+    assert!(orchestrator.sandboxes.read().await.is_empty());
+    assert!(orchestrator.store.get(&id).await?.is_none());
+    Ok(())
 }
 
 #[tokio::test]
