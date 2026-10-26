@@ -1,0 +1,26 @@
+{
+  "entry": "aggregate_full_pair_comparison_v1.py",
+  "bytes": 42694,
+  "sha256": "1203984e884cac7d7d8b9e66235c4fac75880158eddb272b64d420169d81f0b5",
+  "modules": {
+    "pair": {
+      "bytes": 12023,
+      "sha256": "9656469f8338e81cc73815b8bcb8aeb29d51a49e7d094193f49d37079ab542eb"
+    },
+    "replay": {
+      "bytes": 14016,
+      "sha256": "49c650a4fd7383d4cf24876b440bb2dbd9460719b4ef980778ed688ee9a9e095"
+    },
+    "sampler": {
+      "bytes": 12512,
+      "sha256": "8efd02869237d0d9e960706912b2f994f58d3012414b2478c8ef187421781ce2"
+    },
+    "admission": {
+      "bytes": 9149,
+      "sha256": "319eaf61779b077641a1d82c5791ff02c10da96f218c7bbab3696f3420621418"
+    }
+  },
+  "scope": "offline actual receipt contracts and endpoint samples only",
+  "targetActions": false,
+  "fieldInputsReceived": false
+}
