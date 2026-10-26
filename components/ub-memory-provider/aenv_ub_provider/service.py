@@ -190,11 +190,12 @@ def serve(config, selected, manifest):
         adapter = Path(config['adapter'])
         if not stat.S_ISREG(adapter.stat().st_mode) or identity_bytes(adapter) != config['adapterSha256']:
             raise ValueError('SDK adapter differs from configured pin')
-        backend_type = raw.NativeRawBackend if config['mode'] == 'pmem' else sdk.NativeBackend
+        from . import direct
+        backend_type = (direct.NativeBackend if config['mode'] == 'stored-direct' else
+                        raw.NativeRawBackend if config['mode'] == 'pmem' else sdk.NativeBackend)
         backend = backend_type(adapter, config['maxCoverageBytes'])
         backend.configure_region(config['region'])
         socket_path = str(work / 'data.sock')
-        from . import direct
         stored_provider = direct if config['mode'] == 'stored-direct' else stored
         if config['mode'] == 'pmem':
             images = raw.RawImages(backend, journal, config['maxCoverageBytes'])
@@ -227,6 +228,11 @@ def serve(config, selected, manifest):
         atomic_json(work / 'replicas.json', manifest)
         if config['mode'] in ('stored', 'stored-direct'):
             atomic_json(work / 'runtime-index.json', stored.index_for(local))
+        if config['mode'] == 'stored-direct':
+            atomic_json(work / 'mapping-evidence.json', {'ownerId': manifest['ownerId'],
+                'manifestSha256': identity(manifest), 'allocationCalls': backend.allocation_calls,
+                'mappings': backend.mapping_evidence, 'physicalSharingAccepted': False,
+                'backingCoverageBytes': sum(backend.coverage_by_object.values())})
         provider.start(socket_path)
         control = socket.socket(socket.AF_UNIX)
         control.bind(str(work / 'control.sock'))

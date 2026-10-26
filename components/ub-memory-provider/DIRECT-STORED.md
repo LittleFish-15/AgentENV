@@ -49,3 +49,9 @@ may exceed the working set and produce negative savings. Do not substitute SDK
 mapping coverage for unique physical cost; unknown net savings must remain null.
 
 Original pmem branch/worktree and kernel module artifacts remain unchanged.
+
+Direct mode also writes `mapping-evidence.json`: public SDK readonly segment
+lookup is tied to each object name, logical offset, length and local OBMM device.
+Importer allocationCalls must be zero. This is provenance for subsequent
+readonly VMA/OBMM-region observation, not automatic physical-sharing acceptance.
+No physical addresses, private SDK descriptors or kernel changes are used.

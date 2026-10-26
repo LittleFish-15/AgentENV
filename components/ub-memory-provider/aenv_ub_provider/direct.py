@@ -10,7 +10,36 @@ from pathlib import Path
 import stat
 import threading
 
-from . import stored
+from . import stored, raw
+
+
+class NativeBackend(raw.NativeRawBackend):
+    """Record the public lookup's segment-to-local-device binding, not raw PAs."""
+    def __init__(self, library, inspection_limit):
+        super().__init__(library, inspection_limit)
+        self.mapping_evidence = []
+
+    def map(self, replica, writable=False):
+        mapping = super().map(replica, writable)
+        if not writable:
+            segments = self.open_segments(mapping, replica.mappingBytes)
+            rows, offset = [], 0
+            try:
+                for fd, length in segments:
+                    target = os.readlink('/proc/self/fd/' + str(fd))
+                    meta = os.fstat(fd)
+                    if not stat.S_ISCHR(meta.st_mode) or not target.startswith('/dev/obmm_shmdev'):
+                        raise ValueError('SDK segment is not an OBMM device')
+                    rows.append({'logicalOffset': offset, 'bytes': length, 'device': target,
+                                 'major': os.major(meta.st_rdev), 'minor': os.minor(meta.st_rdev)})
+                    offset += length
+            finally:
+                for fd, _ in segments:
+                    os.close(fd)
+            self.mapping_evidence.append({'objectName': replica.objectName,
+                'mappingBytes': replica.mappingBytes, 'segments': rows,
+                'protection': 'PROT_READ_MAP_SHARED', 'kernelSealed': False})
+        return mapping
 
 
 def file_identity(meta):

@@ -181,6 +181,32 @@ class Responses(unittest.TestCase):
                 service.release_receipts({'operation': 'retire', 'peerReceipts': ['b.json']}, manifest)
 
 
+class MappingEvidence(unittest.TestCase):
+    def test_readonly_mapping_records_exact_segment_order_and_closes_fds(self):
+        backend = direct.NativeBackend.__new__(direct.NativeBackend)
+        backend.mapping_evidence = []
+        backend.open_segments = lambda mapping, size: [(11, 2097152), (12, 2097152)]
+        replica = types.SimpleNamespace(objectName='aenv_'+'1'*32, mappingBytes=4194304)
+        mapped = object()
+        proxy = types.SimpleNamespace(readlink=lambda path:'/dev/obmm_shmdev'+path.rsplit('/',1)[1],
+            fstat=lambda fd:types.SimpleNamespace(st_mode=0o020600,st_rdev=fd),
+            major=lambda dev:42,minor=lambda dev:dev,close=lambda fd:closed.append(fd))
+        closed = []
+        with patch.object(direct.raw.NativeRawBackend,'map',return_value=mapped), patch.object(direct,'os',proxy):
+            self.assertIs(backend.map(replica),mapped)
+        self.assertEqual(closed,[11,12])
+        self.assertEqual([x['logicalOffset'] for x in backend.mapping_evidence[0]['segments']],[0,2097152])
+        self.assertFalse(backend.mapping_evidence[0]['kernelSealed'])
+
+    def test_writer_is_not_recorded_as_readonly_evidence(self):
+        backend = direct.NativeBackend.__new__(direct.NativeBackend)
+        backend.mapping_evidence = []
+        backend.open_segments = lambda *args:self.fail('Writer must not export readonly evidence')
+        with patch.object(direct.raw.NativeRawBackend,'map',return_value=object()):
+            backend.map(types.SimpleNamespace(),True)
+        self.assertEqual(backend.mapping_evidence,[])
+
+
 @unittest.skipUnless(sys.platform == 'linux', 'Real O_DIRECT requires local Linux; never count this as UB test')
 class NativeDirectIO(unittest.TestCase):
     def test_real_direct_tail(self):
