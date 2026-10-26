@@ -140,12 +140,13 @@ class DemandCache(unittest.TestCase):
         self.assertEqual(results, [h.parts[0][:64]] * 2)
         self.assertEqual(h.calls, [(h.key, 0)])
 
-    def test_pinned_slot_cannot_be_reused_and_full_cache_refuses(self):
+    def test_pinned_slot_cannot_be_reused_and_capacity_deadline_refuses(self):
         h = Harness()
         grants = [h.request('acquire', digest=h.key, block=i) for i in range(4)]
         before = bytes(h.mapping.bytes)
-        with self.assertRaisesRegex(RuntimeError, 'pinned/loading'):
-            h.request('acquire', digest=h.key, block=4)
+        with patch.object(lazy.time, 'monotonic', side_effect=[0, 31]):
+            with self.assertRaisesRegex(TimeoutError, 'pinned/loading'):
+                h.request('acquire', digest=h.key, block=4)
         self.assertEqual(bytes(h.mapping.bytes), before)
         h.request('release', lease=grants[1]['lease'])
         grant = h.request('acquire', digest=h.key, block=4)

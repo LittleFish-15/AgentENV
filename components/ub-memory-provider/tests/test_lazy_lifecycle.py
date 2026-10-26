@@ -17,7 +17,7 @@ from test_control_lifecycle import Control, Location, Stream
 class LazyLifecycle(unittest.TestCase):
     def exercise(self, streams, admission_error=None, unmap_error=None, release_error=None,
                  role='import', peer_released=True, outstanding_pin=False, active_read=False,
-                 failed_reader=False, startup_failed_reader=False):
+                 failed_reader=False, startup_failed_reader=False, metadata_stop_error=None):
         events, journal = [], []
         control = Control(streams)
         accepted = []
@@ -70,7 +70,11 @@ class LazyLifecycle(unittest.TestCase):
         coordinator = types.SimpleNamespace(condition=threading.Condition(), poisoned=False, loading=0,
             leases={'uncertain': {}} if outstanding_pin else {}, released={'node-b'} if peer_released else set(),
             request=lambda request: None, freeze=lambda: events.append('freeze-cache'))
-        metadata = types.SimpleNamespace(start=lambda path: None, stop=lambda: events.append('stop-metadata'))
+        def stop_metadata():
+            events.append('stop-metadata')
+            if metadata_stop_error:
+                raise metadata_stop_error
+        metadata = types.SimpleNamespace(start=lambda path: None, stop=stop_metadata)
         def write(path, value):
             if str(path).endswith('/owner.json'):
                 journal.append(copy.deepcopy(value))
@@ -196,6 +200,16 @@ class LazyLifecycle(unittest.TestCase):
             'release-reader', 'freeze-cache', 'stop-metadata', 'close-sources', 'unmap', 'delete', 'finalize'])
         self.assertTrue(journal[-1]['deleteAcknowledged'])
         self.assertEqual(journal[-1]['state'], 'released')
+
+    def test_unconfirmed_metadata_stop_preserves_sdk_pool(self):
+        events, journal, error = self.exercise([Stream({'operation': 'retire'})], role='publish',
+            metadata_stop_error=RuntimeError('accept thread still alive'))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn('stop-metadata', events)
+        for operation in ('close-sources', 'unmap', 'delete', 'finalize'):
+            self.assertNotIn(operation, events)
+        self.assertEqual(journal[-1]['state'], 'unresolved_preserved')
+        self.assertNotIn('deleteAcknowledged', journal[-1])
 
     def test_owner_refuses_retirement_with_live_peer_or_uncertain_pin(self):
         for options in ({'peer_released': False}, {'outstanding_pin': True}):

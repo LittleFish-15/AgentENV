@@ -214,7 +214,7 @@ class Cache:
         self.filled = set()
         self.stats = {'hits': 0, 'misses': 0, 'waits': 0, 'evictions': 0,
                       'backendBytes': 0, 'fillErrors': 0, 'firstFills': 0,
-                      'refills': 0, 'successfulFills': 0, 'waitNs': 0}
+                      'refills': 0, 'successfulFills': 0, 'waitNs': 0, 'capacityWaits': 0}
 
     def save(self):
         try:
@@ -337,7 +337,8 @@ class Cache:
                         candidates = [(e.used, k) for k, e in self.entries.items()
                                       if e.state != 'loading' and not e.pins]
                         if not candidates:
-                            raise RuntimeError('Cache full with pinned/loading chunks; no fallback')
+                            self.wait_for_change(deadline, capacity=True)
+                            continue
                         _, victim = min(candidates)
                         free = self.entries.pop(victim).slot
                         self.stats['evictions'] += 1
@@ -350,13 +351,7 @@ class Cache:
                 if entry.state == 'ready':
                     self.stats['hits'] += 1
                     return self.pin(reader, key, entry)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError('Waiting for a concurrent chunk fill timed out')
-                self.stats['waits'] += 1
-                wait_started = time.monotonic_ns()
-                self.condition.wait(remaining)
-                self.stats['waitNs'] += time.monotonic_ns() - wait_started
+                self.wait_for_change(deadline)
         try:
             data = self.source(layer, block)
             with self.condition:
@@ -384,6 +379,21 @@ class Cache:
                     self.stats['fillErrors'] += 1
                 self.condition.notify_all()
             raise
+
+    def wait_for_change(self, deadline, *, capacity=False):
+        # Called with condition held. Release/filled/poisoned notifications all
+        # require the caller to recheck admission and slot ownership. Reuse the
+        # original request deadline, including spurious wakeups; never evict a pin.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            reason = 'capacity with pinned/loading chunks' if capacity else 'concurrent chunk fill'
+            raise TimeoutError('Waiting for ' + reason + ' timed out; no fallback')
+        self.stats['waits'] += 1
+        if capacity:
+            self.stats['capacityWaits'] += 1
+        wait_started = time.monotonic_ns()
+        self.condition.wait(remaining)
+        self.stats['waitNs'] += time.monotonic_ns() - wait_started
 
     def pin(self, reader, key, entry):
         if self.frozen or self.poisoned or reader in self.released or reader not in self.opened:
@@ -668,6 +678,8 @@ class MetadataServer:
         self.stop_event.set()
         self.listener.close()
         self.thread.join(2)
+        if self.thread.is_alive():
+            raise RuntimeError('Metadata accept thread has not exited; do not unmap pool')
         with self.lock:
             if self.workers:
                 raise RuntimeError('Metadata workers still active; do not unmap pool')

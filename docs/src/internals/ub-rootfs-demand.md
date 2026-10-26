@@ -32,6 +32,14 @@ publishing READY. Readers hold durable pins while reading shared slots and
 verify the chunk digest. A lost grant or release leaves a conservative pin;
 disconnect does not reclaim unknown references. Eviction excludes pinned or
 loading slots. Cache generation, lease identity and content hash guard reuse.
+When every slot is temporarily pinned or loading, the actual acquire path
+waits on the same condition as coalesced fills. Both waits share the original
+30-second request deadline; spurious wakeups do not renew it. Pin release,
+fill completion or admission closure causes ownership to be rechecked before
+any slot can be reused. Capacity timeout fails without evicting a live pin,
+reading a local fallback, or extending Guest/CLI deadlines. This prevents a
+short capacity contention from immediately poisoning an otherwise healthy
+Reader. `capacityWaits` is a subset of `waits`, not an additional total.
 
 Counters include hits, misses, waits, waitNs, evictions, backendBytes,
 firstFills, refills, successfulFills and fillErrors. The historical filled-key
@@ -39,6 +47,11 @@ set is bounded by the validated catalog limit of 200000 chunks and contributes
 to provider metadata overhead. Count the entire actual pool allocation and its
 SDK backing coverage even when readyBytes is small. Requested poolBytes,
 backing coverage, readyBytes and incremental physical cost are distinct values.
+
+Owner retirement must also confirm the metadata accept thread has exited after
+its bounded join, as well as confirm that no metadata worker remains. A join
+timeout preserves the socket identity and causes retirement to stop before SDK
+unmap/deallocation. It is not evidence that an OS thread or shared pool exited.
 
 Node status also includes the actual stored broker's activeLeases,
 activePayloadResponses and payloadFailures. Payload activity spans the mapping
