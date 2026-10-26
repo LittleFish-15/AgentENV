@@ -2051,6 +2051,14 @@ impl FirecrackerSandbox {
         let symlink_result = std::os::unix::fs::symlink(&device_path, &user_image_symlink)
             .context("symlink user-rootfs to ublk device");
         if let Err(err) = symlink_result {
+            if self.rootfs_ub_leases.is_some() {
+                self.rootfs_runtime = Some(OverlaybdRuntimeHandle {
+                    device: runtime_device.device,
+                    image_config_path: runtime_device.image_config_path,
+                    actual_virtual_size: runtime_device.actual_virtual_size,
+                });
+                return Err(err).context("required UB rootfs attachment failed; device and permits retained for teardown");
+            }
             if let Err(release_err) = UblkDeviceManager::global()
                 .release_device(&runtime_device.device)
                 .await
@@ -2373,6 +2381,14 @@ impl FirecrackerSandbox {
             let symlink_result = std::os::unix::fs::symlink(&device_path, &user_image_symlink)
                 .context("symlink user-rootfs to ublk device for resume");
             if let Err(err) = symlink_result {
+                if self.rootfs_ub_leases.is_some() {
+                    self.rootfs_runtime = Some(OverlaybdRuntimeHandle {
+                        device: runtime_device.device,
+                        image_config_path: runtime_device.image_config_path,
+                        actual_virtual_size: runtime_device.actual_virtual_size,
+                    });
+                    return Err(err).context("restored UB rootfs attachment failed; device and permits retained for teardown");
+                }
                 if let Err(release_err) = UblkDeviceManager::global()
                     .release_device(&runtime_device.device)
                     .await
