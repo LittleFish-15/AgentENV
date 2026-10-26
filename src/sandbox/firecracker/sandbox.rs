@@ -986,7 +986,7 @@ impl FirecrackerSandbox {
                 .common()
                 .direct_rootfs
                 .as_ref()
-                .is_some_and(|binding| matches!(binding.version, 3 | 4 | 5))
+                .is_some_and(|binding| matches!(binding.version, 3..=5))
             {
                 // DAX reads alone do not establish instruction-fetch support
                 // for imported device PFNs. Run code from the immutable lower,
@@ -1881,7 +1881,7 @@ impl Drop for FirecrackerSandbox {
                 "fcPidHint": self.fc_instance.pid().ok().map(|pid| pid.as_raw()),
                 "rootfsDevice": self.rootfs_runtime.as_ref().map(|runtime| runtime.device.device_path()),
                 "imageConfig": self.rootfs_runtime.as_ref().map(|runtime| &runtime.image_config_path),
-                "requiredReplicas": leases.references(),
+                "requiredReplicas": leases.replicas(),
             });
             match ub_retention::preserve_unresolved_rootfs(&mut self.work_dir, identity) {
                 Ok(marker) => warn!(sandbox_id = %self.id, path = %marker.display(),
@@ -2015,7 +2015,7 @@ impl FirecrackerSandbox {
                         .await?;
                 }
             }
-            if matches!(binding.version, 3 | 4 | 5) {
+            if matches!(binding.version, 3..=5) {
                 self.fc_instance.prepare_snapshot_pmem(binding)?;
             }
         }
