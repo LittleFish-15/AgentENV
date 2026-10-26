@@ -147,6 +147,9 @@ class Broker:
                     raise ValueError('Short mapping read')
                 stream.settimeout(30)
                 stream.sendall(RESPONSE.pack(MAGIC, 0, count) + data)
+                # A lease can remain idle for the Guest's whole lifetime.
+                # Do not retain its last response as a per-connection cache.
+                del data
                 with self.condition:
                     self.reads += 1
                     self.bytes += count
