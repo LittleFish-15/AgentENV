@@ -35,6 +35,14 @@ to provider metadata overhead. Count the entire actual pool allocation and its
 SDK backing coverage even when readyBytes is small. Requested poolBytes,
 backing coverage, readyBytes and incremental physical cost are distinct values.
 
+Node status also includes the actual stored broker's activeLeases,
+activePayloadResponses and payloadFailures. Payload activity spans the mapping
+read through completion of the socket response; a mapping exception, short
+read or lost response increments the failure count, never successful bytes.
+These are node-local broker counters, distinct from coordinator chunk pins and
+fillErrors. Zero active responses is not proof that reader leases or SDK
+objects have been released. Status inspection does not release any resource.
+
 The provider is executable through `python -m aenv_ub_provider.lazy_service
 prepare ...` and `serve config --run`; preparation and serve retain separate
 commands and fresh output/state directories. The importer still requires an

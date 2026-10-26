@@ -48,8 +48,10 @@ class LazyLifecycle(unittest.TestCase):
         def quiesce():
             if active_read:raise RuntimeError('Active mapping read remains')
         reader = types.SimpleNamespace(rpc=admit, release=release, quiesce=quiesce, status=lambda: {'maxConcurrentReads':1, 'activeReads':0})
-        broker = types.SimpleNamespace(condition=threading.Condition(), active=0, retiring=False,
-            reads=7, bytes=100, start=lambda path: None, stop=lambda: events.append('stop-broker'))
+        broker = lazy_service.stored.Broker([], [])
+        broker.reads, broker.bytes = 7, 100
+        broker.start = lambda path: None
+        broker.stop = lambda: events.append('stop-broker')
         config = {'workDir': '/owned/new-lazy', 'role': role, 'adapter': '/owned/adapter.so',
             'adapterSha256': 'sha256:' + 'a' * 64, 'region': 'test', 'maxCoverageBytes': 4194304,
             'coordinationSocket': '/owned/forwarded.sock', 'sourceRoot': '/owned/snapshots'}
@@ -122,7 +124,9 @@ class LazyLifecycle(unittest.TestCase):
         status, retire = Stream({'operation': 'status'}), Stream({'operation': 'retire'})
         events, journal, error = self.exercise([status, retire])
         self.assertIsNone(error)
-        self.assertEqual(status.replies, [{'state': 'serving', 'pins': 0, 'nodeReadRequests': 7, 'nodeReadBytes': 100, 'maxConcurrentReads':1, 'activeReads':0}])
+        self.assertEqual(status.replies, [{'state': 'serving', 'pins': 0, 'nodeReadRequests': 7,
+            'nodeReadBytes': 100, 'maxConcurrentReads':1, 'activeReads':0, 'activeLeases':0,
+            'activePayloadResponses':0, 'payloadFailures':0}])
         self.assertLess(events.index('status'), events.index('stop-broker'))
 
     def test_failed_unmap_never_acknowledges_remote_release(self):

@@ -209,8 +209,7 @@ def serve(config, value, manifest, credential):
                     if request == {'operation': 'status'}:
                         status = reader.rpc('status')
                         status.update(reader.status())
-                        with broker.condition:
-                            status.update(nodeReadRequests=broker.reads, nodeReadBytes=broker.bytes)
+                        status.update(broker.read_status())
                         service.control_reply(stream, status)
                         continue
                     if request != {'operation': 'retire'}:

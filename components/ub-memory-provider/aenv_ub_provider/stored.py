@@ -104,6 +104,7 @@ class Broker:
         self.active = 0
         self.retiring = False
         self.reads = self.bytes = 0
+        self.active_payload_responses = self.payload_failures = 0
         self.connections = set()
         self.semaphore = threading.BoundedSemaphore(128)
         self.listener = None
@@ -163,12 +164,29 @@ class Broker:
                 self.condition.notify_all()
 
     def send_payload(self, stream, mapping, offset, count):
-        data = mapping.read(HEADER_BYTES + offset, count)
-        if len(data) != count:
-            raise ValueError('Short mapping read')
-        stream.settimeout(30)
-        stream.sendall(RESPONSE.pack(MAGIC, 0, count) + data)
+        with self.condition:
+            self.active_payload_responses += 1
+        completed = False
+        try:
+            data = mapping.read(HEADER_BYTES + offset, count)
+            if len(data) != count:
+                raise ValueError('Short mapping read')
+            stream.settimeout(30)
+            stream.sendall(RESPONSE.pack(MAGIC, 0, count) + data)
+            completed = True
+        finally:
+            with self.condition:
+                self.active_payload_responses -= 1
+                self.payload_failures += int(not completed)
+                self.condition.notify_all()
         # Returning drops payload references before waiting for the next read.
+
+    def read_status(self):
+        with self.condition:
+            return {'nodeReadRequests': self.reads, 'nodeReadBytes': self.bytes,
+                    'activeLeases': self.active,
+                    'activePayloadResponses': self.active_payload_responses,
+                    'payloadFailures': self.payload_failures}
 
     def start(self, path):
         self.path = Path(path)
