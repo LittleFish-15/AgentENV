@@ -146,12 +146,6 @@ pub struct RuntimeReadLeases {
 }
 
 impl RuntimeReadLeases {
-    /// Exact generation-bound references for private reconciliation evidence.
-    /// Inspecting these references neither releases nor reacquires a permit.
-    pub fn references(&self) -> &[UbLayerRef] {
-        &self.replicas
-    }
-
     pub fn acquire(image_path: &std::path::Path) -> Result<Option<Self>> {
         let image = crate::config::load_image_config(image_path)?;
         let required = image.lowers.iter().any(|layer| {

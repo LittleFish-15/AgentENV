@@ -360,7 +360,7 @@ impl RootfsBinding {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.snapshot_sources.is_empty()
-                || (matches!(self.version, 3 | 4 | 5)
+                || (matches!(self.version, 3..=5)
                     && self.snapshot_sources.len() == self.layers.len()
                     && self.snapshot_sources.iter().all(|p| p.is_absolute())),
             "native snapshot sources require one absolute source for every v3/v4/v5 layer"
@@ -373,7 +373,7 @@ impl RootfsBinding {
         );
         match (self.version, &self.device_runtime) {
             (1, None) => (),
-            (2 | 3 | 4 | 5, Some(runtime)) => runtime.validate()?,
+            (2..=5, Some(runtime)) => runtime.validate()?,
             _ => anyhow::bail!(
                 "version-2/3/4/5 rootfs requires pinned device runtime; version-1 must omit it"
             ),
@@ -414,7 +414,7 @@ impl RootfsBinding {
         use crate::sandbox::manifest::{NativeRootfsLayer, NativeRootfsSnapshot};
         self.validate()?;
         ensure!(
-            matches!(self.version, 3 | 4 | 5),
+            matches!(self.version, 3..=5),
             "pmem capture/fork requires version-3/4/5 content rebinding support"
         );
         let mut unique = std::collections::HashSet::new();

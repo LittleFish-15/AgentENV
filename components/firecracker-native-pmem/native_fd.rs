@@ -362,7 +362,7 @@ pub fn validate_fs_dax_file(file: &std::fs::File, bytes: u64) -> io::Result<()> 
     if unsafe { libc::fstatvfs(file.as_raw_fd(), &mut fs) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    if fs.f_flag as u64 & 1 == 0 {
+    if fs.f_flag & 1 == 0 {
         return Err(invalid("FS-DAX base must be on a readonly mount"));
     }
     Ok(())
