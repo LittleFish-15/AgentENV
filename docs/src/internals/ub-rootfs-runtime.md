@@ -57,3 +57,14 @@ matching binary deployment, two live Guests, exact lower/read attribution, priva
 upper isolation, peer survival after one exit, and confirmed teardown. Full-template
 Host Python read results are separate evidence and must not be relabeled as this
 Runtime acceptance.
+
+
+### Broker listener retirement confirmation
+
+The stored-layer broker must confirm its accept thread has exited after the
+bounded join before it can report retirement or remove its socket. A join
+timeout leaves admission closed and raises an error, so the caller cannot
+continue into SDK unmap or object retirement. Existing connection draining
+and live read-lease checks remain required. This also applies to demand-backed
+LayerView brokers. The check does not authorize retry or establish crash
+recovery; native thread/SDK teardown and Guest lifecycle still need validation.

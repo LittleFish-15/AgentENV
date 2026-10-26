@@ -231,6 +231,8 @@ class Broker:
         if self.listener:
             self.listener.close()
             self.thread.join(2)
+            if self.thread.is_alive():
+                raise RuntimeError('Broker accept thread has not exited; do not unmap')
         for stream in connections:
             try:
                 stream.shutdown(socket.SHUT_RDWR)
