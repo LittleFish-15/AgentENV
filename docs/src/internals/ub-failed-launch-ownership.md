@@ -37,3 +37,19 @@ identity preservation and bounded shutdown retry. Run these on the native
 Linux build together with the existing normal launch/rollback/delete tests.
 The preserved full deployment and its binary/configuration snapshots are not
 updated merely by adding this source candidate.
+
+If a `FirecrackerSandbox` is ultimately dropped while required UB Runtime
+permits are still present, its temporary work directory now disables automatic
+deletion before attempting a private `ub-rootfs-unresolved.json` marker. The
+marker records the sandbox ID, PID hint, image/device paths and exact bound UB
+object generations. It uses exclusive creation (and owner-only permissions on
+Unix), syncs the file and directory, and never overwrites earlier evidence.
+A marker-write failure still leaves temporary-directory cleanup disabled.
+Confirmed normal stop removes the UB permits, so normal directory cleanup
+remains enabled. This condition does not alter native-pmem or memfile cleanup.
+
+The marker does not attest PID/startTicks stability, current process/device
+liveness or SDK retirement safety. It explicitly permits no SDK retirement and
+states that process exit may close the read permits. Runtime termination,
+external deletion and power-loss recovery still require independent
+reconciliation; preserving these files alone is not durable kernel ownership.

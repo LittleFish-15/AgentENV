@@ -56,6 +56,9 @@ const VM_STATE_FILE_NAME: &str = "vm_state.bin";
 const ROOTFS_DRIVE_PATH: &str = "rootfs.ext4";
 const USER_ROOTFS_DRIVE_PATH: &str = "user-rootfs";
 
+#[path = "ub_retention.rs"]
+mod ub_retention;
+
 // The pmem API validates this as a resource ID, not a filename. In particular,
 // hyphens are rejected even though they are valid in backing descriptor paths.
 fn native_pmem_resource_id(index: usize) -> String {
@@ -1871,6 +1874,24 @@ async fn acquire_required_ub_rootfs_leases(
 /// since proper delete (via the daemon) was not performed.
 impl Drop for FirecrackerSandbox {
     fn drop(&mut self) {
+        if let Some(leases) = self.rootfs_ub_leases.as_ref() {
+            let identity = serde_json::json!({
+                "sandboxId": self.id.to_string(),
+                "workDirectory": self.work_dir.path(),
+                "fcPidHint": self.fc_instance.pid().ok().map(|pid| pid.as_raw()),
+                "rootfsDevice": self.rootfs_runtime.as_ref().map(|runtime| runtime.device.device_path()),
+                "imageConfig": self.rootfs_runtime.as_ref().map(|runtime| &runtime.image_config_path),
+                "requiredReplicas": leases.references(),
+            });
+            match ub_retention::preserve_unresolved_rootfs(&mut self.work_dir, identity) {
+                Ok(marker) => warn!(sandbox_id = %self.id, path = %marker.display(),
+                    "required UB rootfs stop unconfirmed; work directory retained for reconciliation"),
+                Err(error) => {
+                    warn!(sandbox_id = %self.id, work_dir = %self.work_dir.path().display(), %error,
+                    "required UB rootfs work directory retained but marker write failed; no cleanup authorized")
+                }
+            }
+        }
         if let Some(envd) = self.envd_instance.as_ref() {
             envd.invalidate();
         }
