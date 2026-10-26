@@ -454,7 +454,8 @@ def collect_residency(request):
 
 
 class Reader:
-    def __init__(self, value, mapping, slots, cache_id, reader, token, request, max_concurrent_reads=1):
+    def __init__(self, value, mapping, slots, cache_id, reader, token, request, max_concurrent_reads=1,
+                 *, failure_journal=None):
         self.layers = catalog(value)
         self.mapping, self.slots, self.cache_id = mapping, slots, cache_id
         self.reader, self.token, self.request = reader, token, request
@@ -464,11 +465,17 @@ class Reader:
         self.max_concurrent_reads = max_concurrent_reads
         self.active_reads = self.queued_waits = self.peak_active_reads = 0
         self.lock = threading.Condition()
+        self.failure_journal = failure_journal
 
     def poison(self):
         with self.lock:
+            first = not self.failed
             self.failed = True
             self.lock.notify_all()
+        # Close admission before durable reporting. A failed journal cannot
+        # reopen the reader; the exclusive generation is never auto-resumed.
+        if first and self.failure_journal is not None:
+            self.failure_journal({'readerFailed': True, 'reader': self.reader, 'cacheId': self.cache_id})
 
     def status(self):
         with self.lock:
@@ -538,13 +545,21 @@ class Reader:
                         raise ValueError('Imported UB chunk failed integrity check')
                     take = min(count - len(result), size - within)
                     result.extend(data[within:within + take])
-                finally:
-                    # Synchronous mapping.read has finished even if it failed.
+                except BaseException:
+                    # An integrity/mapping failure invalidates this reader,
+                    # not only the current broker connection. Retain the pin
+                    # for explicit reconciliation, including parallel reads.
+                    self.poison()
+                    raise
+                else:
                     reply = self.rpc('release', lease=grant['lease'])
                     if reply != {'state': 'released'}:
                         self.poison()
                         raise ValueError('Unconfirmed chunk release')
-            return bytes(result)
+            with self.lock:
+                if self.failed:
+                    raise RuntimeError('Reader failed during concurrent mapping access')
+                return bytes(result)
         finally:
             self.depart()
 

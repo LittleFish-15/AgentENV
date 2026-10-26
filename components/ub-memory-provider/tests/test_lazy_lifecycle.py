@@ -16,9 +16,15 @@ from test_control_lifecycle import Control, Location, Stream
 
 class LazyLifecycle(unittest.TestCase):
     def exercise(self, streams, admission_error=None, unmap_error=None, release_error=None,
-                 role='import', peer_released=True, outstanding_pin=False, active_read=False):
+                 role='import', peer_released=True, outstanding_pin=False, active_read=False,
+                 failed_reader=False, startup_failed_reader=False):
         events, journal = [], []
         control = Control(streams)
+        accepted = []
+        accept = control.accept
+        def accept_control():
+            result = accept(); accepted.append(True); return result
+        control.accept = accept_control
         mapping = types.SimpleNamespace(backing_coverage=4194304)
         def admit(operation):
             if operation == 'status':
@@ -47,7 +53,9 @@ class LazyLifecycle(unittest.TestCase):
             close_maps=close_maps, finalize=lambda: events.append('finalize'))
         def quiesce():
             if active_read:raise RuntimeError('Active mapping read remains')
-        reader = types.SimpleNamespace(rpc=admit, release=release, quiesce=quiesce, status=lambda: {'maxConcurrentReads':1, 'activeReads':0})
+        reader = types.SimpleNamespace(rpc=admit, release=release, quiesce=quiesce,
+            status=lambda: {'maxConcurrentReads':1, 'activeReads':0,
+                            'readerFailed':startup_failed_reader or (failed_reader and bool(accepted))})
         broker = lazy_service.stored.Broker([], [])
         broker.reads, broker.bytes = 7, 100
         broker.start = lambda path: None
@@ -126,8 +134,34 @@ class LazyLifecycle(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(status.replies, [{'state': 'serving', 'pins': 0, 'nodeReadRequests': 7,
             'nodeReadBytes': 100, 'maxConcurrentReads':1, 'activeReads':0, 'activeLeases':0,
-            'activePayloadResponses':0, 'payloadFailures':0}])
+            'activePayloadResponses':0, 'payloadFailures':0, 'coordinatorStatusAvailable':True,'readerFailed':False}])
         self.assertLess(events.index('status'), events.index('stop-broker'))
+
+    def test_failed_reader_retirement_never_unmaps_or_releases(self):
+        for role in ('publish','import'):
+            stream=Stream({'operation':'retire'})
+            events,journal,error=self.exercise([stream],role=role,failed_reader=True)
+            self.assertIsInstance(error,StopIteration)
+            self.assertEqual(stream.replies[0]['state'],'refused')
+            for operation in ('stop-broker','release-reader','unmap','delete','finalize'):
+                self.assertNotIn(operation,events)
+
+    def test_failed_reader_status_reports_unknown_coordinator_without_rpc(self):
+        stream=Stream({'operation':'status'})
+        events,journal,error=self.exercise([stream],failed_reader=True)
+        self.assertIsInstance(error,StopIteration)
+        self.assertNotIn('status',events)
+        self.assertEqual(stream.replies[0]['state'],'unresolved_preserved')
+        self.assertIsNone(stream.replies[0]['pins'])
+        self.assertFalse(stream.replies[0]['coordinatorStatusAvailable'])
+
+    def test_failure_during_startup_does_not_announce_serving(self):
+        events,journal,error=self.exercise([],startup_failed_reader=True)
+        self.assertIsInstance(error,RuntimeError)
+        self.assertIn('during startup',str(error))
+        self.assertEqual(journal[-1]['state'],'unresolved_preserved')
+        for operation in ('release-reader','unmap','delete','finalize'):
+            self.assertNotIn(operation,events)
 
     def test_failed_unmap_never_acknowledges_remote_release(self):
         events, journal, error = self.exercise([Stream({'operation': 'retire'})], unmap_error=OSError('unmap failed'))

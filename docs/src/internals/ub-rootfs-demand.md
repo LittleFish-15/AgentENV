@@ -43,6 +43,22 @@ These are node-local broker counters, distinct from coordinator chunk pins and
 fillErrors. Zero active responses is not proof that reader leases or SDK
 objects have been released. Status inspection does not release any resource.
 
+Mapping exceptions or failed imported-chunk integrity checks close the reader
+generation's admission, preserve the outstanding pin and durably record
+readerFailed in owner.json. Other broker connections cannot implicitly recover
+that reader by trying another block. An already active parallel read must not
+publish success after observing this failed state. Ordinary retirement is
+refused before any SDK unmap/finalize/delete when the local reader is failed;
+explicit reconciliation is required. This conservative retention includes a
+pin whose synchronous read failed, rather than claiming a healthy generation.
+
+Status remains locally observable after failure. It does not retry coordinator
+RPCs for a failed reader: local broker/reader counters remain available, while
+unconfirmed coordinator pins/loading/readyBytes are null. The state is
+unresolved_preserved and the status CLI returns nonzero. A healthy local
+reader whose status RPC fails also closes admission; unavailable information
+is never turned into zero pins or a successful retirement receipt.
+
 The provider is executable through `python -m aenv_ub_provider.lazy_service
 prepare ...` and `serve config --run`; preparation and serve retain separate
 commands and fresh output/state directories. The importer still requires an

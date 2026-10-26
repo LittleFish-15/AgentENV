@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import threading
 import types
 import uuid
 
@@ -123,6 +124,26 @@ def load_config(path):
     return config, value, manifest, credential
 
 
+def reader_status(reader, broker):
+    """Keep local failure evidence available without retrying a failed reader."""
+    status = {'state': 'unresolved_preserved', 'coordinatorStatusAvailable': False,
+              'pins': None, 'loading': None, 'readyBytes': None}
+    if not reader.status().get('readerFailed', False):
+        try:
+            remote = reader.rpc('status')
+            if not isinstance(remote, dict) or remote.get('state') not in ('serving', 'frozen'):
+                reader.poison()
+                raise ValueError('Invalid coordinator status')
+            status = dict(remote, coordinatorStatusAvailable=True)
+        except Exception as error:
+            status['coordinatorErrorType'] = type(error).__name__
+    status.update(reader.status())
+    status.update(broker.read_status())
+    if status.get('readerFailed'):
+        status['state'] = 'unresolved_preserved'
+    return status
+
+
 def serve(config, value, manifest, credential):
     import fcntl
     service.ordinary_linux()
@@ -135,9 +156,13 @@ def serve(config, value, manifest, credential):
              'cacheId': manifest['cacheId'], 'pool': manifest['pool'],
              'physicalIncrementMeasured': False, 'daxDemandPagingAccepted': False,
              'maxConcurrentReads': config.get('maxConcurrentReads', 1)}
+    journal_lock = threading.RLock()
     def journal(update):
-        state.update(update)
-        atomic_json(work / 'owner.json', state)
+        with journal_lock:
+            state.update(update)
+            if state.get('readerFailed'):
+                state['state'] = 'unresolved_preserved'
+            atomic_json(work / 'owner.json', state)
     backend = sources = metadata = control = None
     journal({})
     try:
@@ -163,7 +188,8 @@ def serve(config, value, manifest, credential):
             coordinator = lazy.Cache(manifest['catalog'], mapping, slots, sources.read,
                                      manifest['cacheId'], tokens, journal)
             reader = lazy.Reader(manifest['catalog'], mapping, slots, manifest['cacheId'],
-                                 'owner', tokens['owner'], coordinator.request, config.get('maxConcurrentReads', 1))
+                                 'owner', tokens['owner'], coordinator.request, config.get('maxConcurrentReads', 1),
+                                 failure_journal=journal)
             if reader.rpc('open-reader') != {'state': 'reader-opened'}:
                 raise ValueError('Owner reader admission was not confirmed')
             metadata = lazy.MetadataServer(coordinator.request)
@@ -171,7 +197,8 @@ def serve(config, value, manifest, credential):
         else:
             reader = lazy.Reader(manifest['catalog'], None, slots, manifest['cacheId'],
                                  credential['reader'], credential['token'],
-                                 lambda request: lazy.connect(config['coordinationSocket'], request), config.get('maxConcurrentReads', 1))
+                                 lambda request: lazy.connect(config['coordinationSocket'], request), config.get('maxConcurrentReads', 1),
+                                 failure_journal=journal)
             if reader.rpc('open-reader') != {'state': 'reader-opened'}:
                 raise ValueError('Importer admission was not confirmed')
             backend.initialize()
@@ -191,6 +218,8 @@ def serve(config, value, manifest, credential):
         os.chmod(work / 'control.sock', 0o600)
         control.listen(4)
         journal({'state': 'serving', 'startupPayloadBytes': 0, 'poolBytes': pool.mappingBytes})
+        if reader.status().get('readerFailed', False):
+            raise RuntimeError('Reader failed during startup; generation preserved')
         print(json.dumps({'state': 'serving', 'mode': 'stored-lazy', 'workDir': str(work),
                           'poolBytes': pool.mappingBytes, 'startupPayloadBytes': 0,
                           'daxDemandPagingAccepted': False, 'physicalIncrementMeasured': False}), flush=True)
@@ -207,13 +236,12 @@ def serve(config, value, manifest, credential):
                         service.control_reply(stream, reader.observe(operation, **fields))
                         continue
                     if request == {'operation': 'status'}:
-                        status = reader.rpc('status')
-                        status.update(reader.status())
-                        status.update(broker.read_status())
-                        service.control_reply(stream, status)
+                        service.control_reply(stream, reader_status(reader, broker))
                         continue
                     if request != {'operation': 'retire'}:
                         raise ValueError('Expected explicit status or retire')
+                    if reader.status().get('readerFailed', False):
+                        raise RuntimeError('Reader failed; preserve SDK mappings and reconcile the generation')
                     if coordinator is not None:
                         with coordinator.condition:
                             if (coordinator.poisoned or coordinator.loading or coordinator.leases
@@ -291,7 +319,7 @@ def main():
         else:
             reply = lazy.connect(work / 'control.sock', {'operation': args.command})
         print(json.dumps(reply))
-        return 1 if reply.get('state') == 'refused' else 0
+        return 1 if reply.get('state') in ('refused', 'unresolved_preserved') else 0
     config, value, manifest, credential = load_config(args.config)
     if not args.run:
         print(json.dumps({'state': 'lazy_inputs_validated_no_sdk', 'poolBytes': manifest['pool']['mappingBytes'],

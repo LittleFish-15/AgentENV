@@ -178,13 +178,15 @@ class DemandCache(unittest.TestCase):
         self.assertFalse(h.cache.leases)
         self.assertEqual(h.request('status')['fillErrors'], 1)
 
-    def test_import_read_is_verified_before_return_and_pin_is_released(self):
+    def test_import_read_is_verified_before_return_and_bad_mapping_pin_is_preserved(self):
         h = Harness()
         h.reader().read(h.key, 0, 1)
         h.mapping.corrupt = True
+        reader = h.reader('node-b')
         with self.assertRaisesRegex(ValueError, 'integrity'):
-            h.reader('node-b').read(h.key, 0, 5)
-        self.assertFalse(h.cache.leases)
+            reader.read(h.key, 0, 5)
+        self.assertTrue(reader.failed)
+        self.assertEqual(len(h.cache.leases), 1)
 
     def test_lost_acquire_response_retains_pin_and_poisoned_reader_does_not_retry(self):
         h = Harness()
