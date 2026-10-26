@@ -72,13 +72,10 @@ impl UbLayerRef {
 /// Bind immutable lowers in a derived runtime config, retaining its private upper
 /// and the durable catalog. The caller chooses memory or rootfs explicitly.
 pub fn bind_ub_layer_replicas(cfg: &mut ImageConfig, index_path: &Path) -> Result<()> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct ReplicaIndex {
-        version: u32,
-        state: String,
-        replicas: Vec<UbLayerRef>,
-    }
+    bind_ub_layer_replicas_bytes(cfg, &read_ub_index(index_path)?, false)
+}
+
+fn read_ub_index(index_path: &Path) -> Result<Vec<u8>> {
     use std::io::Read;
     let mut raw = Vec::new();
     std::fs::File::open(index_path)
@@ -87,7 +84,44 @@ pub fn bind_ub_layer_replicas(cfg: &mut ImageConfig, index_path: &Path) -> Resul
         .read_to_end(&mut raw)
         .context("read UB replica index")?;
     ensure!(raw.len() <= 1024 * 1024, "UB replica index is too large");
-    let index: ReplicaIndex = serde_json::from_slice(&raw).context("parse UB replica index")?;
+    Ok(raw)
+}
+
+fn pinned_ub_index(index_path: &Path, expected_sha256: &str) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let expected = expected_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_sha256);
+    crate::backend::ub_protocol::hex_bytes::<32>(expected)?;
+    let raw = read_ub_index(index_path)?;
+    ensure!(
+        format!("{:x}", Sha256::digest(&raw)) == expected,
+        "configured rootfs UB index SHA256 changed"
+    );
+    Ok(raw)
+}
+
+pub fn bind_required_ub_layer_replicas(
+    cfg: &mut ImageConfig,
+    index_path: &Path,
+    expected_sha256: &str,
+) -> Result<()> {
+    bind_ub_layer_replicas_bytes(cfg, &pinned_ub_index(index_path, expected_sha256)?, true)
+}
+
+fn bind_ub_layer_replicas_bytes(cfg: &mut ImageConfig, raw: &[u8], required: bool) -> Result<()> {
+    ensure!(
+        !required || !cfg.lowers.is_empty(),
+        "required rootfs UB binding has no immutable lowers"
+    );
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReplicaIndex {
+        version: u32,
+        state: String,
+        replicas: Vec<UbLayerRef>,
+    }
+    let index: ReplicaIndex = serde_json::from_slice(raw).context("parse UB replica index")?;
     ensure!(
         index.version == 1 && index.state == "ready",
         "UB replica index is not ready/version1"
@@ -95,6 +129,10 @@ pub fn bind_ub_layer_replicas(cfg: &mut ImageConfig, index_path: &Path) -> Resul
     let mut by_digest = std::collections::HashMap::new();
     for replica in index.replicas {
         replica.validate()?;
+        ensure!(
+            !required || !replica.allow_repository_fallback,
+            "required rootfs UB index permits local fallback"
+        );
         ensure!(
             !by_digest.contains_key(&replica.layer_digest),
             "duplicate UB replica layer digest"
@@ -126,6 +164,26 @@ pub fn bind_ub_layer_replicas(cfg: &mut ImageConfig, index_path: &Path) -> Resul
 /// shared-device pool from accidentally reusing an older replica's device.
 /// The source runtime config remains suitable for the original local path.
 pub fn ub_runtime_config_view(image_path: &Path, index_path: &Path) -> Result<PathBuf> {
+    ub_runtime_config_view_inner(image_path, &read_ub_index(index_path)?, false)
+}
+
+pub fn required_ub_runtime_config_view(
+    image_path: &Path,
+    index_path: &Path,
+    expected_sha256: &str,
+) -> Result<PathBuf> {
+    ub_runtime_config_view_inner(
+        image_path,
+        &pinned_ub_index(index_path, expected_sha256)?,
+        true,
+    )
+}
+
+fn ub_runtime_config_view_inner(
+    image_path: &Path,
+    index: &[u8],
+    required: bool,
+) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     let mut raw = Vec::new();
@@ -138,7 +196,7 @@ pub fn ub_runtime_config_view(image_path: &Path, index_path: &Path) -> Result<Pa
     );
     let mut cfg: ImageConfig = serde_json::from_slice(&raw)?;
     resolve_image_config_local_paths(image_path, &mut cfg);
-    bind_ub_layer_replicas(&mut cfg, index_path)?;
+    bind_ub_layer_replicas_bytes(&mut cfg, index, required)?;
     validate_image_config(&cfg)?;
     let serialized = serde_json::to_vec_pretty(&cfg)?;
     let key = format!("{:x}", Sha256::digest(&serialized));
@@ -1654,5 +1712,49 @@ mod ub_tests {
         std::fs::write(&view, b"changed").unwrap();
         assert!(ub_runtime_config_view(&source, &index).is_err());
         assert_eq!(std::fs::read(view).unwrap(), b"changed");
+    }
+
+    #[test]
+    fn strict_rootfs_index_pins_generation_and_refuses_fallback() {
+        use sha2::{Digest, Sha256};
+        let dir = IndexDirectory::new();
+        let source = dir.path().join("image.json");
+        let index = dir.path().join("replicas.json");
+        let original = image();
+        std::fs::write(&source, serde_json::to_vec(&original).unwrap()).unwrap();
+        let raw = serde_json::to_vec(
+            &serde_json::json!({"version":1,"state":"ready","replicas":[replica()]}),
+        )
+        .unwrap();
+        std::fs::write(&index, &raw).unwrap();
+        let pin = format!("sha256:{:x}", Sha256::digest(&raw));
+        let view = required_ub_runtime_config_view(&source, &index, &pin).unwrap();
+        let bound = load_image_config(view).unwrap();
+        let mut resolved = original;
+        resolve_image_config_local_paths(&source, &mut resolved);
+        assert_eq!(bound.upper, resolved.upper);
+        assert!(
+            !bound.lowers[0]
+                .ub
+                .as_ref()
+                .unwrap()
+                .allow_repository_fallback
+        );
+        let mut replacement = replica();
+        replacement.generation = "f".repeat(32);
+        let changed = serde_json::to_vec(
+            &serde_json::json!({"version":1,"state":"ready","replicas":[replacement]}),
+        )
+        .unwrap();
+        std::fs::write(&index, changed).unwrap();
+        assert!(required_ub_runtime_config_view(&source, &index, &pin).is_err());
+        replacement.allow_repository_fallback = true;
+        let fallback = serde_json::to_vec(
+            &serde_json::json!({"version":1,"state":"ready","replicas":[replacement]}),
+        )
+        .unwrap();
+        let fallback_pin = format!("{:x}", Sha256::digest(&fallback));
+        std::fs::write(&index, fallback).unwrap();
+        assert!(required_ub_runtime_config_view(&source, &index, &fallback_pin).is_err());
     }
 }

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use firecracker_client::models::drive::IoEngine;
 use nix::libc;
 use tempfile::TempDir;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 use uvm_ublk_daemon::CreateOverlaybdRuntimeDeviceRequest;
 
@@ -189,6 +189,7 @@ pub struct FirecrackerSandbox {
     current_custom_extension_params: Option<CustomExtensionParams>,
     envd_instance: Option<EnvdInstance>,
     rootfs_runtime: Option<OverlaybdRuntimeHandle>,
+    rootfs_ub_leases: Option<overlaybd::backend::ub::RuntimeReadLeases>,
     mem_ublk_device: Option<SharedReadOnlyDevice>,
     startup_prefetch_task: Option<super::startup_pack::LocalStartupPrefetch>,
     tools_ublk_device: Option<SharedReadOnlyDevice>,
@@ -647,6 +648,21 @@ impl SandboxExecutor for FirecrackerSandbox {
 // ── FirecrackerSandbox public API ────────────────────────────────────────────
 
 impl FirecrackerSandbox {
+    fn verify_created_ub_rootfs(&self) -> Result<()> {
+        if let Some(leases) = &self.rootfs_ub_leases {
+            let runtime = self
+                .rootfs_runtime
+                .as_ref()
+                .context("required UB rootfs runtime missing")?;
+            leases.verify_runtime_image(&runtime.image_config_path)?;
+            info!(sandbox_id = %self.id, device = %runtime.device.device_path().display(),
+                image_config = %runtime.image_config_path.display(),
+                replicas = %serde_json::to_string(leases.replicas())?,
+                "actual ublk rootfs configuration verified against Runtime UB permits");
+        }
+        Ok(())
+    }
+
     /// Identity of this sandbox, including for capture provenance.
     pub fn sandbox_id(&self) -> SandboxId {
         self.id
@@ -1540,14 +1556,24 @@ impl FirecrackerSandbox {
         self.frozen_volume_mounts.clear();
 
         // Cleanup ublk device (must happen after FC stop, before network cleanup)
-        if let Some(runtime) = self.rootfs_runtime.take() {
-            if let Err(e) = UblkDeviceManager::global()
+        if let Some(runtime) = self.rootfs_runtime.as_ref() {
+            if self.rootfs_ub_leases.is_some() {
+                // Required UB roots must not leave an idle pool reader behind.
+                // On failure retain both the handle and Runtime read permits so
+                // stop cannot report success or authorize base retirement.
+                UblkDeviceManager::global()
+                    .delete_device(&runtime.device)
+                    .await
+                    .context("delete required UB rootfs device; read permits retained")?;
+            } else if let Err(e) = UblkDeviceManager::global()
                 .release_device(&runtime.device)
                 .await
             {
                 warn!(error = %e, "failed to release ublk device during stop");
             }
         }
+        self.rootfs_runtime.take();
+        self.rootfs_ub_leases.take();
 
         // Release shared devices explicitly so a following resume for the same
         // image cannot race the detached Drop cleanup.
@@ -1826,6 +1852,15 @@ fn relocate_warm_log(src: Option<&Path>, target: &Path) -> Result<()> {
     }
 }
 
+async fn acquire_required_ub_rootfs_leases(
+    image: &Path,
+) -> Result<Option<overlaybd::backend::ub::RuntimeReadLeases>> {
+    let image = image.to_path_buf();
+    tokio::task::spawn_blocking(move || overlaybd::backend::ub::RuntimeReadLeases::acquire(&image))
+        .await
+        .context("join required UB rootfs read-permit acquisition")?
+}
+
 // ── Drop ─────────────────────────────────────────────────────────────────────
 
 /// Ensure network resources are cleaned up when the sandbox is dropped.
@@ -1887,6 +1922,7 @@ impl FirecrackerSandbox {
             current_custom_extension_params,
             envd_instance: None,
             rootfs_runtime: None,
+            rootfs_ub_leases: None,
             startup_prefetch_task: None,
             mem_ublk_device: None,
             tools_ublk_device: None,
@@ -1992,6 +2028,11 @@ impl FirecrackerSandbox {
             "rootfs",
         )
         .await?;
+        self.rootfs_ub_leases = acquire_required_ub_rootfs_leases(&rootfs_source).await?;
+        if let Some(leases) = &self.rootfs_ub_leases {
+            info!(sandbox_id = %self.id, rootfs_config = %rootfs_source.display(),
+                replicas = %serde_json::to_string(leases.replicas())?, "Runtime acquired required UB rootfs read permits");
+        }
         let runtime_device = UblkDeviceManager::global()
             .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
                 source_image_config: &rootfs_source,
@@ -2026,6 +2067,7 @@ impl FirecrackerSandbox {
             image_config_path: runtime_device.image_config_path,
             actual_virtual_size: runtime_device.actual_virtual_size,
         });
+        self.verify_created_ub_rootfs()?;
         self.current_rootfs_virtual_size = Some(runtime_device.actual_virtual_size);
 
         // ── Boot args: init=/init (tools drive has init baked in) ──
@@ -2308,6 +2350,11 @@ impl FirecrackerSandbox {
                 "rootfs",
             )
             .await?;
+            self.rootfs_ub_leases = acquire_required_ub_rootfs_leases(&rootfs_source).await?;
+            if let Some(leases) = &self.rootfs_ub_leases {
+                info!(sandbox_id = %self.id, rootfs_config = %rootfs_source.display(),
+                    replicas = %serde_json::to_string(leases.replicas())?, "Runtime acquired restored UB rootfs read permits");
+            }
             let runtime_device = UblkDeviceManager::global()
                 .create_overlaybd_runtime_device(CreateOverlaybdRuntimeDeviceRequest {
                     source_image_config: &rootfs_source,
@@ -2342,6 +2389,7 @@ impl FirecrackerSandbox {
                 image_config_path: runtime_device.image_config_path,
                 actual_virtual_size: runtime_device.actual_virtual_size,
             });
+            self.verify_created_ub_rootfs()?;
             self.current_rootfs_virtual_size = Some(runtime_device.actual_virtual_size);
         }
 

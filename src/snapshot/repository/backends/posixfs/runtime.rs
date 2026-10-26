@@ -284,7 +284,7 @@ impl PosixFsRuntimeResolver {
                 "rootfs_layer" => "rootfs",
                 _ => "",
             };
-            if let Some(index) = crate::snapshot::runtime_support::ub_replica_index(kind) {
+            if crate::snapshot::runtime_support::ub_replica_index(kind)?.is_some() {
                 let mut selected = overlaybd::config::ImageConfig {
                     lowers: vec![LayerConfig {
                         digest: layer.digest.clone(),
@@ -293,9 +293,7 @@ impl PosixFsRuntimeResolver {
                     }],
                     ..Default::default()
                 };
-                overlaybd::config::bind_ub_layer_replicas(&mut selected, &index).map_err(
-                    |error| RepositoryError::backend("select missing local layer from UB", error),
-                )?;
+                crate::snapshot::runtime_support::bind_ub_runtime_layers(&mut selected, kind)?;
                 selected.lowers[0]
                     .ub
                     .as_ref()

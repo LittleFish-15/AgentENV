@@ -1,6 +1,6 @@
 //! Snapshot-layer bytes from a local broker holding a read-only UB import.
 //! This feeds the existing ublk/File restore path; it does not map UB into KVM.
-use super::ub_protocol::{Session, MAX_CHUNK, MAX_READ};
+use super::ub_protocol::{Session, SessionHealth, MAX_CHUNK, MAX_READ};
 use crate::config::UbLayerRef;
 use crate::io::virtual_file::VirtualFile;
 use anyhow::{bail, ensure, Context, Result};
@@ -18,7 +18,12 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 type SharedSession = Arc<Mutex<Session<UnixStream>>>;
-type SessionRegistry = Mutex<HashMap<BrokerKey, Weak<Mutex<Session<UnixStream>>>>>;
+type SessionRegistry = Mutex<HashMap<BrokerKey, RegistryEntry>>;
+
+struct RegistryEntry {
+    session: Weak<Mutex<Session<UnixStream>>>,
+    health: SessionHealth,
+}
 
 #[derive(Hash, PartialEq, Eq)]
 struct BrokerKey {
@@ -28,6 +33,42 @@ struct BrokerKey {
     digest: String,
     bytes: u64,
     mapping_bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn verify_broker_peer(stream: &UnixStream) -> Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut peer = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SO_PEERCRED writes a complete ucred on success; validate its length
+    // before reading it. No credentials supplied in the payload are trusted.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            peer.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("read UB broker peer credentials");
+    }
+    ensure!(
+        length as usize == std::mem::size_of::<libc::ucred>(),
+        "short UB broker peer credentials"
+    );
+    let peer = unsafe { peer.assume_init() };
+    ensure!(
+        peer.uid == unsafe { libc::geteuid() } && peer.pid > 0,
+        "UB broker must run as the same runtime UID"
+    );
+    Ok(peer.pid as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_broker_peer(_stream: &UnixStream) -> Result<u32> {
+    bail!("UB broker peer verification requires Linux")
 }
 
 fn acquire_session(replica: &UbLayerRef) -> Result<SharedSession> {
@@ -44,33 +85,122 @@ fn acquire_session(replica: &UbLayerRef) -> Result<SharedSession> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .map_err(|_| anyhow::anyhow!("UB session registry poisoned"))?;
-    registry.retain(|_, entry| entry.strong_count() > 0);
-    if let Some(session) = registry.get(&key).and_then(Weak::upgrade) {
-        if session
-            .lock()
-            .map_err(|_| anyhow::anyhow!("UB session lock poisoned"))?
-            .is_healthy()
-        {
-            return Ok(session);
-        }
+    // A failed incarnation remains poisoned after its last reader disappears.
+    // A later Guest must not silently reconnect to the same unknown outcome.
+    registry.retain(|_, entry| !entry.health.is_healthy() || entry.session.strong_count() > 0);
+    if let Some(entry) = registry.get(&key) {
+        ensure!(
+            entry.health.is_healthy(),
+            "UB incarnation previously failed; explicit recovery required"
+        );
     }
+    if let Some(session) = registry.get(&key).and_then(|entry| entry.session.upgrade()) {
+        ensure!(
+            session
+                .lock()
+                .map_err(|_| anyhow::anyhow!("UB session lock poisoned"))?
+                .is_healthy(),
+            "live UB incarnation has a failed read lease; implicit reconnect refused"
+        );
+        return Ok(session);
+    }
+    ensure!(
+        registry.len() < 4096,
+        "UB incarnation registry full; failed entries cannot be silently evicted"
+    );
     let stream = UnixStream::connect(&replica.broker_socket)
         .context("connect node-local UB layer broker")?;
+    let broker_pid = verify_broker_peer(&stream)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let session = Arc::new(Mutex::new(
-        Session::open(
-            stream,
-            &replica.object_name,
-            &replica.generation,
-            &replica.layer_digest,
-            replica.file_bytes,
-            replica.mapping_bytes,
-        )
-        .context("open generation-bound UB read lease")?,
-    ));
-    registry.insert(key, Arc::downgrade(&session));
+    let connection = Session::open(
+        stream,
+        &replica.object_name,
+        &replica.generation,
+        &replica.layer_digest,
+        replica.file_bytes,
+        replica.mapping_bytes,
+    )
+    .context("open generation-bound UB read lease")?;
+    let health = connection.health_token();
+    tracing::info!(target: "aenv::ub_lease", object = %replica.object_name,
+        generation = %replica.generation, broker_pid, bytes = replica.file_bytes,
+        "generation-bound UB read permit accepted");
+    let session = Arc::new(Mutex::new(connection));
+    registry.insert(
+        key,
+        RegistryEntry {
+            session: Arc::downgrade(&session),
+            health,
+        },
+    );
     Ok(session)
+}
+
+/// Runtime-side read permits held until its private rootfs device is deleted.
+/// The daemon also owns its own read sessions. Neither side can retire a base
+/// while another Guest or an in-flight daemon read still holds a connection.
+pub struct RuntimeReadLeases {
+    replicas: Vec<UbLayerRef>,
+    _sessions: Vec<SharedSession>,
+}
+
+impl RuntimeReadLeases {
+    pub fn acquire(image_path: &std::path::Path) -> Result<Option<Self>> {
+        let image = crate::config::load_image_config(image_path)?;
+        let required = image.lowers.iter().any(|layer| {
+            layer
+                .ub
+                .as_ref()
+                .is_some_and(|replica| !replica.allow_repository_fallback)
+        });
+        if !required {
+            return Ok(None);
+        }
+        let mut replicas = Vec::new();
+        let mut sessions = Vec::new();
+        for layer in image.lowers {
+            let replica = layer
+                .ub
+                .context("required UB rootfs has an unbound lower")?;
+            ensure!(
+                !replica.allow_repository_fallback,
+                "required UB rootfs cannot mix fallback layers"
+            );
+            replica.validate()?;
+            ensure!(
+                replica.layer_digest == layer.digest && replica.file_bytes == layer.size,
+                "UB rootfs read permit differs from committed lower"
+            );
+            sessions.push(acquire_session(&replica)?);
+            replicas.push(replica);
+        }
+        Ok(Some(Self {
+            replicas,
+            _sessions: sessions,
+        }))
+    }
+
+    pub fn replicas(&self) -> &[UbLayerRef] {
+        &self.replicas
+    }
+
+    pub fn verify_runtime_image(&self, image_path: &std::path::Path) -> Result<()> {
+        let image = crate::config::load_image_config(image_path)?;
+        ensure!(
+            image.lowers.len() == self.replicas.len(),
+            "created rootfs device lost required UB lowers"
+        );
+        for (layer, expected) in image.lowers.iter().zip(&self.replicas) {
+            ensure!(
+                layer.ub.as_ref() == Some(expected)
+                    && layer.digest == expected.layer_digest
+                    && layer.size == expected.file_bytes,
+                "created rootfs device changed its UB binding"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Preserve an ancestor's exact stored bytes when a new durable snapshot is
@@ -112,6 +242,8 @@ pub struct UbLayerFile {
     fallback: Option<Arc<File>>,
     fallback_active: Arc<AtomicBool>,
     size: u64,
+    object: String,
+    generation: String,
     #[cfg(feature = "rootfs-read-trace")]
     digest: String,
 }
@@ -124,6 +256,7 @@ impl UbLayerFile {
         #[cfg(feature = "rootfs-read-trace")]
         let digest = replica.layer_digest.clone();
         let object = replica.object_name.clone();
+        let generation = replica.generation.clone();
         let fallback_replica = replica.clone();
         let fallback = if replica.allow_repository_fallback {
             let path = fallback_path
@@ -174,6 +307,8 @@ impl UbLayerFile {
             fallback,
             fallback_active: Arc::new(AtomicBool::new(degraded)),
             size,
+            object,
+            generation,
             #[cfg(feature = "rootfs-read-trace")]
             digest,
         })
@@ -193,18 +328,31 @@ impl UbLayerFile {
         let session = self.session.clone();
         let fallback = self.fallback.clone();
         let fallback_active = Arc::clone(&self.fallback_active);
+        let object = self.object.clone();
+        let generation = self.generation.clone();
         tokio::task::spawn_blocking(move || {
             if !fallback_active.load(Ordering::Acquire) {
                 let result = session.as_ref().context("missing UB session")?.lock()
                     .map_err(|_| anyhow::anyhow!("UB session lock poisoned"))?.read_at(offset, count);
                 match result {
-                    Ok(bytes) => return Ok((Bytes::from(bytes), true)),
+                    Ok(bytes) => {
+                        metrics::counter!("overlaybd_ub_read_requests_total").increment(1);
+                        metrics::counter!("overlaybd_ub_read_bytes_total").increment(bytes.len() as u64);
+                        tracing::debug!(target: "aenv::ub_read", %object, %generation,
+                            offset, bytes = bytes.len(), resolved_source = "ub", "UB lower read completed");
+                        return Ok((Bytes::from(bytes), true));
+                    }
                     Err(error) if fallback.is_some() => {
                         if !fallback_active.swap(true, Ordering::AcqRel) {
                             tracing::warn!(%error, resolved_source = "repository", "UB read failed; rereading full range from verified durable source");
                         }
                     }
-                    Err(error) => return Err(error).context("read required UB snapshot layer"),
+                    Err(error) => {
+                        metrics::counter!("overlaybd_ub_read_errors_total").increment(1);
+                        tracing::error!(target: "aenv::ub_read", %object, %generation, offset, count,
+                            %error, "required UB read failed; no local fallback");
+                        return Err(error).context("read required UB snapshot layer");
+                    }
                 }
             }
             let mut bytes = vec![0; count];
@@ -394,5 +542,55 @@ mod tests {
         assert_eq!(exported, bytes);
         drop(second);
         assert_eq!(server.join().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_incarnation_cannot_reconnect_even_after_last_file_drops() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = vec![0x42; MAX_CHUNK + 17];
+        let reference = replica(directory.path(), &bytes, false);
+        let server = serve_once(&reference.broker_socket, bytes, true);
+        let first = UbLayerFile::open(&reference, None).await.unwrap();
+        assert!(first.read_at(0, MAX_CHUNK + 17).await.is_err());
+        assert!(UbLayerFile::open(&reference, None).await.is_err());
+        drop(first);
+        assert_eq!(server.join().unwrap(), 2);
+        let error = acquire_session(&reference).err().unwrap();
+        assert!(error.to_string().contains("explicit recovery"));
+    }
+
+    #[tokio::test]
+    async fn runtime_permits_outlive_one_guest_and_keep_broker_session_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = b"shared immutable lower".to_vec();
+        let reference = replica(directory.path(), &bytes, false);
+        let image = crate::config::ImageConfig {
+            lowers: vec![crate::config::LayerConfig {
+                ub: Some(reference.clone()),
+                digest: reference.layer_digest.clone(),
+                size: reference.file_bytes,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let path = directory.path().join("image.json");
+        std::fs::write(&path, serde_json::to_vec(&image).unwrap()).unwrap();
+        let server = serve_once(&reference.broker_socket, bytes.clone(), false);
+        let one = RuntimeReadLeases::acquire(&path).unwrap().unwrap();
+        let two = RuntimeReadLeases::acquire(&path).unwrap().unwrap();
+        assert_eq!(one.replicas(), std::slice::from_ref(&reference));
+        one.verify_runtime_image(&path).unwrap();
+        let mut changed = image.clone();
+        changed.lowers[0].ub.as_mut().unwrap().generation = "f".repeat(32);
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(one.verify_runtime_image(&path).is_err());
+        std::fs::write(&path, serde_json::to_vec(&image).unwrap()).unwrap();
+        drop(one);
+        let file = UbLayerFile::open(&reference, None).await.unwrap();
+        assert_eq!(file.read_at(0, bytes.len()).await.unwrap().as_ref(), bytes);
+        drop(file);
+        assert!(!server.is_finished());
+        drop(two);
+        assert_eq!(server.join().unwrap(), 1);
     }
 }

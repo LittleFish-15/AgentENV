@@ -2,6 +2,10 @@
 //! This module intentionally uses only std so its wire contract can be tested
 //! independently of Linux, ublk, the SDK and the async runtime.
 use std::io::{self, Read, Write};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 pub const MAGIC: &[u8; 8] = b"AENVUB1\0";
 pub const MAX_CHUNK: usize = 1024 * 1024;
@@ -30,12 +34,24 @@ pub fn hex_bytes<const N: usize>(text: &str) -> io::Result<[u8; N]> {
 pub struct Session<T> {
     stream: T,
     file_bytes: u64,
-    healthy: bool,
+    health: SessionHealth,
+}
+
+#[derive(Clone)]
+pub(super) struct SessionHealth(Arc<AtomicBool>);
+
+impl SessionHealth {
+    pub(super) fn is_healthy(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 impl<T: Read + Write> Session<T> {
     pub fn is_healthy(&self) -> bool {
-        self.healthy
+        self.health.is_healthy()
+    }
+    pub(super) fn health_token(&self) -> SessionHealth {
+        self.health.clone()
     }
     pub fn open(
         mut stream: T,
@@ -73,7 +89,7 @@ impl<T: Read + Write> Session<T> {
         Ok(Self {
             stream,
             file_bytes,
-            healthy: true,
+            health: SessionHealth(Arc::new(AtomicBool::new(true))),
         })
     }
 
@@ -94,7 +110,7 @@ impl<T: Read + Write> Session<T> {
     }
 
     pub fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        if !self.healthy {
+        if !self.is_healthy() {
             return Err(invalid(
                 "UB session failed; refusing implicit reconnect or local fallback",
             ));
@@ -106,7 +122,7 @@ impl<T: Read + Write> Session<T> {
         let mut data = vec![0; wanted as usize];
         let result = self.read_into(offset, &mut data);
         if result.is_err() {
-            self.healthy = false;
+            self.health.0.store(false, Ordering::Release);
         }
         result.map(|()| data)
     }
@@ -209,6 +225,15 @@ mod tests {
     fn truncated_payload_is_error() {
         let mut s = session(&[reply(0, 3), b"ab".to_vec()].concat(), 10);
         assert!(s.read_at(0, 3).is_err());
+    }
+    #[test]
+    fn failure_marker_survives_last_session_drop() {
+        let mut s = session(&[reply(0, 3), b"ab".to_vec()].concat(), 10);
+        let health = s.health_token();
+        assert!(health.is_healthy());
+        assert!(s.read_at(0, 3).is_err());
+        drop(s);
+        assert!(!health.is_healthy());
     }
     #[test]
     fn splits_large_reads() {

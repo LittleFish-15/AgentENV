@@ -224,6 +224,11 @@ auto_resume_min_sandbox_timeout_secs = 300
 # persisted_sandbox_store_path = "$AENV_HOME/persisted-sandboxes"
 
 [snapshot]
+# Strict rootfs-only UB mode: pin the exact ready index bytes. Both fields must
+# be set together. Every selected lower is required; local fallback is rejected.
+# Memory snapshots and the Guest private upper are not redirected by this mode.
+# ub_rootfs_index = "/var/lib/aenv/ub/rootfs/runtime-index.json"
+# ub_rootfs_index_sha256 = "sha256:<64 lowercase hexadecimal characters>"
 # Node-local cache for snapshot artifacts.
 # local_cache_path = "$AENV_HOME/snapshot-local-cache"
 

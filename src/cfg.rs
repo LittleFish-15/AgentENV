@@ -351,6 +351,10 @@ pub struct DiskRateLimitConfig {
 
 #[derive(Debug, Config, Clone)]
 pub struct SnapshotConfig {
+    /// Strict rootfs-only UB binding. Requires a SHA256 of the exact index bytes.
+    /// Memory snapshot behavior is independent and remains unchanged.
+    pub ub_rootfs_index: Option<PathBuf>,
+    pub ub_rootfs_index_sha256: Option<String>,
     #[config(
         env = "AENV_SNAPSHOT_LOCAL_CACHE_PATH",
         parse_env = parse_required_path,

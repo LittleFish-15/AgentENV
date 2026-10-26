@@ -238,27 +238,77 @@ where
     write_image_config(destination, label, &image_config).await
 }
 
-pub(crate) fn ub_replica_index(kind: &str) -> Option<PathBuf> {
+pub(crate) fn ub_replica_index(kind: &str) -> RepositoryResult<Option<PathBuf>> {
     let variable = match kind {
         "memory" => "AENV_UB_MEMORY_REPLICAS",
         "rootfs" => "AENV_UB_ROOTFS_REPLICAS",
-        _ => return None,
+        _ => return Ok(None),
     };
-    std::env::var_os(variable).map(PathBuf::from)
+    let legacy = std::env::var_os(variable).map(PathBuf::from);
+    if kind == "rootfs" {
+        let policy = &crate::cfg::ConfigManager::global_config().snapshot;
+        if let Some(index) = &policy.ub_rootfs_index {
+            if !index.is_absolute()
+                || policy.ub_rootfs_index_sha256.is_none()
+                || legacy.as_ref().is_some_and(|path| path != index)
+            {
+                return Err(RepositoryError::backend("invalid strict rootfs UB policy",
+                    anyhow::anyhow!("absolute index and SHA256 required; conflicting legacy environment refused")));
+            }
+            return Ok(Some(index.clone()));
+        }
+        if policy.ub_rootfs_index_sha256.is_some() {
+            return Err(RepositoryError::backend(
+                "invalid strict rootfs UB policy",
+                anyhow::anyhow!("rootfs UB SHA256 requires an index path"),
+            ));
+        }
+    }
+    Ok(legacy)
+}
+
+fn required_rootfs_index_hash(kind: &str) -> Option<String> {
+    if kind != "rootfs" {
+        return None;
+    }
+    let policy = &crate::cfg::ConfigManager::global_config().snapshot;
+    policy
+        .ub_rootfs_index
+        .as_ref()
+        .and(policy.ub_rootfs_index_sha256.clone())
+}
+
+pub(crate) fn bind_ub_runtime_layers(
+    image: &mut ImageConfig,
+    kind: &str,
+) -> RepositoryResult<bool> {
+    let Some(index) = ub_replica_index(kind)? else {
+        return Ok(false);
+    };
+    match required_rootfs_index_hash(kind) {
+        Some(hash) => overlaybd::config::bind_required_ub_layer_replicas(image, &index, &hash),
+        None => overlaybd::config::bind_ub_layer_replicas(image, &index),
+    }
+    .map_err(|error| RepositoryError::backend("bind UB runtime layers", error))?;
+    Ok(true)
 }
 
 pub(crate) async fn resolve_ub_runtime_config(
     source: &Path,
     kind: &str,
 ) -> RepositoryResult<PathBuf> {
-    let Some(index) = ub_replica_index(kind) else {
+    let Some(index) = ub_replica_index(kind)? else {
         return Ok(source.to_path_buf());
     };
     let source = source.to_path_buf();
-    tokio::task::spawn_blocking(move || overlaybd::config::ub_runtime_config_view(&source, &index))
-        .await
-        .map_err(|error| RepositoryError::backend("join UB runtime config binding", error))?
-        .map_err(|error| RepositoryError::backend("bind UB runtime config", error))
+    let required_hash = required_rootfs_index_hash(kind);
+    tokio::task::spawn_blocking(move || match required_hash {
+        Some(hash) => overlaybd::config::required_ub_runtime_config_view(&source, &index, &hash),
+        None => overlaybd::config::ub_runtime_config_view(&source, &index),
+    })
+    .await
+    .map_err(|error| RepositoryError::backend("join UB runtime config binding", error))?
+    .map_err(|error| RepositoryError::backend("bind UB runtime config", error))
 }
 
 /// Point a lower at its node-local placement as decided by the image store.
