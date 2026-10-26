@@ -1,0 +1,17 @@
+{
+  "entry": "A_build_full_ub_candidate_v1.py",
+  "bytes": 358969,
+  "sha256": "4ef48a5f08348c5a9d416a9799a7d06d73571c0b849f48151d906513764d4928",
+  "sourceFiles": 883,
+  "replacedOrNewFiles": 9,
+  "sourceBytes": 10495500,
+  "release": {
+    "coreCommit": "f329fd3ede3de70b0f1cc47fa8660d8d0041e192",
+    "localCommit": "81983cc4f413e57cc201200293408cb9576a72e0",
+    "tree": "61f78d20beb9501e8bb48fa958f3f5c7560d8531"
+  },
+  "preservedFullCore": "ff1efdd9a2598e19b84cc09b91c8bc1e10ab6254",
+  "targetExecuted": false,
+  "isolatedCargoTarget": true,
+  "retainedPackageCache": true
+}
