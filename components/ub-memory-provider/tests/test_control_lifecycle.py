@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from aenv_ub_provider import service
+from aenv_ub_provider import service, host_pmem_guard
 
 
 class Stream:
@@ -66,7 +66,7 @@ class Location:
 
 
 class Lifecycle(unittest.TestCase):
-    def exercise(self, streams, cleanup_error=None):
+    def exercise(self, streams, cleanup_error=None, root_guard=None):
         journal, receipts, cleanup, stopped = [], [], [], []
         provider = types.SimpleNamespace(condition=threading.Condition(), active=0, retiring=False,
                                          start=lambda path: None, stop=lambda: stopped.append(True))
@@ -90,7 +90,13 @@ class Lifecycle(unittest.TestCase):
                   'adapter': '/owned/adapter.so', 'adapterSha256': 'sha256:' + 'a' * 64,
                   'maxCoverageBytes': 1, 'region': 'test', 'readerId': 'peer'}
         manifest = {'version': 1, 'ownerId': 'generation', 'mode': 'pmem', 'readers': ['peer'], 'replicas': []}
+        selected = []
+        if root_guard is not None:
+            config['hostPmemReleaseReceipt'] = '/root-owned/local-release.json'
+            selected = [{'backing': {'test': 'source'}}]
         with contextlib.ExitStack() as stack:
+            if root_guard is not None:
+                stack.enter_context(patch.object(host_pmem_guard, 'require_release', side_effect=root_guard))
             stack.enter_context(patch.dict(sys.modules, {'fcntl': types.SimpleNamespace(
                 flock=lambda *a: None, LOCK_EX=1, LOCK_NB=2)}))
             stack.enter_context(patch.object(service, 'Path', Location))
@@ -114,7 +120,7 @@ class Lifecycle(unittest.TestCase):
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             failure = None
             try:
-                service.serve(config, [], manifest)
+                service.serve(config, selected, manifest)
             except Exception as error:
                 failure = error
         return journal, receipts, cleanup, stopped, control, failure
@@ -151,6 +157,18 @@ class Lifecycle(unittest.TestCase):
         self.assertFalse(receipts)
         self.assertFalse(client.replies)
         self.assertTrue(control.closed)
+
+    def test_root_volume_guard_refuses_retire_until_receipt_then_reuses_owner(self):
+        first=Stream({'operation':'retire','peerReceipts':[]})
+        second=Stream({'operation':'retire','peerReceipts':[]})
+        journal,receipts,cleanup,stopped,control,failure=self.exercise(
+            [first,second],root_guard=[ValueError('No root volume release receipt'),None])
+        self.assertIsNone(failure)
+        self.assertEqual(first.replies[0]['state'],'refused')
+        self.assertEqual(second.replies,[{'state':'released'}])
+        self.assertEqual(len(cleanup),1)
+        self.assertEqual(len(stopped),1)
+        self.assertEqual(len(receipts),1)
 
 
 if __name__ == '__main__':

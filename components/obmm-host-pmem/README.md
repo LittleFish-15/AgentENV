@@ -71,6 +71,68 @@ Unknown references and partial failures remain explicit reconciliation work.
 
 ## Host reader
 
+The userspace control implementation is in
+`../ub-memory-provider/aenv_ub_provider/host_pmem.py`. It encodes CREATE/STATUS/
+DESTROY from this UAPI, durably records intent through the caller's journal,
+never retries CREATE, and checks the observed UUID/device/id before retirement.
+An interrupted destroy is reconciled by STATUS, not a second blind destroy.
+`tests/uapi_layout.c` checks all three ioctl numbers and the C layouts against
+the target headers; Python tests check the actual encoded requests.
+
+`host_pmem_lease.py` acquires the existing ordinary SDK provider's readonly
+O_SYNC FDs. The privileged helper connects with the specified ordinary EUID in
+a single-threaded bootstrap, restores root, and binds the peer UID/PID/start
+time before receiving FDs. It does not load the SDK into root or relax the
+provider's existing same-UID check. Its lease cannot be explicitly closed while
+a volume may remain. SDK owners must continue running and must not be retired
+merely because the privileged helper's socket disconnected.
+
+`host_pmem_mount.py` uses a new private mount namespace and mounts only the
+observed block device as `ext4,ro,noload,dax=always,nodev,nosuid,noexec`. It checks
+mountinfo identity and options, and never uses forced/lazy unmount. The
+`MountedSession` composition in `host_pmem_session.py` requires an already
+running, exactly identified SDK owner; it connects the lease, volume, mount and
+bounded pread verification. It persists the node boot and transaction before
+resource changes. Explicit retirement orders unmount, volume absence, then
+lease close. There is no automatic SDK deallocation or driver restoration.
+
+File verification checks the exact local block device, active S_DAX, readonly
+mount, expected length/digest, a positive DAX counter delta and EROFS on a
+non-writing writable-open attempt. Failure does not fall back to a normal file.
+These are local read-path checks, not two-node physical-identity or net-saving
+evidence. The coordinator still has to bind both nodes to the same SDK
+publication, retain peer references and collect complete release receipts.
+Neither the Python unit tests nor the C layout compilation run these Linux
+namespace/credential/mount operations on the target.
+
+`host_pmem_cli.py` provides `plan`, foreground `serve`, and authenticated root
+`retire` modes. `plan` makes no SDK/kernel changes. `serve` requires the exact
+configuration digest, explicit view/mount approval, and an already enabled
+candidate matching the configured kernel release and module srcversion. It
+holds the mount/lease after validation while the peer is tested. A failed
+validation keeps the local control loop available for explicit retirement;
+it does not fall back or automatically free the source. A lost completion
+reply does not repeat cleanup. An orphan helper is not silently adopted.
+
+New minimal experiments must set `hostPmemReleaseReceipt` in the ordinary
+provider configuration on BOTH nodes. This optional field only applies to
+pmem mode and exactly one image; old configurations keep their existing
+semantics. Retirement then requires a root-owned release receipt matching the
+publication owner, complete manifest hash, SDK object name, source generation,
+local SDK process identity and boot. The root helper exports it only after
+mount absence, volume absence and lease closure. The publisher additionally
+requires the existing importer release receipts. Thus root-helper death or
+socket disconnection alone does not authorize SDK cleanup. Export root
+receipts into a root-owned, ordinary-user-traversable directory; private
+transaction journals remain private. The receipt is local-retirement evidence,
+not a physical-sharing or data-validation result.
+
+Still outside these library/CLI components: the reviewed two-node deployment
+wrapper, immutable test-container preparation, SDK-owner startup using retained
+adapter pins, module maintenance/restoration, global object-provenance evidence
+and memory accounting. Do not issue field commands until those pieces are
+bound to one approved experiment. The core CLI by itself is not that wrapper.
+
 Use the existing stored lower protocol with the new explicit version2 catalog:
 `{"version":2,"access":"read_iter","files":[...]}`. The provider still checks
 active S_DAX, readonly mount, exact stored length and content identity. It calls

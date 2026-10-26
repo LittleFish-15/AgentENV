@@ -42,6 +42,13 @@ def validate_config(config):
               'logicalBudgetBytes', 'maxCoverageBytes'}
     role = config.get('role')
     mode = config.get('mode')
+    if 'hostPmemReleaseReceipt' in config:
+        if mode != 'pmem':
+            raise ValueError('Host pmem release guard only applies to native pmem owners')
+        common.add('hostPmemReleaseReceipt')
+        receipt = Path(config['hostPmemReleaseReceipt'])
+        if not receipt.is_absolute() or receipt.resolve() != receipt:
+            raise ValueError('Host pmem receipt must have an absolute unredirected path')
     if role == 'publish':
         extra = {'readers', 'sourceRoot', 'images'} if mode == 'stored' else {'readers', 'catalog'}
     elif role == 'import':
@@ -172,6 +179,8 @@ def control_reply(stream, reply):
 def serve(config, selected, manifest):
     import fcntl
     ordinary_linux()
+    if 'hostPmemReleaseReceipt' in config and len(selected) != 1:
+        raise ValueError('Host pmem minimal gate requires exactly one guarded image')
     os.umask(0o077)
     work = Path(config['workDir'])
     work.mkdir(mode=0o700, exist_ok=False)  # An old journal is never silently reused.
@@ -242,6 +251,9 @@ def serve(config, selected, manifest):
                         release_receipts(request, manifest)
                     elif request != {'operation': 'retire', 'peerReceipts': []}:
                         raise ValueError('Importer retirement only releases its own mappings')
+                    if 'hostPmemReleaseReceipt' in config:
+                        from .host_pmem_guard import require_release
+                        require_release(config['hostPmemReleaseReceipt'], manifest, selected[0]['backing'])
                     freeze_admission(provider)
                 except Exception as error:
                     control_reply(stream, {'state': 'refused', 'reason': str(error)[:1000]})
