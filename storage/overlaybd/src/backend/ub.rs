@@ -658,8 +658,23 @@ mod tests {
         assert!(!old_server.is_finished());
         assert!(!new_server.is_finished());
         drop(two);
+        assert_prompt_broker_exit(&old_server);
+        assert_prompt_broker_exit(&new_server);
         assert_eq!(old_server.join().unwrap(), 1);
         assert_eq!(new_server.join().unwrap(), 1);
+    }
+
+    fn assert_prompt_broker_exit(server: &std::thread::JoinHandle<usize>) {
+        // This must precede the fake broker's five-second read timeout; a
+        // timeout must not masquerade as release of the Runtime's last lease.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !server.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            server.is_finished(),
+            "broker did not observe prompt lease EOF"
+        );
     }
 
     #[test]
@@ -684,6 +699,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&image).unwrap()).unwrap();
         let server = serve_once(&old.broker_socket, b"retained".to_vec(), false);
         assert!(RuntimeReadLeases::acquire(&path).is_err());
+        assert_prompt_broker_exit(&server);
         assert_eq!(server.join().unwrap(), 0);
     }
 }
