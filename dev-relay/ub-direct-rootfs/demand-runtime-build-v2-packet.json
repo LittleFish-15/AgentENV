@@ -1,0 +1,17 @@
+{
+  "entry": "A_build_demand_ub_runtime_v2.py",
+  "bytes": 321426,
+  "sha256": "20a41dc91fb7b72f50baa2441f2c793789d219460af010a0a5a6cfc67ee94b26",
+  "sourceFiles": 882,
+  "replacedOrNewFiles": 13,
+  "sourceBytes": 10480361,
+  "release": {
+    "coreCommit": "e9c4ee5005591aa0abb83d98e3d13086332d2cf9",
+    "localCommit": "10a6690180628675fd96bd8b9628516b18b445ef",
+    "tree": "f26415a3e6bc13be1b0541b4d59e986302116fee"
+  },
+  "preservedFullCore": "ff1efdd9a2598e19b84cc09b91c8bc1e10ab6254",
+  "targetExecuted": false,
+  "isolatedCargoTarget": true,
+  "retainedPackageCache": true
+}
