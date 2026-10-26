@@ -1,0 +1,114 @@
+--- a/drivers/ub/obmm/Makefile
++++ b/drivers/ub/obmm/Makefile
+@@ -8,4 +8,6 @@
+ 	ubmempool_allocator.o obmm_lowmem.o obmm_export_region_ops.o \
+ 	obmm_addr_check.o obmm_preimport_prefilled.o obmm_resource.o
+ 
++obmm-$(CONFIG_FS_DAX) += obmm_pmem_ro.o
++
+ obj-$(CONFIG_OBMM) += obmm.o
+--- a/drivers/ub/obmm/obmm_core.h
++++ b/drivers/ub/obmm/obmm_core.h
+@@ -115,6 +115,10 @@
+ 	unsigned long mem_cap;
+ 	/* number of mmap (atomic to avoid deadlock in vma_open during split) */
+ 	atomic_t mmap_count;
++	/* Immutable NC block/DAX views; guarded by state_mutex. */
++	atomic_t pmem_nc_writers;
++	unsigned int pmem_views;
++	bool pmem_sealed;
+ 
+ 	struct obmm_ownership_info *ownership_info;
+ 	/* protect ownership_info and serialize concurrent page table change requests */
+--- a/drivers/ub/obmm/obmm_core.c
++++ b/drivers/ub/obmm/obmm_core.c
+@@ -33,6 +33,7 @@
+ #include "obmm_sysfs.h"
+ #include "obmm_export.h"
+ #include "obmm_core.h"
++#include "obmm_pmem_ro.h"
+ 
+ size_t __obmm_memseg_size;
+ 
+@@ -319,6 +320,9 @@
+ 	int retval;
+ 
+ 	refcount_set(&region->refcnt, 0);
++	atomic_set(&region->pmem_nc_writers, 0);
++	region->pmem_views = 0;
++	region->pmem_sealed = false;
+ 	mutex_init(&region->state_mutex);
+ 	INIT_LIST_HEAD(&region->node);
+ 
+@@ -637,6 +641,12 @@
+ 		goto out_lowmem_exit;
+ 	}
+ 
++	ret = obmm_pmem_init();
++	if (ret) {
++		misc_deregister(&obmm_dev_handle);
++		goto out_lowmem_exit;
++	}
++
+ 	pr_info("obmm_module: init completed\n");
+ 	return ret;
+ 
+@@ -655,6 +665,7 @@
+ static void __exit obmm_exit(void)
+ {
+ 	pr_info("obmm_module: exit started\n");
++	obmm_pmem_exit();
+ 
+ 	lowmem_notify_exit();
+ 	module_preimport_exit();
+--- a/drivers/ub/obmm/obmm_shm_dev.c
++++ b/drivers/ub/obmm/obmm_shm_dev.c
+@@ -35,6 +35,8 @@
+ 
+ 	/* atomic to avoid deadlock: update_range holds state_mutex when calling split_vma */
+ 	atomic_inc(&reg->mmap_count);
++	if ((vma->vm_file->f_flags & O_SYNC) && (vma->vm_flags & VM_WRITE))
++		atomic_inc(&reg->pmem_nc_writers);
+ }
+ 
+ static void obmm_vma_close(struct vm_area_struct *vma)
+@@ -57,7 +59,9 @@
+ 			pr_err("vma close: cache flush failed: %d\n", ret);
+ 	}
+ 
+-	if (atomic_dec_and_test(&reg->mmap_count))
++	if ((vma->vm_file->f_flags & O_SYNC) && (vma->vm_flags & VM_WRITE))
++		atomic_dec(&reg->pmem_nc_writers);
++	if (atomic_dec_and_test(&reg->mmap_count) && !reg->pmem_views)
+ 		reg->mmap_mode = OBMM_MMAP_INIT;
+ 
+ 	mutex_unlock(&reg->state_mutex);
+@@ -84,6 +88,8 @@
+ 				 const struct obmm_cmd_update_range *update_info,
+ 				 bool cacheable)
+ {
++	if (READ_ONCE(region->pmem_sealed))
++		return false;
+ 	if (!cacheable) {
+ 		pr_err("Ownership operation is not applicable to o-sync mmap %d.\n",
+ 		       region->regionid);
+@@ -477,6 +483,10 @@
+ 	vma->vm_page_prot = mem_state_to_pgprot(mem_state);
+ 
+ 	mutex_lock(&reg->state_mutex);
++	if (reg->pmem_sealed && (!o_sync || (vma->vm_flags & (VM_WRITE | VM_EXEC)))) {
++		ret = -EPERM;
++		goto err_mutex_unlock;
++	}
+ 	old_mmap_mode = reg->mmap_mode;
+ 
+ 	if ((o_sync && reg->mmap_mode == OBMM_MMAP_NORMAL) ||
+@@ -512,6 +522,8 @@
+ 		}
+ 	}
+ 	atomic_inc(&reg->mmap_count);
++	if (o_sync && (vma->vm_flags & VM_WRITE))
++		atomic_inc(&reg->pmem_nc_writers);
+ 	mutex_unlock(&reg->state_mutex);
+ 
+ 	vma->vm_ops = &obmm_vm_ops;

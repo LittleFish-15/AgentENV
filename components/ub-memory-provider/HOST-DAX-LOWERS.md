@@ -58,6 +58,13 @@ The following is conditional usage documentation, not a target deployment step:
 python3 -m aenv_ub_provider.host_dax --catalog catalog.json --runtime-index fresh-index.json
 ```
 
+Version1 catalogs use mmap as above. A version2 catalog must additionally set
+`"access":"read_iter"`; it explicitly uses pread on the verified S_DAX file,
+revalidating the FD before each payload read. There is no automatic switch from
+failed mmap to pread and no short-read fallback. This mode is intended for the
+experimental OBMM readonly DAX read-iterator frontend. That frontend must be
+implemented, built and accepted separately; S_DAX alone is not UB provenance.
+
 The foreground service emits the existing stored-layer runtime index only after
 all source files are validated and the socket is listening. Bind it only to
 rootfs through the existing explicit rootfs-replica configuration. Do not enable

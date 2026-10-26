@@ -26,7 +26,12 @@ class HostDax(unittest.TestCase):
             'aenv_' + '1' * 32, '2' * 32,
             'sha256:' + hashlib.sha256(self.data).hexdigest(), len(self.data), stored.ALIGN)
         # Supply Unix open flags as zero on Windows only in the local model.
-        proxy = types.SimpleNamespace(open=os.open, close=os.close, O_RDONLY=os.O_RDONLY,
+        def model_pread(fd, count, offset):
+            os.lseek(fd, offset, os.SEEK_SET)
+            return os.read(fd, count)
+        proxy = types.SimpleNamespace(open=lambda path, flags: os.open(path, flags | getattr(os, 'O_BINARY', 0)),
+            close=os.close, O_RDONLY=os.O_RDONLY,
+            pread=getattr(os, 'pread', model_pread),
             O_CLOEXEC=getattr(os, 'O_CLOEXEC', 0), O_NOFOLLOW=getattr(os, 'O_NOFOLLOW', 0),
             O_NONBLOCK=getattr(os, 'O_NONBLOCK', 0))
         self.os_patch = mock.patch.object(host_dax, 'os', proxy)
@@ -50,6 +55,38 @@ class HostDax(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'S_DAX'):
                 self.mapping()
             mapping.assert_not_called()
+
+    def test_read_iter_uses_pread_without_mmap_and_checks_dax_on_each_read(self):
+        with mock.patch.object(host_dax.mmap, 'mmap') as mapping:
+            value = host_dax.StoredDaxMapping(str(self.path), self.replica, 'read_iter')
+            self.addCleanup(value.close)
+            self.assertEqual(value.read(4096 + 17, 300), self.data[17:317])
+            mapping.assert_not_called()
+            self.validator.side_effect = ValueError('DAX changed')
+            with mock.patch.object(host_dax.os, 'pread') as pread:
+                with self.assertRaisesRegex(ValueError, 'DAX changed'):
+                    value.read(4096, 1)
+                pread.assert_not_called()
+
+    def test_read_iter_short_read_does_not_retry_or_fallback(self):
+        value = host_dax.StoredDaxMapping(str(self.path), self.replica, 'read_iter')
+        self.addCleanup(value.close)
+        with mock.patch.object(host_dax.os, 'pread', return_value=b'') as pread:
+            with self.assertRaisesRegex(OSError, 'Short Host DAX'):
+                value.read(4096, 10)
+            pread.assert_called_once()
+
+    def test_read_iter_catalog_is_explicit_and_legacy_keeps_mmap(self):
+        for version, expected in [(1, 'mmap'), (2, 'read_iter')]:
+            catalog = self.catalog()
+            if version == 2:
+                catalog.update(version=2, access='read_iter')
+            with mock.patch.object(host_dax, 'StoredDaxMapping') as mapping:
+                host_dax.open_publication(catalog)
+                self.assertEqual(mapping.call_args.args[2], expected)
+        catalog.update(access='auto')
+        with self.assertRaises(ValueError):
+            host_dax.open_publication(catalog)
 
     def test_read_ranges_cover_header_gap_payload_and_padding(self):
         value = self.mapping()

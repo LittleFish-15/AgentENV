@@ -24,8 +24,11 @@ class StoredDaxMapping:
     mappingBytes is the legacy broker protocol's logical padded length, NOT
     the DAX extent size, physical allocation, or a measured UB footprint.
     """
-    def __init__(self, path, replica):
+    def __init__(self, path, replica, access='mmap'):
         replica.validate()
+        if access not in ('mmap', 'read_iter'):
+            raise ValueError('Unknown Host DAX access mode')
+        self.access = access
         if replica.allowRepositoryFallback:
             raise ValueError('Host DAX requires repository fallback disabled')
         source = Path(path)
@@ -39,7 +42,8 @@ class StoredDaxMapping:
             self.fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
             # Reject ordinary cached files BEFORE mmap, hashing or data reads.
             self.observed = fsdax.validate_fd(self.fd, replica.fileBytes)
-            self.mapping = mmap.mmap(self.fd, replica.fileBytes, access=mmap.ACCESS_READ)
+            if access == 'mmap':
+                self.mapping = mmap.mmap(self.fd, replica.fileBytes, access=mmap.ACCESS_READ)
             stored.verify_mapping(replica, self)
             fsdax.validate_fd(self.fd, replica.fileBytes)
         except BaseException:
@@ -52,7 +56,7 @@ class StoredDaxMapping:
                 or offset > self.replica.mappingBytes
                 or count > self.replica.mappingBytes - offset):
             raise ValueError('Read outside bounded stored DAX mapping')
-        if self.mapping is None:
+        if self.fd is None:
             raise RuntimeError('Stored DAX mapping is closed')
         if not count:
             return b''
@@ -60,16 +64,27 @@ class StoredDaxMapping:
         # Normal broker reads take this branch; no retained payload cache.
         data_end = stored.HEADER_BYTES + self.replica.fileBytes
         if offset >= stored.HEADER_BYTES and end <= data_end:
-            return self.mapping[offset - stored.HEADER_BYTES:end - stored.HEADER_BYTES]
+            return self.read_payload(offset - stored.HEADER_BYTES, count)
         result = bytearray(count)
         header_end = min(end, len(self.header))
         if offset < header_end:
             result[:header_end - offset] = self.header[offset:header_end]
         start, stop = max(offset, stored.HEADER_BYTES), min(end, data_end)
         if start < stop:
-            result[start - offset:stop - offset] = self.mapping[
-                start - stored.HEADER_BYTES:stop - stored.HEADER_BYTES]
+            result[start - offset:stop - offset] = self.read_payload(
+                start - stored.HEADER_BYTES, stop - start)
         return bytes(result)
+
+    def read_payload(self, offset, count):
+        if self.access == 'mmap':
+            return self.mapping[offset:offset + count]
+        # On an active S_DAX inode this enters filesystem DAX read_iter, not
+        # generic buffered reads. No fallback from failed mmap or changed DAX.
+        fsdax.validate_fd(self.fd, self.replica.fileBytes)
+        data = os.pread(self.fd, count, offset)
+        if len(data) != count:
+            raise OSError('Short Host DAX read_iter read; no cached fallback')
+        return data
 
     def close(self):
         if self.mapping is not None:
@@ -81,10 +96,15 @@ class StoredDaxMapping:
 
 
 def open_publication(catalog):
-    if (not isinstance(catalog, dict) or set(catalog) != {'version', 'files'}
-            or type(catalog['version']) is not int or catalog['version'] != 1
+    if (not isinstance(catalog, dict) or type(catalog.get('version')) is not int
+            or catalog['version'] not in (1, 2)
+            or set(catalog) != ({'version', 'files'} if catalog['version'] == 1
+                                else {'version', 'files', 'access'})
             or not isinstance(catalog['files'], list) or not 1 <= len(catalog['files']) <= 64):
-        raise ValueError('Expected Host DAX stored publication version1/files')
+        raise ValueError('Expected explicit Host DAX stored publication')
+    access = 'mmap' if catalog['version'] == 1 else catalog['access']
+    if catalog['version'] == 2 and access != 'read_iter':
+        raise ValueError('Version2 requires explicit read_iter access')
     replicas, paths = [], []
     for item in catalog['files']:
         if not isinstance(item, dict) or set(item) != {'path', 'replica'} or not isinstance(item['path'], str):
@@ -102,7 +122,7 @@ def open_publication(catalog):
     mappings = []
     try:
         for path, replica in zip(paths, replicas):
-            mappings.append(StoredDaxMapping(path, replica))
+            mappings.append(StoredDaxMapping(path, replica, access))
         return replicas, mappings
     except BaseException:
         for mapping in mappings:
@@ -140,7 +160,7 @@ def main():
         broker.start(replicas[0].brokerSocket)
         atomic_json(output, stored.index_for(replicas))
         print(json.dumps({'state': 'serving', 'source': 'host-fsdax-stored-lowers',
-            'files': [m.observed for m in mappings], 'payloadCache': False,
+            'files': [m.observed for m in mappings], 'access': mappings[0].access, 'payloadCache': False,
             'repositoryFallback': False, 'GuestDax': False,
             'crossNodePhysicalIdentityAccepted': False,
             'catalogSha256': hashlib.sha256(raw).hexdigest(),
