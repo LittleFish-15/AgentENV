@@ -51,53 +51,123 @@ pub fn validate_demand_rootfs_manifest(
     use std::io::Read;
     ensure!(path.is_absolute(), "demand manifest must be absolute");
     let mut raw = Vec::new();
-    std::fs::File::open(path)?.take(16 * 1024 * 1024 + 1).read_to_end(&mut raw)?;
+    std::fs::File::open(path)?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut raw)?;
     ensure!(raw.len() <= 16 * 1024 * 1024, "demand manifest too large");
     crate::backend::ub_protocol::hex_bytes::<32>(expected_sha256)?;
-    ensure!(format!("{:x}", Sha256::digest(&raw)) == expected_sha256, "demand manifest SHA256 differs");
+    ensure!(
+        format!("{:x}", Sha256::digest(&raw)) == expected_sha256,
+        "demand manifest SHA256 differs"
+    );
     let manifest: DemandManifest = serde_json::from_slice(&raw)?;
-    ensure!(manifest.format == "aenv-ub-lazy-v2", "unexpected demand manifest format");
+    ensure!(
+        manifest.format == "aenv-ub-lazy-v2",
+        "unexpected demand manifest format"
+    );
     crate::backend::ub_protocol::hex_bytes::<16>(&manifest.cache_id)?;
-    let pool_name = manifest.pool.object_name.strip_prefix("aenv_").context("invalid pool name")?;
+    let pool_name = manifest
+        .pool
+        .object_name
+        .strip_prefix("aenv_")
+        .context("invalid pool name")?;
     crate::backend::ub_protocol::hex_bytes::<16>(pool_name)?;
-    ensure!((4 * 1024 * 1024..=4 * 1024 * 1024 * 1024u64).contains(&manifest.pool.mapping_bytes)
-        && manifest.pool.mapping_bytes % (4 * 1024 * 1024) == 0, "invalid bounded pool capacity");
-    ensure!(manifest.readers.first().is_some_and(|s| s == "owner")
-        && manifest.readers.iter().collect::<HashSet<_>>().len() == manifest.readers.len(), "invalid demand readers");
-    ensure!(manifest.catalog.version == 1 && manifest.catalog.chunk_bytes == 65536
-        && (1..=64).contains(&manifest.catalog.layers.len()), "invalid stored-byte chunk catalog");
+    ensure!(
+        (4 * 1024 * 1024..=4 * 1024 * 1024 * 1024u64).contains(&manifest.pool.mapping_bytes)
+            && manifest.pool.mapping_bytes.is_multiple_of(4 * 1024 * 1024),
+        "invalid bounded pool capacity"
+    );
+    ensure!(
+        manifest.readers.first().is_some_and(|s| s == "owner")
+            && manifest.readers.iter().collect::<HashSet<_>>().len() == manifest.readers.len(),
+        "invalid demand readers"
+    );
+    ensure!(
+        manifest.catalog.version == 1
+            && manifest.catalog.chunk_bytes == 65536
+            && (1..=64).contains(&manifest.catalog.layers.len()),
+        "invalid stored-byte chunk catalog"
+    );
     let mut layers = HashMap::new();
     let mut chunks = 0usize;
     for layer in &manifest.catalog.layers {
-        ensure!(layer.file_bytes > 0 && layer.file_bytes < (1u64 << 63)
-            && layer.chunks.len() as u64 == layer.file_bytes.div_ceil(65536), "invalid chunk coverage");
+        ensure!(
+            layer.file_bytes > 0
+                && layer.file_bytes < (1u64 << 63)
+                && layer.chunks.len() as u64 == layer.file_bytes.div_ceil(65536),
+            "invalid chunk coverage"
+        );
         for digest in std::iter::once(&layer.digest).chain(&layer.chunks) {
-            crate::backend::ub_protocol::hex_bytes::<32>(digest.strip_prefix("sha256:").context("invalid chunk digest")?)?;
+            crate::backend::ub_protocol::hex_bytes::<32>(
+                digest
+                    .strip_prefix("sha256:")
+                    .context("invalid chunk digest")?,
+            )?;
         }
         chunks += layer.chunks.len();
-        ensure!(chunks <= 200000 && layers.insert(layer.digest.clone(), layer).is_none(), "duplicate/oversized chunk catalog");
+        ensure!(
+            chunks <= 200000 && layers.insert(layer.digest.clone(), layer).is_none(),
+            "duplicate/oversized chunk catalog"
+        );
     }
-    ensure!(manifest.virtual_layers.len() == layers.len(), "demand virtual layer count differs");
+    ensure!(
+        manifest.virtual_layers.len() == layers.len(),
+        "demand virtual layer count differs"
+    );
     let mut virtuals = HashMap::new();
     let mut objects = HashSet::new();
     for value in &manifest.virtual_layers {
         let mut value = value.clone();
-        let fields = value.as_object_mut().context("virtual layer is not an object")?;
-        ensure!(!fields.contains_key("brokerSocket"), "portable demand manifest contains node socket");
-        fields.insert("brokerSocket".into(), std::env::temp_dir().join("aenv-demand-manifest.sock").to_string_lossy().into_owned().into());
+        let fields = value
+            .as_object_mut()
+            .context("virtual layer is not an object")?;
+        ensure!(
+            !fields.contains_key("brokerSocket"),
+            "portable demand manifest contains node socket"
+        );
+        fields.insert(
+            "brokerSocket".into(),
+            std::env::temp_dir()
+                .join("aenv-demand-manifest.sock")
+                .to_string_lossy()
+                .into_owned()
+                .into(),
+        );
         let replica: UbLayerRef = serde_json::from_value(value)?;
         replica.validate()?;
-        ensure!(replica.generation == manifest.cache_id && !replica.allow_repository_fallback
-            && replica.object_name != manifest.pool.object_name && objects.insert(replica.object_name.clone()), "demand generation/object differs");
-        let layer = layers.get(&replica.layer_digest).context("virtual layer missing from catalog")?;
-        ensure!(replica.file_bytes == layer.file_bytes && virtuals.insert(replica.layer_digest.clone(), replica).is_none(), "virtual layer identity differs");
+        ensure!(
+            replica.generation == manifest.cache_id
+                && !replica.allow_repository_fallback
+                && replica.object_name != manifest.pool.object_name
+                && objects.insert(replica.object_name.clone()),
+            "demand generation/object differs"
+        );
+        let layer = layers
+            .get(&replica.layer_digest)
+            .context("virtual layer missing from catalog")?;
+        ensure!(
+            replica.file_bytes == layer.file_bytes
+                && virtuals
+                    .insert(replica.layer_digest.clone(), replica)
+                    .is_none(),
+            "virtual layer identity differs"
+        );
     }
     ensure!(!image.lowers.is_empty(), "empty demand rootfs");
     for lower in &image.lowers {
-        let actual = lower.ub.as_ref().context("demand rootfs missing UB binding")?;
-        let mut expected = virtuals.get(&lower.digest).context("rootfs not in pinned demand catalog")?.clone();
+        let actual = lower
+            .ub
+            .as_ref()
+            .context("demand rootfs missing UB binding")?;
+        let mut expected = virtuals
+            .get(&lower.digest)
+            .context("rootfs not in pinned demand catalog")?
+            .clone();
         expected.broker_socket = actual.broker_socket.clone();
-        ensure!(actual == &expected && lower.size == expected.file_bytes, "actual rootfs demand binding differs");
+        ensure!(
+            actual == &expected && lower.size == expected.file_bytes,
+            "actual rootfs demand binding differs"
+        );
     }
     Ok(())
 }
@@ -1676,7 +1746,10 @@ mod ub_tests {
         let path = directory.path().join("demand.json");
         let reference = replica();
         let mut virtual_layer = serde_json::to_value(&reference).unwrap();
-        virtual_layer.as_object_mut().unwrap().remove("brokerSocket");
+        virtual_layer
+            .as_object_mut()
+            .unwrap()
+            .remove("brokerSocket");
         let manifest = serde_json::json!({
             "format":"aenv-ub-lazy-v2", "cacheId":reference.generation,
             "pool":{"objectName":format!("aenv_{}", "f".repeat(32)), "mappingBytes":8388608},
@@ -1690,30 +1763,36 @@ mod ub_tests {
         let original = config.clone();
         let write = |value: &serde_json::Value| {
             let bytes = serde_json::to_vec(value).unwrap();
-            let hash = format!("{:x}",Sha256::digest(&bytes));
-            std::fs::write(&path,bytes).unwrap();
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            std::fs::write(&path, bytes).unwrap();
             hash
         };
         let pin = write(&manifest);
-        validate_demand_rootfs_manifest(&config,&path,&pin).unwrap();
-        assert_eq!(config,original);
-        assert!(validate_demand_rootfs_manifest(&config,&path,&"0".repeat(64)).is_err());
+        validate_demand_rootfs_manifest(&config, &path, &pin).unwrap();
+        assert_eq!(config, original);
+        assert!(validate_demand_rootfs_manifest(&config, &path, &"0".repeat(64)).is_err());
         for (pointer, value) in [
             ("/cacheId", serde_json::json!("e".repeat(32))),
             ("/pool/objectName", serde_json::json!(reference.object_name)),
             ("/pool/mappingBytes", serde_json::json!(0)),
             ("/catalog/chunkBytes", serde_json::json!(4096)),
             ("/catalog/layers/0/chunks", serde_json::json!([])),
-            ("/virtualLayers/0/allowRepositoryFallback", serde_json::json!(true)),
+            (
+                "/virtualLayers/0/allowRepositoryFallback",
+                serde_json::json!(true),
+            ),
         ] {
             let mut invalid = manifest.clone();
             *invalid.pointer_mut(pointer).unwrap() = value;
             let pin = write(&invalid);
-            assert!(validate_demand_rootfs_manifest(&config,&path,&pin).is_err(),"{pointer}");
+            assert!(
+                validate_demand_rootfs_manifest(&config, &path, &pin).is_err(),
+                "{pointer}"
+            );
         }
         let pin = write(&manifest);
         config.lowers[0].ub.as_mut().unwrap().generation = "d".repeat(32);
-        assert!(validate_demand_rootfs_manifest(&config,&path,&pin).is_err());
+        assert!(validate_demand_rootfs_manifest(&config, &path, &pin).is_err());
     }
 
     #[test]
