@@ -229,6 +229,10 @@ auto_resume_min_sandbox_timeout_secs = 300
 # Memory snapshots and the Guest private upper are not redirected by this mode.
 # ub_rootfs_index = "/var/lib/aenv/ub/rootfs/runtime-index.json"
 # ub_rootfs_index_sha256 = "sha256:<64 lowercase hexadecimal characters>"
+# Demand mode additionally pins the single shared pool and virtual-layer catalog.
+# These fields are absent in the preserved full-object deployment.
+# ub_rootfs_demand_manifest = "/var/lib/aenv/ub-demand/manifest.json"
+# ub_rootfs_demand_manifest_sha256 = "<64 lowercase hexadecimal characters>"
 # Node-local cache for snapshot artifacts.
 # local_cache_path = "$AENV_HOME/snapshot-local-cache"
 

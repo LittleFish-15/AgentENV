@@ -274,10 +274,12 @@ def main():
         if output.exists() or output.is_symlink():
             raise ValueError('Offline catalog output already exists')
         sources = stored.source_layers(args.image, source_root=args.source_root)
-        value = lazy.prepare(sources)
+        value = lazy.prepare_direct(sources, args.source_root)
         atomic_json(output, value)
         print(json.dumps({'state': 'offline_catalog_prepared_no_sdk', 'layers': len(value['layers']),
-                          'catalogSha256': service.identity_bytes(output)}))
+                          'catalogSha256': service.identity_bytes(output),
+                          'sourceReadMode': 'O_DIRECT_no_buffered_fallback',
+                          'catalogScansFullSources': True, 'poolPayloadFilledBytes': 0}))
         return 0
     if args.command in ('status', 'retire', 'residency'):
         service.ordinary_linux()

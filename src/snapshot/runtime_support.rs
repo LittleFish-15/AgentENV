@@ -247,6 +247,16 @@ pub(crate) fn ub_replica_index(kind: &str) -> RepositoryResult<Option<PathBuf>> 
     let legacy = std::env::var_os(variable).map(PathBuf::from);
     if kind == "rootfs" {
         let policy = &crate::cfg::ConfigManager::global_config().snapshot;
+        let demand = policy.ub_rootfs_demand_manifest.is_some()
+            || policy.ub_rootfs_demand_manifest_sha256.is_some();
+        if demand && (policy.ub_rootfs_index.is_none()
+            || policy.ub_rootfs_index_sha256.is_none()
+            || policy.ub_rootfs_demand_manifest.as_ref().is_none_or(|p| !p.is_absolute())
+            || policy.ub_rootfs_demand_manifest_sha256.is_none())
+        {
+            return Err(RepositoryError::backend("invalid demand rootfs UB policy",
+                anyhow::anyhow!("demand mode requires absolute manifest/index paths and both SHA256 pins")));
+        }
         if let Some(index) = &policy.ub_rootfs_index {
             if !index.is_absolute()
                 || policy.ub_rootfs_index_sha256.is_none()
@@ -278,6 +288,12 @@ fn required_rootfs_index_hash(kind: &str) -> Option<String> {
         .and(policy.ub_rootfs_index_sha256.clone())
 }
 
+fn demand_rootfs_manifest(kind: &str) -> Option<(PathBuf, String)> {
+    if kind != "rootfs" { return None; }
+    let policy = &crate::cfg::ConfigManager::global_config().snapshot;
+    policy.ub_rootfs_demand_manifest.clone().zip(policy.ub_rootfs_demand_manifest_sha256.clone())
+}
+
 pub(crate) fn bind_ub_runtime_layers(
     image: &mut ImageConfig,
     kind: &str,
@@ -285,11 +301,17 @@ pub(crate) fn bind_ub_runtime_layers(
     let Some(index) = ub_replica_index(kind)? else {
         return Ok(false);
     };
+    let mut candidate = image.clone();
     match required_rootfs_index_hash(kind) {
-        Some(hash) => overlaybd::config::bind_required_ub_layer_replicas(image, &index, &hash),
-        None => overlaybd::config::bind_ub_layer_replicas(image, &index),
+        Some(hash) => overlaybd::config::bind_required_ub_layer_replicas(&mut candidate, &index, &hash),
+        None => overlaybd::config::bind_ub_layer_replicas(&mut candidate, &index),
     }
     .map_err(|error| RepositoryError::backend("bind UB runtime layers", error))?;
+    if let Some((path, hash)) = demand_rootfs_manifest(kind) {
+        overlaybd::config::validate_demand_rootfs_manifest(&candidate, &path, &hash)
+            .map_err(|error| RepositoryError::backend("validate demand rootfs pool", error))?;
+    }
+    *image = candidate;
     Ok(true)
 }
 
@@ -302,9 +324,17 @@ pub(crate) async fn resolve_ub_runtime_config(
     };
     let source = source.to_path_buf();
     let required_hash = required_rootfs_index_hash(kind);
-    tokio::task::spawn_blocking(move || match required_hash {
-        Some(hash) => overlaybd::config::required_ub_runtime_config_view(&source, &index, &hash),
-        None => overlaybd::config::ub_runtime_config_view(&source, &index),
+    let demand = demand_rootfs_manifest(kind);
+    tokio::task::spawn_blocking(move || {
+        let path = match required_hash {
+            Some(hash) => overlaybd::config::required_ub_runtime_config_view(&source, &index, &hash),
+            None => overlaybd::config::ub_runtime_config_view(&source, &index),
+        }?;
+        if let Some((manifest, hash)) = demand {
+            let config = overlaybd::config::load_image_config(&path)?;
+            overlaybd::config::validate_demand_rootfs_manifest(&config, &manifest, &hash)?;
+        }
+        Ok::<PathBuf, anyhow::Error>(path)
     })
     .await
     .map_err(|error| RepositoryError::backend("join UB runtime config binding", error))?

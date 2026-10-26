@@ -355,6 +355,10 @@ pub struct SnapshotConfig {
     /// Memory snapshot behavior is independent and remains unchanged.
     pub ub_rootfs_index: Option<PathBuf>,
     pub ub_rootfs_index_sha256: Option<String>,
+    /// Demand mode additionally pins the shared pool and its virtual layers.
+    /// Absent for the independently preserved full-object mode.
+    pub ub_rootfs_demand_manifest: Option<PathBuf>,
+    pub ub_rootfs_demand_manifest_sha256: Option<String>,
     #[config(
         env = "AENV_SNAPSHOT_LOCAL_CACHE_PATH",
         parse_env = parse_required_path,

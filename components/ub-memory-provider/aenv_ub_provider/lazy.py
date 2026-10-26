@@ -84,6 +84,62 @@ def file_identity(meta):
     return meta.st_dev, meta.st_ino, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns
 
 
+def direct_range(fd, identity, offset, count):
+    """Read one aligned stored-byte range, never retry through buffered I/O."""
+    if (type(offset) is not int or offset < 0 or offset % CHUNK
+            or type(count) is not int or not 0 < count <= CHUNK
+            or file_identity(os.fstat(fd)) != identity):
+        raise ValueError('Direct source identity changed or range is invalid')
+    aligned = (count + 4095) // 4096 * 4096
+    with mmap.mmap(-1, aligned) as buffer:
+        got = os.preadv(fd, [buffer], offset)
+        if got != count or file_identity(os.fstat(fd)) != identity:
+            raise ValueError('Short/changed direct source read')
+        return buffer[:count]
+
+
+def prepare_direct(sources, root):
+    """Hash stored chunks through O_DIRECT before publication; allocates no UB.
+
+    This still scans complete source files to establish the pinned catalog.
+    It does not populate the demand pool and has no ordinary-read fallback.
+    """
+    import stat
+    contract.linux_only()
+    root = Path(root)
+    if root.resolve(strict=True) != root or not root.is_dir() or not 1 <= len(sources) <= 64:
+        raise ValueError('Expected a canonical source root and bounded layer set')
+    layers, blocks = [], 0
+    for expected, (source, size) in sources.items():
+        path = Path(source)
+        if (not sha(expected) or type(size) is not int or not 0 < size < 2**63
+                or path.resolve(strict=True) != path or not path.is_relative_to(root)):
+            raise ValueError('Invalid direct catalog source identity/path')
+        blocks += (size + CHUNK - 1) // CHUNK
+        if blocks > 200000:
+            raise ValueError('Lazy catalog chunk count exceeds bounded metadata limit')
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECT | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            meta = os.fstat(fd)
+            if not stat.S_ISREG(meta.st_mode) or meta.st_size != size:
+                raise ValueError('Direct catalog source size/type differs')
+            identity = file_identity(meta)
+            total, chunks = hashlib.sha256(), []
+            for offset in range(0, size, CHUNK):
+                data = direct_range(fd, identity, offset, min(CHUNK, size - offset))
+                total.update(data); chunks.append(digest(data))
+            if file_identity(os.fstat(fd)) != identity or 'sha256:' + total.hexdigest() != expected:
+                raise ValueError('Direct catalog source changed or committed digest differs')
+        finally:
+            os.close(fd)
+        layers.append({'digest': expected, 'fileBytes': size, 'chunks': chunks, 'path': str(path)})
+    value = {'version': 1, 'chunkBytes': CHUNK, 'layers': layers}
+    catalog(value, paths=True)
+    if len(contract.canonical(value)) > MAX_CATALOG:
+        raise ValueError('Lazy catalog exceeds bounded serialized size')
+    return value
+
+
 class DirectSources:
     """Linux O_DIRECT range reads avoid populating the source file pagecache.
 
@@ -118,16 +174,9 @@ class DirectSources:
         fd, expected = self.files[key]
         offset = block * CHUNK
         count = min(CHUNK, layer['fileBytes'] - offset)
-        if not 0 < count <= CHUNK or file_identity(os.fstat(fd)) != expected:
-            raise ValueError('Lazy source identity changed or range is invalid')
         # Anonymous mmap supplies a page-aligned temporary I/O buffer, not a
         # mapping of the source file. Last-file reads may return a short tail.
-        aligned = (count + 4095) // 4096 * 4096
-        with mmap.mmap(-1, aligned) as buffer:
-            got = os.preadv(fd, [buffer], offset)
-            if got != count or file_identity(os.fstat(fd)) != expected:
-                raise ValueError('Short/changed direct source read')
-            return buffer[:count]
+        return direct_range(fd, expected, offset, count)
 
     def close(self):
         while self.files:
@@ -156,8 +205,11 @@ class Cache:
         self.observation = None
         self.clock = self.loading = 0
         self.frozen = self.poisoned = False
+        # Bounded by the validated catalog's 200000 chunks, never payload data.
+        self.filled = set()
         self.stats = {'hits': 0, 'misses': 0, 'waits': 0, 'evictions': 0,
-                      'backendBytes': 0, 'fillErrors': 0}
+                      'backendBytes': 0, 'fillErrors': 0, 'firstFills': 0,
+                      'refills': 0, 'successfulFills': 0, 'waitNs': 0}
 
     def save(self):
         try:
@@ -297,7 +349,9 @@ class Cache:
                 if remaining <= 0:
                     raise TimeoutError('Waiting for a concurrent chunk fill timed out')
                 self.stats['waits'] += 1
+                wait_started = time.monotonic_ns()
                 self.condition.wait(remaining)
+                self.stats['waitNs'] += time.monotonic_ns() - wait_started
         try:
             data = self.source(layer, block)
             with self.condition:
@@ -311,6 +365,9 @@ class Cache:
             with self.condition:
                 self.loading -= 1
                 entry.state = 'ready'
+                self.stats['successfulFills'] += 1
+                self.stats['refills' if key in self.filled else 'firstFills'] += 1
+                self.filled.add(key)
                 result = self.pin(reader, key, entry)
                 self.condition.notify_all()
                 return result
