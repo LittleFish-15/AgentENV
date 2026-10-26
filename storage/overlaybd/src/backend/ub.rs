@@ -441,6 +441,20 @@ mod tests {
 
     /// A wire fault injector, not an SDK substitute: actual SDK tests are separate.
     fn serve_once(path: &str, data: Vec<u8>, fail_second: bool) -> std::thread::JoinHandle<usize> {
+        serve_named(
+            path,
+            data,
+            fail_second,
+            "aenv_0123456789abcdef0123456789abcdef".into(),
+        )
+    }
+
+    fn serve_named(
+        path: &str,
+        data: Vec<u8>,
+        fail_second: bool,
+        expected_name: String,
+    ) -> std::thread::JoinHandle<usize> {
         let listener = UnixListener::bind(path).unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -457,7 +471,7 @@ mod tests {
             assert_eq!(name_len, 37);
             let mut identity = vec![0; name_len + 16 + 8 + 8 + 32];
             stream.read_exact(&mut identity).unwrap();
-            assert_eq!(&identity[..name_len], b"aenv_0123456789abcdef0123456789abcdef");
+            assert_eq!(&identity[..name_len], expected_name.as_bytes());
             response(&mut stream, 0).unwrap();
             let mut requests = 0;
             loop {
@@ -600,5 +614,76 @@ mod tests {
         assert!(!server.is_finished());
         drop(two);
         assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_permits_hold_each_full_set_broker_until_last_guest() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let a = b"retained full layer".to_vec();
+        let b = b"new full layer".to_vec();
+        let old = replica(first.path(), &a, false);
+        let mut added = replica(second.path(), &b, false);
+        added.object_name = "aenv_fedcba9876543210fedcba9876543210".into();
+        added.generation = "fedcba9876543210fedcba9876543210".into();
+        let image = crate::config::ImageConfig {
+            lowers: [&old, &added]
+                .into_iter()
+                .map(|r| crate::config::LayerConfig {
+                    ub: Some(r.clone()),
+                    digest: r.layer_digest.clone(),
+                    size: r.file_bytes,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let path = first.path().join("image.json");
+        std::fs::write(&path, serde_json::to_vec(&image).unwrap()).unwrap();
+        let old_server = serve_once(&old.broker_socket, a.clone(), false);
+        let new_server = serve_named(
+            &added.broker_socket,
+            b.clone(),
+            false,
+            added.object_name.clone(),
+        );
+        let one = RuntimeReadLeases::acquire(&path).unwrap().unwrap();
+        let two = RuntimeReadLeases::acquire(&path).unwrap().unwrap();
+        one.verify_runtime_image(&path).unwrap();
+        drop(one);
+        for (reference, bytes) in [(&old, &a), (&added, &b)] {
+            let file = UbLayerFile::open(reference, None).await.unwrap();
+            assert_eq!(file.read_at(0, bytes.len()).await.unwrap().as_ref(), bytes);
+        }
+        assert!(!old_server.is_finished());
+        assert!(!new_server.is_finished());
+        drop(two);
+        assert_eq!(old_server.join().unwrap(), 1);
+        assert_eq!(new_server.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn full_set_missing_broker_does_not_leak_partial_runtime_permits() {
+        let first = tempfile::tempdir().unwrap();
+        let absent = tempfile::tempdir().unwrap();
+        let old = replica(first.path(), b"retained", false);
+        let missing = replica(absent.path(), b"missing", false);
+        let image = crate::config::ImageConfig {
+            lowers: [&old, &missing]
+                .into_iter()
+                .map(|r| crate::config::LayerConfig {
+                    ub: Some(r.clone()),
+                    digest: r.layer_digest.clone(),
+                    size: r.file_bytes,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let path = first.path().join("image.json");
+        std::fs::write(&path, serde_json::to_vec(&image).unwrap()).unwrap();
+        let server = serve_once(&old.broker_socket, b"retained".to_vec(), false);
+        assert!(RuntimeReadLeases::acquire(&path).is_err());
+        assert_eq!(server.join().unwrap(), 0);
     }
 }
