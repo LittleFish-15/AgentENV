@@ -12,6 +12,29 @@ from test_lazy_cache import Harness
 
 
 class DirectCatalog(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Native Linux O_DIRECT validation required')
+    def test_native_direct_catalog_and_partial_tail(self):
+        """Own scratch file only; this is not a PageCache or UB benefit test."""
+        import fcntl
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / 'direct-source'
+            data = b'A' * lazy.CHUNK + b'T' * 137
+            with path.open('xb') as stream:
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            key = lazy.digest(data)
+            value = lazy.prepare_direct({key: (path, len(data))}, root)
+            self.assertEqual(value['layers'][0]['chunks'],
+                             [lazy.digest(data[:lazy.CHUNK]), lazy.digest(data[lazy.CHUNK:])])
+            source = lazy.DirectSources(value, root)
+            try:
+                fd, _ = source.files[key]
+                self.assertTrue(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_DIRECT)
+                self.assertEqual(source.read(key, 0), data[:lazy.CHUNK])
+                self.assertEqual(source.read(key, 1), data[lazy.CHUNK:])
+            finally:
+                source.close()
+
     def test_catalog_uses_direct_reader_and_checks_complete_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
