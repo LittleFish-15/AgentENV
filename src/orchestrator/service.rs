@@ -114,6 +114,9 @@ pub struct Orchestrator<
     factory: F,
     persister: P,
     sandboxes: RwLock<HashMap<SandboxId, SandboxHandle>>,
+    // An identity conflict must not replace a newer runtime or drop the old
+    // runtime's UB/device ownership after an unconfirmed stop.
+    unresolved_launch_handles: Mutex<Vec<(SandboxId, SandboxHandle)>>,
     template_build_ids: RwLock<HashSet<SandboxId>>,
     deletions: Mutex<HashMap<SandboxId, Arc<Mutex<DeleteProgress>>>>,
     proxy_routes: RwLock<ProxyRouteTable>,
@@ -233,6 +236,7 @@ where
             factory,
             persister,
             sandboxes: RwLock::new(HashMap::new()),
+            unresolved_launch_handles: Mutex::new(Vec::new()),
             template_build_ids: RwLock::new(HashSet::new()),
             deletions: Mutex::new(HashMap::new()),
             proxy_routes: RwLock::new(ProxyRouteTable::default()),
@@ -367,7 +371,7 @@ where
 
     /// Snapshot the running set's local runtime artifacts for maintenance.
     async fn collect_running_artifacts(&self) -> Vec<(SandboxId, RuntimeArtifactSet)> {
-        let handles = {
+        let mut handles = {
             self.sandboxes
                 .read()
                 .await
@@ -375,15 +379,26 @@ where
                 .map(|(sandbox_id, handle)| (*sandbox_id, Arc::clone(handle)))
                 .collect::<Vec<_>>()
         };
-        let mut running = Vec::with_capacity(handles.len());
+        handles.extend(self.unresolved_launch_handles.lock().await.iter().cloned());
+        let mut running: HashMap<SandboxId, Vec<std::path::PathBuf>> = HashMap::new();
         for (sandbox_id, handle) in handles {
             let artifacts = {
                 let sandbox = handle.lock().await;
                 sandbox.runtime_info().runtime_artifacts
             };
-            running.push((sandbox_id, artifacts));
+            running
+                .entry(sandbox_id)
+                .or_default()
+                .extend(artifacts.into_overlaybd_image_config_paths());
         }
         running
+            .into_iter()
+            .map(|(id, mut paths)| {
+                paths.sort();
+                paths.dedup();
+                (id, RuntimeArtifactSet::from_overlaybd_image_configs(paths))
+            })
+            .collect()
     }
 
     /// Fail-closed startup reconcile before maintenance can run: durably protect
@@ -1084,6 +1099,17 @@ where
     )]
     async fn delete_sandbox_inner(self: &Arc<Self>, sandbox_id: SandboxId) -> Result<()> {
         info!("deleting sandbox");
+        if self
+            .unresolved_launch_handles
+            .lock()
+            .await
+            .iter()
+            .any(|(id, _)| *id == sandbox_id)
+        {
+            return Err(OrchestratorError::InternalError(format!(
+                "sandbox {sandbox_id} has unresolved failed-launch ownership; reconciliation required"
+            )));
+        }
         let deletion = self.deletion_progress(sandbox_id).await;
         let mut progress = deletion.lock().await;
         match *progress {
@@ -1348,6 +1374,8 @@ where
             warn!(error = ?err, "failed to delete persisted sandbox state");
         }
         self.release_image_refs(RuntimeImageOwner::PausedSandbox(sandbox_id))
+            .await;
+        self.release_image_refs(RuntimeImageOwner::StartingSandbox(sandbox_id))
             .await;
         self.deletions.lock().await.remove(&sandbox_id);
         info!("sandbox deleted");
@@ -2430,6 +2458,14 @@ where
             warn!(error = %format_args!("{source:#}"), "failed to start sandbox");
             if let Err(stop_err) = sandbox.stop().await {
                 warn!(error = %format_args!("{stop_err:#}"), "failed to stop sandbox after start failure");
+                self.retain_failed_launch(&plan, Arc::new(Mutex::new(sandbox)), transitional_state)
+                    .await;
+                return Err(OrchestratorError::SandboxOperationFailed {
+                    sandbox_id,
+                    operation: SandboxOperation::Start,
+                    source: source
+                        .context(format!("stop also failed; runtime retained: {stop_err:#}")),
+                });
             }
             self.rollback_failed_launch_metadata(&plan, transitional_state)
                 .await;
@@ -2446,6 +2482,9 @@ where
             info!("orchestrator started shutting down just after starting the sandbox");
             if let Err(err) = sandbox.stop().await {
                 warn!(error = %format_args!("{err:#}"), "failed to stop sandbox");
+                self.retain_failed_launch(&plan, Arc::new(Mutex::new(sandbox)), transitional_state)
+                    .await;
+                return Err(OrchestratorError::ShuttingDown);
             }
             self.rollback_failed_launch_metadata(&plan, transitional_state)
                 .await;
@@ -2597,6 +2636,25 @@ where
         handle: SandboxHandle,
         stage: FailedLaunchStage,
     ) {
+        // Keep the runtime discoverable, including its UB read permits and
+        // private devices, until the backend confirms that it stopped.
+        let stop_result = {
+            let mut sandbox = handle.lock().await;
+            sandbox.stop().await
+        };
+        if let Err(err) = stop_result {
+            warn!(error = %format_args!("{err:#}"), "failed to stop sandbox while rolling back launch");
+            self.retain_failed_launch(
+                plan,
+                handle,
+                stage
+                    .rollback_expected_state(plan)
+                    .unwrap_or(plan.transitional_state()),
+            )
+            .await;
+            return;
+        }
+
         let should_rollback_shared_state = self
             .detach_launch_runtime_if_current(
                 &plan.sandbox_id(),
@@ -2606,15 +2664,6 @@ where
             )
             .await;
 
-        // Stop the sandbox.
-        let stop_result = {
-            let mut sandbox = handle.lock().await;
-            sandbox.stop().await
-        };
-        if let Err(err) = stop_result {
-            warn!(error = %format_args!("{err:#}"), "failed to stop sandbox while rolling back launch");
-        }
-
         if !should_rollback_shared_state {
             return;
         }
@@ -2622,6 +2671,74 @@ where
         if let Some(expected_state) = stage.rollback_expected_state(plan) {
             self.rollback_failed_launch_metadata(plan, expected_state)
                 .await;
+        }
+    }
+
+    /// Retain an unconfirmed launch for an explicit delete/stop retry. This is
+    /// in-process ownership, not a claim of crash-safe hardware reconciliation.
+    async fn retain_failed_launch(
+        &self,
+        plan: &LaunchPlan,
+        handle: SandboxHandle,
+        expected_state: SandboxState,
+    ) {
+        let sandbox_id = plan.sandbox_id();
+        let deletion = self.deletion_progress(sandbox_id).await;
+        let mut progress = deletion.lock().await;
+        let mut sandboxes = self.sandboxes.write().await;
+        if sandboxes
+            .get(&sandbox_id)
+            .is_some_and(|current| !Arc::ptr_eq(current, &handle))
+        {
+            self.unresolved_launch_handles
+                .lock()
+                .await
+                .push((sandbox_id, handle));
+            warn!(%sandbox_id, "failed launch identity conflict; old runtime quarantined, replacement unchanged; manual reconciliation required");
+            return;
+        }
+        sandboxes.insert(sandbox_id, handle.clone());
+        self.proxy_routes.write().await.remove(&sandbox_id);
+
+        let metadata_result = async {
+            if self.store.get(&sandbox_id).await?.is_none() {
+                if let Some(metadata) = plan.transitional_metadata() {
+                    let mut metadata = metadata.clone();
+                    metadata.resources = resources_with_runtime_info(
+                        plan.resources(),
+                        handle.lock().await.runtime_info(),
+                    );
+                    metadata.state = SandboxState::Killing;
+                    self.store.add(metadata).await?;
+                    return Ok::<(), StoreError>(());
+                }
+            }
+            self.store
+                .update_state_if_state(
+                    &sandbox_id,
+                    SandboxState::Killing,
+                    &[expected_state, SandboxState::Killing],
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        match metadata_result {
+            Ok(()) => {
+                // The launch failed: do not capture/publish volumes on retry.
+                *progress = DeleteProgress::Stop {
+                    capture_failed: true,
+                };
+            }
+            Err(err) => {
+                // Keep the handle and image protection even if the metadata
+                // store cannot record Killing. Do not authorize blind release.
+                warn!(%sandbox_id, error = ?err, "runtime retained but failed-cleanup metadata unavailable; reconciliation required");
+                self.unresolved_launch_handles
+                    .lock()
+                    .await
+                    .push((sandbox_id, handle));
+            }
         }
     }
 
@@ -2785,6 +2902,12 @@ where
         const MAX_SHUTDOWN_PASSES: usize = 3;
         let mut last_failures = Vec::new();
 
+        if !self.unresolved_launch_handles.lock().await.is_empty() {
+            return Err(OrchestratorError::InternalError(
+                "unresolved failed-launch identities remain; refusing successful shutdown".into(),
+            ));
+        }
+
         // Preserve recoverable sandboxes by pausing running VMs before process exit.
         for pass in 1..=MAX_SHUTDOWN_PASSES {
             let sandboxes = self
@@ -2821,12 +2944,16 @@ where
                             last_failures.push(format!("{sandbox_id}: {err}"));
                         }
                     }
+                    SandboxState::Killing => {
+                        if let Err(err) = self.delete_sandbox_inner(sandbox_id).await {
+                            last_failures.push(format!("{sandbox_id}: {err}"));
+                        }
+                    }
                     SandboxState::Creating
                     | SandboxState::Snapshotting
                     | SandboxState::Forking
                     | SandboxState::Pausing
-                    | SandboxState::Resuming
-                    | SandboxState::Killing => {
+                    | SandboxState::Resuming => {
                         match self.wait_for_transition(sandbox_id, metadata.state).await {
                             Ok(_) | Err(OrchestratorError::SandboxNotFound(_)) => {}
                             Err(err) => {
@@ -2860,6 +2987,14 @@ where
                 "failed to preserve all sandboxes during shutdown after {MAX_SHUTDOWN_PASSES} passes: {}",
                 last_failures.join(", ")
             )));
+        }
+
+        if !self.unresolved_launch_handles.lock().await.is_empty()
+            || !self.sandboxes.read().await.is_empty()
+        {
+            return Err(OrchestratorError::InternalError(
+                "runtime handles remain after shutdown; reconciliation required".into(),
+            ));
         }
 
         // Clean up remaining network resources.
