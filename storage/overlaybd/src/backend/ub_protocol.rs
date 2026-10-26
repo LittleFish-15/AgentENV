@@ -188,6 +188,19 @@ mod tests {
         Session::open(wire, OBJECT, GENERATION, DIGEST, size, 4 * 1024 * 1024).unwrap()
     }
     #[test]
+    fn open_frame_has_exact_v1_layout_without_trailing_bytes() {
+        let s = session(&[], 10);
+        let frame = &s.stream.outgoing;
+        assert_eq!(frame.len(), 111);
+        assert_eq!(&frame[..8], MAGIC);
+        assert_eq!(&frame[8..10], &37u16.to_be_bytes());
+        assert_eq!(&frame[10..47], OBJECT.as_bytes());
+        assert_eq!(&frame[47..63], &hex_bytes::<16>(GENERATION).unwrap());
+        assert_eq!(&frame[63..71], &10u64.to_be_bytes());
+        assert_eq!(&frame[71..79], &(4 * 1024 * 1024u64).to_be_bytes());
+        assert_eq!(&frame[79..111], &hex_bytes::<32>(DIGEST).unwrap());
+    }
+    #[test]
     fn reads_exact_bytes_and_encodes_offset() {
         let mut s = session(&[reply(0, 3), b"abc".to_vec()].concat(), 10);
         assert!(s.is_healthy());

@@ -447,9 +447,17 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            let mut open = [0; 115]; // exact version1 OPEN after magic/name/identity
-            stream.read_exact(&mut open).unwrap();
-            assert_eq!(&open[..8], MAGIC);
+            // OPEN is magic + u16 name length + name + generation + two
+            // u64 lengths + digest. Read the framing before its payload;
+            // waiting for extra bytes deadlocks against the client's ACK wait.
+            let mut header = [0; 10];
+            stream.read_exact(&mut header).unwrap();
+            assert_eq!(&header[..8], MAGIC);
+            let name_len = u16::from_be_bytes(header[8..10].try_into().unwrap()) as usize;
+            assert_eq!(name_len, 37);
+            let mut identity = vec![0; name_len + 16 + 8 + 8 + 32];
+            stream.read_exact(&mut identity).unwrap();
+            assert_eq!(&identity[..name_len], b"aenv_0123456789abcdef0123456789abcdef");
             response(&mut stream, 0).unwrap();
             let mut requests = 0;
             loop {
