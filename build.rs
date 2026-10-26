@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=AENV_BUILD_GIT_COMMIT");
     println!("cargo:rerun-if-changed=services/api/proto/scheduler.proto");
     println!("cargo:rerun-if-changed=src/image/content.proto");
     println!("cargo:rerun-if-changed=src/image/build_history.proto");
@@ -57,6 +58,18 @@ fn git_path(path: &str) -> Option<PathBuf> {
 }
 
 fn resolve_git_commit() -> Option<String> {
+    // Offline source packets have no .git directory. The packet builder binds
+    // this explicit provenance value to its verified tracked-source inventory.
+    if let Ok(commit) = std::env::var("AENV_BUILD_GIT_COMMIT") {
+        assert!(
+            commit.len() == 40
+                && commit
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "AENV_BUILD_GIT_COMMIT must be a full lowercase Git SHA"
+        );
+        return Some(commit);
+    }
     let commit = git_stdout(["rev-parse", "--short", "HEAD"])?;
     let commit = commit.trim();
     (!commit.is_empty()).then(|| commit.to_string())
