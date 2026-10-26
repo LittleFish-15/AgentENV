@@ -1,0 +1,13 @@
+{
+  "entry": "AB_prepare_full_extension_v1.py",
+  "bytes": 73188,
+  "sha256": "ebe993c19c0c99fd675470624800867c122338c2e60d1db6de9c4dd0342b3a75",
+  "coreCommit": "7ea21539874953d42d34fa3dd66a2e154139ece9",
+  "coreLocalCommit": "66f566b20d8e848089988525cf22463ffb00098a",
+  "sourceFiles": 18,
+  "sourceArchiveSha256": "45e55bd43fca8c556433efe04970a601cb4efa720b238785ac685fb6bcacf19b",
+  "SDKCalled": false,
+  "targetExecuted": false,
+  "canLaunchProviders": false,
+  "budgetApprovalExpanded": false
+}
