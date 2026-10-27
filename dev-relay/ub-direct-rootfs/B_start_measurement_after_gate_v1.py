@@ -30,6 +30,14 @@ def decide(markers):
         return 'existing-attempt-no-restart'
     return 'start-original'
 
+def stage_online(pipeline,online,phase,node,context):
+    command=online.online_command(phase,node,context,RELEASE,SHA,SIZE)
+    # Keep the old offline handoffs as evidence; never overwrite them merely
+    # because the online transport has a different representation.
+    path=ROOT/('next-measure-online-'+phase+'-'+pipeline.RUN+'.sh')
+    pipeline.put(path,(command+'\n').encode(),1204,1205)
+    return '# Saved on this node: '+str(path)+'\n'+command
+
 def online_module():
     path=ROOT/NAME
     if not path.exists() and not path.is_symlink():
@@ -56,6 +64,7 @@ def main():
     pipeline=types.ModuleType('unchanged_measurement_pipeline');pipeline.__file__=str(path)
     exec(compile(raw,str(path),'exec'),pipeline.__dict__)
     pipeline.relay=lambda phase,node,context,source=None:online.online_command(phase,node,context,RELEASE,SHA,SIZE)
+    pipeline.staged_relay=lambda phase,node,context:stage_online(pipeline,online,phase,node,context)
     pair=document(PAIR/'accepted-pair-bundle.json');ledger=document(PAIR/'allocation-ledger.json')
     comparison=pipeline.loaded('comparison');verifier=comparison.module('pair_verify')
     accepted=verifier.verify(pair,comparison.PAIR_SHA)
@@ -88,8 +97,18 @@ def main():
             output=ROOT/('deletefix-comparison-'+pipeline.RUN+'-b.json');raw=pipeline.canonical(package);pipeline.put(output,raw,1204,1205)
             print('COMPARISON_NODE_PACKAGE '+json.dumps({'node':'b','path':str(output),'bytes':len(raw),
                   'sha256':hashlib.sha256(raw).hexdigest(),'bothLocalVariantsCompleted':True}),flush=True);return 0
-        pipeline.next_command('NEXT_A_FULL_COMMAND','full-a','a',{**context,'peerOriginal':original['receipt']})
-        print('B original completed. Run A full only after A original has also completed.',flush=True);return 0
+        original_a=online.online_command('original-a','a',context,RELEASE,SHA,SIZE)
+        full_a=online.online_command('full-a','a',{**context,'peerOriginal':original['receipt']},RELEASE,SHA,SIZE)
+        choice=('(\nset -eu\ntest "$(id -u)" = 0\ntest "$(hostname)" = server1\n'
+                'm=/home/jwk/agent/deployments/agentenv-direct-ub-deletefix-v1/comparison/deletefix-full-v1\n'
+                'if [ -e "$m/controller.lock" ]; then\n echo "A has an existing measurement lock; no restart"\n'
+                'elif [ -f "$m/full/receipt.json" ]; then\n echo "A already completed both groups; return its data package"\n'
+                'elif [ -f "$m/original/receipt.json" ]; then\n'+full_a+'\n'
+                'elif [ ! -e "$m/run.json" ] && [ ! -e "$m/original" ] && [ ! -e "$m/failure-original.json" ]; then\n'+original_a+'\n'
+                'else\n echo "A has an existing incomplete measurement; preserve it, no restart"\nfi\n)')
+        output=ROOT/('next-measure-online-advance-a-'+pipeline.RUN+'.sh');pipeline.put(output,(choice+'\n').encode(),1204,1205)
+        print('BEGIN_NEXT_A_MEASUREMENT_COMMAND');print(choice);print('END_NEXT_A_MEASUREMENT_COMMAND',flush=True)
+        print('Saved A continuation: '+str(output),flush=True);return 0
     # No journal, lock, phase directory or persisted failure exists. The pinned
     # controller still performs its complete read-only admission before POST.
     pipeline.next_command('NEXT_A_ORIGINAL_COMMAND','original-a','a',context)
