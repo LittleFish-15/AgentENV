@@ -1,0 +1,13 @@
+[package]
+name = "aenv-reviewed-dead-ublk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+io-uring = "=0.7.11"
+libc = "=0.2.184"
+ublk-sys = { package = "libublk-rs-sys", git = "https://github.com/ublk-org/libublk-rs.git", rev = "c6a3e06" }
+
+[profile.release]
+strip = true
+panic = "abort"
