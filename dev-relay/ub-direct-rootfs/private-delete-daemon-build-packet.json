@@ -1,0 +1,20 @@
+{
+  "entry": "A_build_private_delete_daemon_v1.py",
+  "bytes": 243866,
+  "sha256": "7c280363779db70b8fa9b2a4aa45fd849830797ca7de933b3352ce9d144448c1",
+  "sourceFiles": 878,
+  "replacedOrNewFiles": 2,
+  "sourceBytes": 10451958,
+  "release": {
+    "coreCommit": "d97d2388e6985e7d28faa3746b91fe54c18aaf60",
+    "localCommit": "dbf4bf4325cd1c1d002248ec88418458bb3ef8c2",
+    "tree": "addac3af31b4a46ebd489d89650994ed61a6b8aa"
+  },
+  "preservedFullCore": "ff1efdd9a2598e19b84cc09b91c8bc1e10ab6254",
+  "targetExecuted": false,
+  "isolatedCargoTarget": false,
+  "sharedNativeDependencyTarget": true,
+  "capturedArtifactsIsolated": true,
+  "serverRebuilt": false,
+  "retainedPackageCache": true
+}
