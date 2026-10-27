@@ -1,0 +1,9 @@
+# 在线下载代码，人工中转私有回执
+
+AB_deletefix_measurement_online_v1.py仅替换命令交接的代码运输方式。实际测数管线仍固定12549737c5dc557d5f821068e6d656818a1709a5中的AB_deletefix_measurement_pipeline_v1.py，213935字节，SHA87aa3faed883da757e3bd9d8ac22123a1954f0a1407b6ae062bb8a89d4af14ca。验收/测数/采样/300-330秒语义、runID、状态和输出目录均不变，不重编译或部署。
+
+每台机器首次运行时从完整固定commit下载小型在线适配器及管线，校验长度和SHA后执行。后续优先复用已校验的本地缓存。raw端点网络失败时可尝试同一commit的GitHub API内容接口；HTTPS验证保持，任何内容摘要不符即停止，不降级为浮动分支、不更改代理、不继续启动Guest。
+
+下一节点命令不再包含整份管线的base64代码，仍包含压缩的私有上下文胶囊。后者是实际验收/原版完成回执，不能因代码在线下载而省略，也不能上传公共GitHub。HTTP请求只含固定源码路径/commit，不含胶囊或凭据；没有新增自动SSH、端口或跨节点通信。
+
+本地私有A_start_deletefix_measurement_pipeline_ONLINE_root.sh替代原OFFLINE启动块；旧离线版保留备用。已开始的阶段不能从ready-a重跑。正常路径后续NEXT_A/NEXT_B等块均由在线适配器生成，并继续写到原next-<phase>-<run>.sh文件供人工转交。首次启动仍需B修复版健康，测数仍需新退出链门控通过。
