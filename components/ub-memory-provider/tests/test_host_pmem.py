@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from aenv_ub_provider import host_pmem as p
-from aenv_ub_provider import fsdax
+from aenv_ub_provider import fsdax, host_pmem_cache
 
 
 UUID = '8ea26803-3d68-4d17-8c13-e88c846e3802'
@@ -178,6 +178,32 @@ class HostPmem(unittest.TestCase):
         self.assertEqual(self.kernel.events[-3:], [ 'destroy_acknowledged', p.QUERY, 'local_volume_absent'])
         self.assertFalse(self.saved[-1]['sharedBackingReleaseAuthorized'])
 
+    def test_explicit_failed_create_cleanup_requires_exact_uuid_absence(self):
+        self.kernel.create_error=errno.EINVAL
+        with self.assertRaises(OSError):self.volume.create(self.segments)
+        self.volume.reconcile_creation_for_retirement()
+        self.assertEqual(self.saved[-1]['phase'],'local_volume_absent')
+        self.assertTrue(self.saved[-1]['absenceQueried'])
+        self.assertTrue(self.saved[-1]['creationOutcomeUnconfirmed'])
+        self.assertNotIn('status',self.saved[-1])
+        self.assertNotIn(p.DESTROY,self.kernel.events)
+
+    def test_lost_create_ack_existing_own_uuid_can_be_explicitly_retired(self):
+        self.kernel.query_error=errno.EIO
+        with self.assertRaises(OSError):self.volume.create(self.segments)
+        self.kernel.query_error=None
+        self.volume.reconcile_creation_for_retirement()
+        self.assertEqual(self.kernel.events.count(p.CREATE),1)
+        self.assertEqual(self.kernel.events.count(p.DESTROY),1)
+        self.assertEqual(self.saved[-1]['phase'],'local_volume_absent')
+
+    def test_existing_uuid_collision_is_never_destroyed_during_reconciliation(self):
+        self.kernel.live=(p.identity(self.volume.record['uuid']),12288)
+        self.kernel.create_error=errno.EEXIST
+        with self.assertRaises(OSError):self.volume.create(self.segments)
+        with self.assertRaises(RuntimeError):self.volume.reconcile_creation_for_retirement()
+        self.assertNotIn(p.DESTROY,self.kernel.events)
+
 
 class DaxReadPath(unittest.TestCase):
     def run_read(self, *, invalid_dax=False, wrong_device=False, short=False,
@@ -199,7 +225,8 @@ class DaxReadPath(unittest.TestCase):
         validator = mock.Mock(side_effect=ValueError('S_DAX absent')) if invalid_dax else mock.Mock(return_value=observed)
         expected = '0' * 64 if bad_digest else hashlib.sha256(payload).hexdigest()
         self.fake_os = fake_os
-        with mock.patch.object(p, 'os', fake_os), mock.patch.object(fsdax, 'validate_fd', validator):
+        with mock.patch.object(p, 'os', fake_os), mock.patch.object(fsdax, 'validate_fd', validator), \
+             mock.patch.object(host_pmem_cache,'collect',return_value={'state':'measured','fileDataInBlockPageCacheBytes':0}):
             return p.verify_dax_file(control, volume, Path(__file__).resolve(), len(payload), expected)
 
     def test_matching_device_dax_digest_and_erofs_still_not_crossnode_acceptance(self):

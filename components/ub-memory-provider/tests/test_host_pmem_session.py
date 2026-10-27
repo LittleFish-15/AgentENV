@@ -16,6 +16,7 @@ class SessionTests(unittest.TestCase):
             self.events.append('destroy_and_absence');self.volume.record['phase']='local_volume_absent'
         self.volume.retire=mock.Mock(side_effect=retire_volume)
         self.volume.confirm_absent=mock.Mock()
+        self.volume.reconcile_creation_for_retirement=mock.Mock(side_effect=RuntimeError('unresolved query'))
         self.lease=mock.Mock(volume=self.volume)
         self.lease.attach.side_effect=lambda *_:self.events.append('attach') or mock.Mock()
         self.lease.close.side_effect=lambda:self.events.append('close_sdk_lease')

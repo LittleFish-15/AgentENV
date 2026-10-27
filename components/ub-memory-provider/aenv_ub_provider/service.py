@@ -49,6 +49,14 @@ def validate_config(config):
         receipt = Path(config['hostPmemReleaseReceipt'])
         if not receipt.is_absolute() or receipt.resolve() != receipt:
             raise ValueError('Host pmem receipt must have an absolute unredirected path')
+    if 'hostPmemReaderEpochs' in config:
+        epochs = config['hostPmemReaderEpochs']
+        if (role != 'publish' or 'hostPmemReleaseReceipt' not in config
+                or not isinstance(epochs, dict) or set(epochs) != set(config.get('readers', []))
+                or any(not isinstance(value, str) or re.fullmatch('[0-9a-f]{32}', value) is None
+                       for value in epochs.values())):
+            raise ValueError('Cancellation requires exact root-approved reader epochs')
+        common.add('hostPmemReaderEpochs')
     if role == 'publish':
         extra = {'readers', 'sourceRoot', 'images'} if mode == 'stored' else {'readers', 'catalog'}
     elif role == 'import':
@@ -127,7 +135,7 @@ def inputs(config):
     return selected, None
 
 
-def release_receipts(request, manifest):
+def release_receipts(request, manifest, cancel_epochs=None):
     if set(request) != {'operation', 'peerReceipts'} or request['operation'] != 'retire':
         raise ValueError('Expected explicit retire request')
     expected = set(manifest['readers'])
@@ -136,6 +144,13 @@ def release_receipts(request, manifest):
     seen = set()
     for path in request['peerReceipts']:
         receipt = read_json(path)
+        if cancel_epochs is not None and receipt.get('scope') == 'host-pmem-reader-cancel':
+            from .host_pmem_guard import require_cancelled_reader
+            reader = require_cancelled_reader(path, manifest, cancel_epochs)
+            if reader in seen:
+                raise ValueError('Duplicate cancelled reader')
+            seen.add(reader)
+            continue
         if (set(receipt) != {'version', 'ownerId', 'readerId', 'manifestSha256', 'state'}
                 or type(receipt['version']) is not int or receipt['version'] != 1
                 or receipt['ownerId'] != manifest['ownerId']
@@ -248,7 +263,7 @@ def serve(config, selected, manifest):
                     contract.same_uid(stream)
                     request = contract.receive_json(stream)
                     if config['role'] == 'publish':
-                        release_receipts(request, manifest)
+                        release_receipts(request, manifest, config.get('hostPmemReaderEpochs'))
                     elif request != {'operation': 'retire', 'peerReceipts': []}:
                         raise ValueError('Importer retirement only releases its own mappings')
                     if 'hostPmemReleaseReceipt' in config:

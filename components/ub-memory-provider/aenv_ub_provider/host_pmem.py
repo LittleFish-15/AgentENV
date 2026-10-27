@@ -217,6 +217,28 @@ class LocalVolume:
         self.mark('destroy_acknowledged')
         self.confirm_absent()
 
+    def reconcile_creation_for_retirement(self):
+        """Explicit cleanup only: query the original UUID, never create again."""
+        if self.record['phase'] not in ('create_intent','create_acknowledged','create_unconfirmed','query_unconfirmed'):
+            raise RuntimeError('No unresolved creation to reconcile')
+        try:
+            observed=self.control.query(self.record['uuid'])
+        except OSError as error:
+            if error.errno!=errno.ENOENT:
+                raise
+            # STATUS is serialized with CREATE inside the driver. This proves
+            # current local absence, not whether the original call once worked.
+            self.mark('local_volume_absent',absenceQueried=True,creationOutcomeUnconfirmed=True,
+                      sharedBackingReleaseAuthorized=False)
+            return
+        if self.record.get('errno')==errno.EEXIST:
+            raise RuntimeError('Existing UUID collision is not ours to retire')
+        if observed.bytes!=self.record['bytes']:
+            raise ValueError('Unconfirmed volume length differs; preserve it')
+        self.observed=observed
+        self.mark('serving',status=asdict(observed))
+        self.retire()
+
     def confirm_absent(self):
         if self.record['phase'] not in ('destroy_intent', 'destroy_acknowledged', 'destroy_unconfirmed'):
             raise RuntimeError('No local destroy intent to reconcile')
@@ -225,9 +247,25 @@ class LocalVolume:
         except OSError as error:
             if error.errno != errno.ENOENT:
                 raise
-            self.mark('local_volume_absent', sharedBackingReleaseAuthorized=False)
+            self.mark('local_volume_absent', absenceQueried=True, sharedBackingReleaseAuthorized=False)
             return
         raise RuntimeError('Volume still exists; preserve anchors, do not retry destroy blindly')
+
+
+def read_buffer_observation(data):
+    """Observe the reader while its payload buffer is live, not an extra cost sum."""
+    try:
+        metrics={}
+        for line in Path('/proc/self/smaps_rollup').read_text().splitlines():
+            fields=line.split()
+            if len(fields)==3 and fields[2]=='kB':
+                metrics[fields[0].rstrip(':')]=int(fields[1])*1024
+        return {'livePayloadBytes':len(data),'readerProcessMetricsBytes':metrics,
+                'scope':'one read with payload live; process includes buffers, do not add payload again',
+                'peakMeasured':False}
+    except (OSError,ValueError) as error:
+        return {'livePayloadBytes':len(data),'readerProcessMetricsBytes':None,
+                'reason':str(error),'peakMeasured':False}
 
 
 def verify_dax_file(control, volume, path, length, sha256):
@@ -237,7 +275,7 @@ def verify_dax_file(control, volume, path, length, sha256):
     verifies the local DAX read path; it cannot attest cross-node provenance or
     savings. Offered DAX spans are not actual payload bytes or physical cost.
     """
-    from . import fsdax
+    from . import fsdax, host_pmem_cache
     if (type(length) is not int or not 0 < length <= volume.bytes
             or not isinstance(sha256, str) or len(sha256) != 64
             or any(c not in '0123456789abcdef' for c in sha256)):
@@ -263,9 +301,12 @@ def verify_dax_file(control, volume, path, length, sha256):
                 raise OSError('Short DAX read; no cached fallback')
             digest.update(data)
             offset += count
+            if offset==count:
+                buffer_cost=read_buffer_observation(data)
         if digest.hexdigest() != sha256:
             raise ValueError('DAX file content differs')
         fsdax.validate_fd(fd, length)
+        cache=host_pmem_cache.collect(fd,length,volume)
         after = control.query(volume.uuid)
         if any(getattr(after, key) != getattr(volume, key) for key in stable_fields):
             raise ValueError('Volume identity changed during test')
@@ -282,6 +323,8 @@ def verify_dax_file(control, volume, path, length, sha256):
             os.close(writer)
             raise RuntimeError('Unexpected writable open; no data was written')
         return {'state': 'local_dax_file_verified', 'volume': asdict(after), 'file': observed,
+                'blockCache':cache,
+                'readBufferObservation':buffer_cost,
                 'preadBytes': offset, 'sha256': digest.hexdigest(), 'writeOpenErrno': errno.EROFS,
                 'daxAccessDelta': after.dax_accesses - before.dax_accesses,
                 'daxOfferedSpanBytesDelta': after.dax_span_bytes - before.dax_span_bytes,

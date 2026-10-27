@@ -40,13 +40,14 @@ class PlanTests(unittest.TestCase):
         config=self.config();config['testFile']['name']='../outside'
         with self.assertRaises(ValueError):cli.plan(config)
 
-    def exercise_server(self, wrong_first=False, lost_reply=False, busy_first=False):
+    def exercise_server(self, wrong_first=False, lost_reply=False, busy_first=False, verify_first=False):
         config=self.config();pin=cli.plan(config)['configSha256']
         session=mock.Mock(work=Path(config['workDir']))
         first,second=mock.MagicMock(),mock.MagicMock()
         for stream in (first,second):stream.__enter__.return_value=stream
         listener=mock.Mock();listener.accept.side_effect=[(first,None),(second,None)]
-        requests=[{'operation':'retire','configSha256':'wrong' if wrong_first else pin},
+        session.verify.return_value={'state':'local_dax_file_verified'}
+        requests=[{'operation':'verify' if verify_first else 'retire','configSha256':'wrong' if wrong_first else pin},
                   {'operation':'retire','configSha256':pin}]
         if busy_first:session.retire.side_effect=[RuntimeError('volume busy'),None]
         output=[]
@@ -90,6 +91,14 @@ class PlanTests(unittest.TestCase):
         session.retire.assert_called_once();session.export_release.assert_called_once()
         self.assertEqual(listener.accept.call_count,1)
         self.assertEqual(output[0]['state'],'local_resources_released')
+
+    def test_explicit_reverify_holds_resources_until_later_retire(self):
+        session,listener,output=self.exercise_server(verify_first=True)
+        self.assertEqual(output[0]['state'],'local_read_verified')
+        self.assertEqual(output[1]['state'],'local_resources_released')
+        self.assertEqual(session.verify.call_count,2)
+        session.retire.assert_called_once();session.export_release.assert_called_once()
+        self.assertEqual(listener.accept.call_count,2)
 
 
 if __name__=='__main__':unittest.main()

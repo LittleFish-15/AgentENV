@@ -91,13 +91,19 @@ def serve(config, pin):
                 try:
                     root_peer(stream)
                     request=contract.receive_json(stream)
-                    if request!={'operation':'retire','configSha256':pin}:
+                    if (not isinstance(request,dict) or set(request)!={'operation','configSha256'}
+                            or request['configSha256']!=pin or request['operation'] not in ('retire','verify')):
                         raise ValueError('Unexpected control request')
-                    session.retire()
-                    session.export_release(config['releaseReceipt'])
-                    reply={'state':'local_resources_released','receipt':config['releaseReceipt'],
-                           'SDKOwnerRetired':False,'sharedBackingReleaseAuthorized':False}
-                    completed=True
+                    if request['operation']=='verify':
+                        test=config['testFile']
+                        verified=session.verify(test['name'],test['bytes'],test['sha256'])
+                        reply={'state':'local_read_verified','verification':verified}
+                    else:
+                        session.retire()
+                        session.export_release(config['releaseReceipt'])
+                        reply={'state':'local_resources_released','receipt':config['releaseReceipt'],
+                               'SDKOwnerRetired':False,'sharedBackingReleaseAuthorized':False}
+                        completed=True
                 except Exception as error:
                     reply={'state':'retirement_refused_preserve_resources','reason':str(error)}
                 try:contract.send_json(stream,reply)
@@ -113,7 +119,7 @@ def serve(config, pin):
                 endpoint.unlink()
 
 
-def retire(config,pin):
+def request_action(config,pin,operation='retire'):
     if os.getuid()!=0 or os.geteuid()!=0:
         raise RuntimeError('Retirement requires root')
     work=Path(config['workDir']);info=work.lstat()
@@ -125,6 +131,8 @@ def retire(config,pin):
             or record['bootId']!=Path('/proc/sys/kernel/random/boot_id').read_text().strip()):
         raise ValueError('Root transaction identity changed')
     if record['phase']=='local_resources_released':
+        if operation!='retire':
+            raise RuntimeError('Cannot verify a retired local view')
         # Export may have failed after cleanup; require the exact same receipt.
         return host_pmem_guard.write_release(config['releaseReceipt'],record)
     helper=record['helper']
@@ -136,13 +144,13 @@ def retire(config,pin):
         root_peer(stream,helper['pid'])
         if host_pmem_lease.process_ticks(helper['pid'])!=helper['startTicks']:
             raise RuntimeError('Helper changed during control connect')
-        contract.send_json(stream,{'operation':'retire','configSha256':pin})
+        contract.send_json(stream,{'operation':operation,'configSha256':pin})
         return contract.receive_json(stream)
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode',choices=('plan','serve','retire'))
+    parser.add_argument('mode',choices=('plan','serve','verify','retire'))
     parser.add_argument('--config',required=True)
     parser.add_argument('--expected-config-sha256')
     parser.add_argument('--approval')
@@ -156,8 +164,8 @@ def main():
         if args.approval!='CREATE_READONLY_HOST_PMEM_VIEW':
             raise ValueError('Explicit Host pmem view/mount approval required')
         serve(config,pin);return 0
-    result=retire(config,pin);print(json.dumps(result))
-    return 0 if result.get('state') in ('local_resources_released','released') else 1
+    result=request_action(config,pin,args.mode);print(json.dumps(result))
+    return 0 if result.get('state') in ('local_resources_released','released','local_read_verified') else 1
 
 
 if __name__=='__main__':

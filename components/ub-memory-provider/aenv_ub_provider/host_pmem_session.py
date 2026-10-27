@@ -31,6 +31,7 @@ class MountedSession:
         self.work = prepare_work(work)
         self.record = {'version':1, 'phase':'prepared',
                        'publication':binding,
+                       'volume':{'phase':'not_attempted'}, 'mount':{'phase':'not_attempted'},
                        'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                        'source':dict(source), 'ownerUid':owner_uid, 'ownerPid':owner_pid,
                        'ownerStartTicks':owner_ticks, 'sharedBackingReleaseAuthorized':False}
@@ -107,6 +108,8 @@ class MountedSession:
                         volume.retire()
                     elif phase in ('destroy_intent','destroy_acknowledged','destroy_unconfirmed'):
                         volume.confirm_absent()
+                    elif phase in ('create_intent','create_acknowledged','create_unconfirmed','query_unconfirmed'):
+                        volume.reconcile_creation_for_retirement()
                     elif phase not in ('new','local_volume_absent'):
                         raise RuntimeError('Unconfirmed volume creation; preserve SDK anchors')
                 self.lease.close()

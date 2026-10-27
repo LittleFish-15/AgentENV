@@ -2,6 +2,8 @@
 import copy
 from pathlib import Path
 import stat
+import struct
+import sys
 import types
 import unittest
 from unittest import mock
@@ -80,11 +82,36 @@ class MountTests(unittest.TestCase):
         with mock.patch.object(m,'namespace_identity',return_value=self.namespace), \
              mock.patch.object(m,'mounted_at',side_effect=[None,self.mounted]), \
              mock.patch.object(m,'Path',return_value=directory), \
+             mock.patch.object(m,'no_readahead',return_value={'beforeSectors':256,'afterSectors':0}), \
              mock.patch.object(m,'os',types.SimpleNamespace(makedev=lambda a,b:99)), \
              mock.patch.object(m,'command',side_effect=command):
             self.instance.mount()
         self.assertEqual(self.commands[0][4],'ro,noload,dax=always,nodev,nosuid,noexec')
         self.assertEqual(self.saved[-1]['phase'],'mounted')
+
+    def test_read_ahead_changes_only_the_verified_new_device(self):
+        calls=[];gets=iter([256,0])
+        def ioctl(fd,operation,argument,mutate=None):
+            calls.append(operation)
+            if operation==0x1263:struct.pack_into('=Q',argument,0,next(gets))
+            else:self.assertEqual((operation,argument),(0x1262,0))
+        fake=types.SimpleNamespace(O_RDONLY=0,O_NOFOLLOW=1,O_CLOEXEC=2,
+            open=mock.Mock(return_value=31),close=mock.Mock(),makedev=lambda a,b:99,
+            fstat=mock.Mock(return_value=types.SimpleNamespace(st_mode=stat.S_IFBLK,st_rdev=99)))
+        with mock.patch.object(m,'os',fake),mock.patch.dict(sys.modules,{'fcntl':types.SimpleNamespace(ioctl=ioctl)}):
+            result=m.no_readahead('/dev/ubpmem_ro7',self.volume)
+        self.assertEqual(calls,[0x1263,0x1262,0x1263])
+        self.assertEqual(result,{'beforeSectors':256,'afterSectors':0})
+        fake.close.assert_called_once_with(31)
+
+    def test_read_ahead_wrong_device_never_issues_ioctl(self):
+        ioctl=mock.Mock()
+        fake=types.SimpleNamespace(O_RDONLY=0,O_NOFOLLOW=1,O_CLOEXEC=2,
+            open=mock.Mock(return_value=31),close=mock.Mock(),makedev=lambda a,b:99,
+            fstat=mock.Mock(return_value=types.SimpleNamespace(st_mode=stat.S_IFBLK,st_rdev=100)))
+        with mock.patch.object(m,'os',fake),mock.patch.dict(sys.modules,{'fcntl':types.SimpleNamespace(ioctl=ioctl)}):
+            with self.assertRaises(ValueError):m.no_readahead('/dev/ubpmem_ro7',self.volume)
+        ioctl.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

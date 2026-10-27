@@ -57,8 +57,16 @@ class NativeLease:
     def attach(self, control, save):
         if self.closed or self.volume is not None:
             raise RuntimeError('Lease already closed or attach attempted')
+        control.validate_segments(self.segments)
+        ranges=[]
+        logical=0
+        for segment in self.segments:
+            metadata=os.fstat(segment.fd)
+            ranges.append({'rdev':metadata.st_rdev,'offset':segment.offset,
+                           'bytes':segment.bytes,'logicalOffset':logical})
+            logical+=segment.bytes
         def journal(record):
-            save({**record, 'source': self.source})
+            save({**record, 'source': self.source, 'segments':ranges})
         # Keep this object even when CREATE or its reply fails. It is the guard
         # against closing the lease while a kernel volume might still exist.
         self.volume = host_pmem.LocalVolume(control, journal)

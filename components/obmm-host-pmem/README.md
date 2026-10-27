@@ -105,8 +105,9 @@ publication, retain peer references and collect complete release receipts.
 Neither the Python unit tests nor the C layout compilation run these Linux
 namespace/credential/mount operations on the target.
 
-`host_pmem_cli.py` provides `plan`, foreground `serve`, and authenticated root
-`retire` modes. `plan` makes no SDK/kernel changes. `serve` requires the exact
+`host_pmem_cli.py` provides `plan`, foreground `serve`, authenticated root
+`verify` without release, and explicit `retire` modes. `plan` makes no SDK/kernel
+changes. `serve` requires the exact
 configuration digest, explicit view/mount approval, and an already enabled
 candidate matching the configured kernel release and module srcversion. It
 holds the mount/lease after validation while the peer is tested. A failed
@@ -126,6 +127,34 @@ socket disconnection alone does not authorize SDK cleanup. Export root
 receipts into a root-owned, ordinary-user-traversable directory; private
 transaction journals remain private. The receipt is local-retirement evidence,
 not a physical-sharing or data-validation result.
+
+Explicit retirement can reconcile a failed CREATE by querying that same UUID.
+If it exists and is attributable to our intent, its observed ID must pass the
+normal retirement checks. An EEXIST collision is never adopted. An ENOENT reply
+proves current local absence, not historical creation success; the release
+receipt records that distinction without inventing a volume ID. A failure
+before any CREATE intent uses a separate never-attempted outcome. Neither case
+allows skipping the peer release policy.
+
+The guarded publisher can additionally pin `hostPmemReaderEpochs` before SDK
+allocation. Only then can it accept a root-issued terminal pre-import
+cancellation for that exact peer maintenance epoch and manifest. This is
+distinct from an importer unmap receipt: it states that no import was attempted,
+and the coordinator must permanently disable that peer's start action for this
+experiment. Unknown/attempted imports cannot be relabeled as cancellations.
+
+Before mounting, the helper sets and verifies read-ahead zero on the newly
+created pmem device only (BLKRASET/BLKRAGET). It does not change existing disks or
+global cache policy. Local verification optionally uses FIEMAP and mincore of
+the *ordinary block-device mapping* to separate test-file data blocks from
+other cached blocks. It refuses to interpret a DAX mapping's mincore as ordinary
+PageCache. Unsupported, sparse or ambiguous accounting returns unavailable,
+never zero. This distinguishes data-cache avoidance from filesystem metadata
+and incidental block cache; all remain separate from process and UB-pool costs.
+Verification records a reader-process RSS/PSS observation while the first
+payload buffer is live. Its logical buffer length is included for interpretation,
+not added again to process memory. This is a sampled cost, not a peak or a full
+allocation-to-retirement global memory measurement.
 
 Still outside these library/CLI components: the reviewed two-node deployment
 wrapper, immutable test-container preparation, SDK-owner startup using retained

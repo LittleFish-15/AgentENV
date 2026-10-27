@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import struct
 import subprocess
 import threading
 
@@ -73,6 +74,23 @@ def mounted_at(path):
     return matches[0] if matches else None
 
 
+def no_readahead(device,volume):
+    """Change only this newly created private pmem device, before mounting it."""
+    import fcntl
+    fd=os.open(device,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISBLK(info.st_mode) or info.st_rdev!=os.makedev(volume.major,volume.minor):
+            raise ValueError('Read-ahead target is not the owned pmem device')
+        before=bytearray(8);after=bytearray(8)
+        fcntl.ioctl(fd,0x1263,before,True)  # BLKRAGET, unsigned long on ARM64.
+        fcntl.ioctl(fd,0x1262,0)            # BLKRASET, sectors, owned new device only.
+        fcntl.ioctl(fd,0x1263,after,True)
+        if struct.unpack('=Q',after)[0]!=0:raise ValueError('New device read-ahead is not zero')
+        return {'beforeSectors':struct.unpack('=Q',before)[0],'afterSectors':0}
+    finally:os.close(fd)
+
+
 class ReadonlyMount:
     def __init__(self, namespace, volume, target, save):
         self.namespace, self.volume, self.target, self.save = namespace, volume, Path(target), save
@@ -115,6 +133,7 @@ class ReadonlyMount:
             raise ValueError('pmem block device identity differs')
         self.mark('mount_intent', device=str(device))
         try:
+            self.mark('mount_intent',readAhead=no_readahead(device,self.volume))
             command('mount', '-t', 'ext4', '-o', 'ro,noload,dax=always,nodev,nosuid,noexec', device, self.target)
             mounted = mounted_at(self.target)
             self.validate_mount(mounted)

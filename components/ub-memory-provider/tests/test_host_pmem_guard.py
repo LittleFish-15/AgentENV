@@ -1,5 +1,6 @@
 import copy
 import unittest
+from unittest import mock
 
 from aenv_ub_provider import host_pmem_guard as g, raw
 
@@ -53,6 +54,51 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.check(value)
         source={**self.source,'generation':'other'}
         with self.assertRaises(ValueError):g.publication_binding(self.manifest,source)
+
+    def test_failure_before_create_can_release_without_fabricating_volume_id(self):
+        self.session['volume']={'phase':'not_attempted'}
+        self.session['mount']={'phase':'not_attempted'}
+        value=g.release_record(self.session)
+        self.assertFalse(value['volumeCreated']);self.assertIsNone(value['volumeUuid'])
+        self.check(value)
+        value['volumeId']=0
+        with self.assertRaises(ValueError):self.check(value)
+
+    def test_unknown_creation_cannot_be_relabelled_never_created(self):
+        self.session['volume']={'phase':'create_intent'}
+        self.session['mount']={'phase':'not_attempted'}
+        with self.assertRaises(ValueError):g.release_record(self.session)
+
+    def test_queried_absence_preserves_unknown_creation_instead_of_faking_never_created(self):
+        self.session['volume']={'phase':'local_volume_absent','absenceQueried':True,
+                                'uuid':'8ea26803-3d68-4d17-8c13-e88c846e3802'}
+        self.session['mount']={'phase':'not_attempted'}
+        value=g.release_record(self.session)
+        self.assertIsNone(value['volumeCreated'])
+        self.assertEqual(value['creationOutcome'],'creation_unconfirmed_now_absent')
+        self.check(value)
+
+    def test_terminal_cancellation_binds_exact_maintenance_epoch(self):
+        from aenv_ub_provider.service import identity
+        receipt={'version':1,'scope':'host-pmem-reader-cancel','state':'not_imported',
+                 'ownerId':self.manifest['ownerId'],'manifestSha256':identity(self.manifest),
+                 'readerId':'node-b','epoch':'e'*32,'sdkImportAttempted':False,'terminal':True}
+        epochs={'node-b':'e'*32}
+        self.assertEqual(g.check_cancelled_reader(receipt,self.manifest,epochs),'node-b')
+        for key,value in (('epoch','f'*32),('sdkImportAttempted',True),('terminal',False),
+                          ('manifestSha256','wrong'),('state','released')):
+            changed={**receipt,key:value}
+            with self.assertRaises(ValueError):g.check_cancelled_reader(changed,self.manifest,epochs)
+
+    def test_cancellation_requires_opt_in_and_root_receipt_check(self):
+        from aenv_ub_provider import service
+        request={'operation':'retire','peerReceipts':['cancel.json']}
+        receipt={'scope':'host-pmem-reader-cancel'}
+        with mock.patch.object(service,'read_json',return_value=receipt):
+            with self.assertRaises(ValueError):service.release_receipts(request,self.manifest)
+            with mock.patch.object(g,'require_cancelled_reader',side_effect=ValueError('not root-owned')) as guard:
+                with self.assertRaises(ValueError):service.release_receipts(request,self.manifest,{'node-b':'e'*32})
+                guard.assert_called_once()
 
 
 if __name__=='__main__':unittest.main()

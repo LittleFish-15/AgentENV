@@ -30,9 +30,11 @@ class LeaseTests(unittest.TestCase):
         control = mock.Mock(page_size=4096)
         control.create.side_effect = OSError(errno.EIO, 'unknown create')
         records = []
-        with self.assertRaises(OSError):value.attach(control, records.append)
+        with mock.patch.object(lease.os,'fstat',return_value=types.SimpleNamespace(st_rdev=99)):
+            with self.assertRaises(OSError):value.attach(control, records.append)
         with self.assertRaises(RuntimeError):value.close()
         self.assertEqual(records[-1]['source'], {'ownerPid': 50})
+        self.assertEqual(records[-1]['segments'],[{'rdev':99,'offset':0,'bytes':4096,'logicalOffset':0}])
         self.assertEqual(value.volume.record['phase'], 'create_unconfirmed')
         stream.close.assert_not_called()
 
