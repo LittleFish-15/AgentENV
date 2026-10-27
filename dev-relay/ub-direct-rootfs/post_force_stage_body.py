@@ -192,7 +192,9 @@ def main():
             result['remainingDeviceHolders'] = device_holders()
         need(old_drained(result['oldResources']), remaining_reason(result['oldResources']))
         result['oldProcessesAndDevicesGone'] = True
-        need(result['providerBefore']['activeLeases'] == result['providerBefore']['activePayloadResponses'] == 0,
+        need(deploy.check_provider('a') == provider, 'Provider changed during exit observation')
+        result['providerAfterDrain'] = controller.provider_status(runtime)
+        need(result['providerAfterDrain']['activeLeases'] == result['providerAfterDrain']['activePayloadResponses'] == 0,
              'Provider still retains local readers; no lease cleared or objects retired')
         new_runtime, new_fc, new_unit = deploy.location('a')
         need(all(not p.exists() and not p.is_symlink() for p in (deploy.D, new_runtime, new_fc)), 'Fixed deployment already exists; inspect its report instead of repeating')
