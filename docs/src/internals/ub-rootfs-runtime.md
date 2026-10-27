@@ -57,3 +57,22 @@ matching binary deployment, two live Guests, exact lower/read attribution, priva
 upper isolation, peer survival after one exit, and confirmed teardown. Full-template
 Host Python read results are separate evidence and must not be relabeled as this
 Runtime acceptance.
+
+
+## Exclusive rootfs deletion
+
+When the warm pool is enabled, runtime rootfs devices are tracked in the
+active-exclusive registry, while dedicated devices are tracked in the managed
+registry. Required UB rootfs stop uses Delete to remove the device rather than
+leave a pool reader behind. Delete therefore resolves both private registries,
+then aborts any recording, quiesces and drops the selected device/image, and
+requires the kernel delete operation to succeed before returning Deleted.
+Shared/refcounted and idle devices are not selected by this path. A missing
+private device remains an error, never an implicit successful release.
+
+Local registry regression tests cover exclusive lookup, the existing managed
+path, peer/shared preservation and concurrent ownership removal. They do not
+exercise kernel I/O. Kernel deletion failure and lost responses still require
+explicit reconciliation; this change does not make an unknown deletion safe
+to retry or restart a daemon around live devices. An already failed field run
+keeps its journal and backing references until scoped recovery is verified.

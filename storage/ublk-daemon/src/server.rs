@@ -613,7 +613,7 @@ async fn handle_connection(
             .await
         }
         DaemonRequest::Delete { dev_id } => {
-            handle_delete(&devices, ctrl_ring, &pack_recordings, dev_id).await
+            handle_delete(&devices, &pool_state, ctrl_ring, &pack_recordings, dev_id).await
         }
         DaemonRequest::RestackSnapshot {
             dev_id,
@@ -935,21 +935,48 @@ async fn create_overlaybd_device(
     Ok((dev_id, device_path))
 }
 
+/// Remove only a directly managed or active exclusive device. Shared devices
+/// retain their refcounted release path and idle pool entries are not selected.
+fn take_private_delete_device<T>(
+    devices: &DashMap<u32, T>,
+    dev_id: u32,
+    take_exclusive: impl FnOnce(u32) -> Option<T>,
+) -> Option<T> {
+    devices
+        .remove(&dev_id)
+        .map(|(_, device)| device)
+        .or_else(|| take_exclusive(dev_id))
+}
+
 async fn handle_delete(
     devices: &DashMap<u32, ManagedDevice>,
+    pool_state: &Option<Arc<PoolState>>,
     ctrl_ring: IoRingHandle<io_uring::squeue::Entry128>,
     pack_recordings: &DashMap<u32, Arc<PackRecordingHandle>>,
     dev_id: u32,
 ) -> Result<DaemonResponse> {
-    // Abort any pack recording first: its window task must not finalize into
-    // a deleted device's image, and its pack files must not leak.
+    // Runtime rootfs creation uses the active-exclusive registry when the
+    // pool is enabled. Delete must consume that ownership too; looking only
+    // in `devices` reports "not found" while the kernel device and UB image
+    // are still live. Never force-delete a shared/refcounted or idle device.
+    let Some(mut device) = take_private_delete_device(devices, dev_id, |id| {
+        pool_state
+            .as_ref()?
+            .active_exclusive
+            .remove(&id)
+            .map(|(_, active)| ManagedDevice {
+                dev: active.dev,
+                image: active.image,
+            })
+    }) else {
+        bail!("device {dev_id} not found");
+    };
+
+    // Resolve ownership before touching recording state. Its window task must
+    // be stopped before quiescing the selected device or releasing its image.
     if let Some((_, handle)) = pack_recordings.remove(&dev_id) {
         abort_pack_recording_handle(&handle).await;
     }
-
-    let Some((_, mut device)) = devices.remove(&dev_id) else {
-        bail!("device {dev_id} not found");
-    };
 
     quiesce_managed_device(&mut device).await;
     // ManagedDevice contains a open fd to the ublk char dev.
@@ -2060,6 +2087,78 @@ fn clear_page_cache(device_path: &Path) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn private_delete_finds_active_exclusive_rootfs() {
+        let managed = DashMap::<u32, &str>::new();
+        let exclusive = DashMap::new();
+        exclusive.insert(12, "required-ub-rootfs");
+        assert_eq!(
+            take_private_delete_device(&managed, 12, |id| exclusive
+                .remove(&id)
+                .map(|(_, value)| value)),
+            Some("required-ub-rootfs")
+        );
+        assert!(!exclusive.contains_key(&12));
+    }
+
+    #[test]
+    fn private_delete_keeps_directly_managed_device_path() {
+        let managed = DashMap::new();
+        managed.insert(7, "dedicated-device");
+        assert_eq!(
+            take_private_delete_device(&managed, 7, |_| panic!("wrong registry")),
+            Some("dedicated-device")
+        );
+        assert!(!managed.contains_key(&7));
+    }
+
+    #[test]
+    fn private_delete_preserves_peer_and_shared_devices() {
+        let managed = DashMap::<u32, &str>::new();
+        let exclusive = DashMap::new();
+        let shared = DashMap::new();
+        exclusive.insert(12, "rootfs-a");
+        exclusive.insert(14, "rootfs-peer");
+        shared.insert(13, "refcounted-memory");
+        let take = |id| exclusive.remove(&id).map(|(_, value)| value);
+        assert_eq!(
+            take_private_delete_device(&managed, 12, take),
+            Some("rootfs-a")
+        );
+        assert_eq!(take_private_delete_device(&managed, 13, take), None);
+        assert_eq!(take_private_delete_device(&managed, 12, take), None);
+        assert_eq!(*exclusive.get(&14).unwrap(), "rootfs-peer");
+        assert_eq!(*shared.get(&13).unwrap(), "refcounted-memory");
+    }
+
+    #[test]
+    fn private_delete_concurrent_requests_take_ownership_once() {
+        let managed = Arc::new(DashMap::<u32, &str>::new());
+        let exclusive = Arc::new(DashMap::new());
+        exclusive.insert(12, "rootfs");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let (managed, exclusive, barrier) = (
+                    Arc::clone(&managed),
+                    Arc::clone(&exclusive),
+                    Arc::clone(&barrier),
+                );
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    take_private_delete_device(&managed, 12, |id| {
+                        exclusive.remove(&id).map(|(_, value)| value)
+                    })
+                })
+            })
+            .collect();
+        let taken = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .count();
+        assert_eq!(taken, 1);
+    }
 
     /// Minimal local `ImageService`; placeholder images have no lowers, so this
     /// is never used for registry access.
