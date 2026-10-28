@@ -176,6 +176,41 @@ Guest caches, and private upper memory remain and must be measured separately.
 Uncontrolled raw block reads or alternate users of old local files are outside
 that guarantee. Freeze DAX inode/mount configuration during measurement.
 
+## Rootfs consumer integration
+
+`aenv_ub_provider.host_pmem_rootfs` composes the existing mounted UB image with
+`host_dax_worker`. The root owner opens bounded direct-child lower filenames
+with readonly, no-follow descriptors and validates their actual DAX device.
+It passes those descriptors and a private socketpair to a child running under
+the configured ordinary UID/GID with cleared supplemental groups. The child
+does not reopen privileged paths, mmap the files, allocate UB or load SDK
+libraries. It validates S_DAX/readonly/length/device and hashes each stored
+lower before exposing the existing OverlayBD broker protocol. Header/padding
+are protocol bytes, not extra UB allocations or file payload caches.
+
+The root service must have the explicitly reviewed SETUID/SETGID capabilities
+needed to launch this child, in addition to its existing mount permissions.
+Never compensate for a denied spawn by running the consumer as root. The
+inherited socket authenticates the exact root parent PID; the public broker
+accepts only its ordinary UID. It defaults to two concurrent payload responses
+while keeping reader leases independent of response-buffer slots.
+
+The runtime index is published in a separate root-owned, ordinary-readable
+directory only after the child validates every lower. First publication never
+overwrites an existing index. Retirement refuses live readers, waits for child
+exit, invalidates the owned runtime index, closes parent file references, then
+unmounts/destroys the local view and exports the original SDK retirement guard.
+An unconfirmed child exit cannot silently release the mount. A lost retirement
+acknowledgment can be explicitly reconciled only after the same child exits
+successfully following recorded retirement intent. Cross-node owner release
+still requires the peer's actual receipt. The SDK image, manifest and ordinary
+file source remain externally managed.
+
+This rootfs control CLI is not a four-Guest experiment runner. Native child
+credential/namespace/DAX validation and the exact Runtime deployment must be
+accepted on the target before claiming real Guest lower access. Local tests
+mock S_DAX and privileged operations; they do not prove a hardware data path.
+
 ## Validation limits
 
 The Windows-side checks compile AArch64 translation units against matched

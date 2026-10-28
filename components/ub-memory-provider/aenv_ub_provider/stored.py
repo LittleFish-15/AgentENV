@@ -95,7 +95,9 @@ def recv_exact(stream, count):
 
 
 class Broker:
-    def __init__(self, replicas, mappings, uid=None):
+    def __init__(self, replicas, mappings, uid=None, max_payload_responses=128):
+        if type(max_payload_responses) is not int or not 1<=max_payload_responses<=128:
+            raise ValueError('Payload response limit must be 1..128')
         if len(replicas) != len(mappings) or len({r.objectName for r in replicas}) != len(replicas):
             raise ValueError('One verified mapping is required per unique replica')
         self.entries = {r.objectName: (r, m) for r, m in zip(replicas, mappings)}
@@ -108,6 +110,9 @@ class Broker:
         self.semaphore = threading.BoundedSemaphore(128)
         self.listener = None
         self.path_identity = None
+        self.payload_slots = threading.BoundedSemaphore(max_payload_responses)
+        self.max_payload_responses = max_payload_responses
+        self.active_payloads = self.peak_payloads = self.payload_failures = 0
 
     def handle(self, stream):
         acquired = False
@@ -142,17 +147,27 @@ class Broker:
                 offset, count = struct.unpack('>QI', recv_exact(stream, 12))
                 if not 0 < count <= CHUNK or offset > size or count > size - offset:
                     raise ValueError('Invalid bounded read range')
-                data = mapping.read(HEADER_BYTES + offset, count)
-                if len(data) != count:
-                    raise ValueError('Short mapping read')
-                stream.settimeout(30)
-                stream.sendall(RESPONSE.pack(MAGIC, 0, count) + data)
-                # A lease can remain idle for the Guest's whole lifetime.
-                # Do not retain its last response as a per-connection cache.
-                del data
+                if not self.payload_slots.acquire(timeout=30):
+                    raise TimeoutError('Payload response queue exceeded its deadline')
                 with self.condition:
-                    self.reads += 1
-                    self.bytes += count
+                    self.active_payloads+=1
+                    self.peak_payloads=max(self.peak_payloads,self.active_payloads)
+                try:
+                    data = mapping.read(HEADER_BYTES + offset, count)
+                    if len(data) != count:
+                        raise ValueError('Short mapping read')
+                    stream.settimeout(30)
+                    stream.sendall(RESPONSE.pack(MAGIC, 0, count) + data)
+                    del data
+                    with self.condition:
+                        self.reads += 1
+                        self.bytes += count
+                except BaseException:
+                    with self.condition:self.payload_failures+=1
+                    raise
+                finally:
+                    with self.condition:self.active_payloads-=1
+                    self.payload_slots.release()
         except EOFError:
             pass
         except Exception:

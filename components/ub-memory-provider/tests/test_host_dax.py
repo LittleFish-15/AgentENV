@@ -76,6 +76,24 @@ class HostDax(unittest.TestCase):
                 value.read(4096, 10)
             pread.assert_called_once()
 
+    def test_inherited_fd_does_not_reopen_path_or_mmap(self):
+        fd=os.open(self.path,os.O_RDONLY|getattr(os,'O_BINARY',0))
+        self.validator.return_value={'activeDax':True,'device':123}
+        with mock.patch.object(host_dax.os,'open',side_effect=AssertionError('path reopen forbidden')), \
+             mock.patch.object(host_dax.mmap,'mmap',side_effect=AssertionError('mmap forbidden')):
+            value=host_dax.StoredDaxMapping.from_fd(fd,self.replica,123)
+            self.addCleanup(value.close)
+            self.assertEqual(value.read(stored.HEADER_BYTES+8,120),self.data[8:128])
+
+    def test_wrong_inherited_device_closes_fd_before_payload_access(self):
+        fd=os.open(self.path,os.O_RDONLY|getattr(os,'O_BINARY',0))
+        self.validator.return_value={'activeDax':True,'device':124}
+        with mock.patch.object(host_dax.stored,'verify_mapping') as verify:
+            with self.assertRaisesRegex(ValueError,'declared DAX volume'):
+                host_dax.StoredDaxMapping.from_fd(fd,self.replica,123)
+            verify.assert_not_called()
+        with self.assertRaises(OSError):os.fstat(fd)
+
     def test_read_iter_catalog_is_explicit_and_legacy_keeps_mmap(self):
         for version, expected in [(1, 'mmap'), (2, 'read_iter')]:
             catalog = self.catalog()

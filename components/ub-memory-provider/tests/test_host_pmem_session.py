@@ -59,6 +59,16 @@ class SessionTests(unittest.TestCase):
         self.volume.retire.assert_not_called();self.lease.close.assert_not_called()
         s.os.close.assert_not_called()
 
+    def test_rootfs_child_blocks_mount_and_sdk_retirement_until_confirmed_exit(self):
+        self.session.start()
+        consumer=types.SimpleNamespace(retired=False)
+        self.session.retain_consumer(consumer)
+        with self.assertRaisesRegex(RuntimeError,'consumer not retired'):self.session.retire()
+        self.mount.unmount.assert_not_called();self.lease.close.assert_not_called()
+        consumer.retired=True
+        self.session.retire()
+        self.assertEqual(self.events[-3:],['destroy_and_absence','close_sdk_lease','close_control'])
+
     def test_unknown_create_never_closes_sdk_lease(self):
         self.lease.attach.side_effect=RuntimeError('lost create reply')
         self.volume.record['phase']='create_unconfirmed'
