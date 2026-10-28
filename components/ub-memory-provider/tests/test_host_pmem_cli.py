@@ -9,6 +9,15 @@ from aenv_ub_provider import host_pmem_cli as cli, raw
 
 
 class PlanTests(unittest.TestCase):
+    def test_actual_module_srcversion_is_not_rejected_for_23_digits(self):
+        config=self.config();config['moduleSrcversion']='C2BBB64D75C618180ABA3A6'
+        self.assertEqual(cli.plan(config)['state'],'host_pmem_plan_no_action')
+
+    def test_module_identity_rejects_unbounded_or_non_hex_input(self):
+        for value in ('', 'A'*25, '../module', 'not-hex', 'A\n'):
+            config=self.config();config['moduleSrcversion']=value
+            with self.subTest(value=value),self.assertRaises(ValueError):cli.plan(config)
+
     def config(self):
         source={'objectId':'image1','generation':'gen1','bytes':2**22,
                 'sha256':'sha256:'+'a'*64,'socket':'/owned/data.sock'}
@@ -16,7 +25,7 @@ class PlanTests(unittest.TestCase):
         return {'version':1,'workDir':str(Path(base)/'hp'/'run1'),
                 'releaseReceipt':str(Path(base)/'hp'/'release.json'),'source':source,
                 'ownerUid':1204,'ownerPid':50,'ownerStartTicks':'1234',
-                'kernelRelease':'test-kernel','moduleSrcversion':'A'*24,
+                'kernelRelease':'test-kernel','moduleSrcversion':'C2BBB64D75C618180ABA3A6',
                 'testFile':{'name':'payload.bin','bytes':4096,'sha256':'d'*64},
                 'publication':{'version':1,'ownerId':'b'*32,'mode':'pmem','readers':['node-b'],
                                'replicas':[raw.shape(source,'aenv_'+'c'*32)]}}

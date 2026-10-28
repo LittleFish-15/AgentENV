@@ -31,7 +31,9 @@ def plan(config):
             or not isinstance(config['ownerStartTicks'],str) or not config['ownerStartTicks'].isdecimal()
             or not isinstance(config['kernelRelease'],str) or not config['kernelRelease']
             or not isinstance(config['moduleSrcversion'],str)
-            or re.fullmatch('[A-F0-9]{24}',config['moduleSrcversion']) is None):
+            # Bound the representation; serve still compares the complete
+            # loaded srcversion exactly, without padding or truncating it.
+            or re.fullmatch('[A-F0-9]{1,24}',config['moduleSrcversion']) is None):
         raise ValueError('Exact owner/kernel/module identity required')
     work=Path(config['workDir']);receipt=Path(config['releaseReceipt'])
     if (not work.is_absolute() or not receipt.is_absolute() or work==receipt
