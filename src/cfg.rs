@@ -351,6 +351,11 @@ pub struct DiskRateLimitConfig {
 
 #[derive(Debug, Config, Clone)]
 pub struct SnapshotConfig {
+    /// Host rootfs data path; legacy preserves the existing full-UB env binding.
+    #[config(default = "legacy", env = "AENV_ROOTFS_BACKING_MODE")]
+    pub rootfs_backing_mode: RootfsBackingMode,
+    #[config(env = "AENV_UB_ROOTFS_DEMAND_INDEX", parse_env = parse_required_path)]
+    pub rootfs_demand_index: Option<PathBuf>,
     #[config(
         env = "AENV_SNAPSHOT_LOCAL_CACHE_PATH",
         parse_env = parse_required_path,
@@ -369,6 +374,15 @@ pub struct SnapshotConfig {
     pub publish_compression: SnapshotPublishCompressionConfig,
     #[config(nested)]
     pub memory_startup_pack: SnapshotStartupPackConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootfsBackingMode {
+    Legacy,
+    Local,
+    UbFull,
+    UbDemand,
 }
 
 #[derive(Debug, Config, Clone)]

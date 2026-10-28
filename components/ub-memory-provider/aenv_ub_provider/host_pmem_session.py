@@ -37,6 +37,7 @@ class MountedSession:
                        'ownerStartTicks':owner_ticks, 'sharedBackingReleaseAuthorized':False}
         self.fd = None
         self.lease = self.mount = self.status = None
+        self.consumers = []
         self.persist()
 
     def persist(self):
@@ -70,6 +71,11 @@ class MountedSession:
     def export_release(self, path):
         return host_pmem_guard.write_release(path, self.record)
 
+    def retain_consumer(self, consumer):
+        if self.record['phase'] not in ('mounted_pending_file_verification','local_read_verified'):
+            raise RuntimeError('Cannot attach a consumer to this session phase')
+        self.consumers.append(consumer)
+
     def verify(self, filename, length, sha256):
         if self.record['phase'] not in ('mounted_pending_file_verification', 'local_read_verified'):
             raise RuntimeError('Session is not ready for DAX reads')
@@ -95,6 +101,8 @@ class MountedSession:
         """
         if self.record['phase'] == 'local_resources_released':
             return dict(self.record)
+        if any(not consumer.retired for consumer in self.consumers):
+            raise RuntimeError('Rootfs broker consumer not retired; retain DAX mount and UB lease')
         self.update('phase', 'retiring')
         try:
             if self.mount is not None and self.mount.state['phase'] != 'mount_absent':

@@ -42,6 +42,8 @@ class NativeChunkPublisher:
         self.records = {}
         self.live = {}
         self.initialize_attempted = False
+        self.finalize_attempted = False
+        self.finalize_acknowledged = False
         self.lock = threading.RLock()
 
     def _record(self, name, **values):
@@ -153,8 +155,19 @@ class NativeChunkPublisher:
             self._finalize()
 
     def _finalize(self):
+        if self.finalize_acknowledged:
+            return
         require(not self.live and all(r.get('deleteAcknowledged') is True for r in self.records.values()),
                 'Live or uncertain chunks prevent SDK finalization')
         if self.backend is not None:
+            require(not self.finalize_attempted, 'SDK finalization outcome uncertain; no implicit retry')
+            self.finalize_attempted = True
+            self.save({'version':1,'initializeAttempted':self.initialize_attempted,
+                       'finalizeAttempted':True,'finalizeAcknowledged':False,
+                       'objects':list(self.records.values())})
             self.backend.finalize()
+            self.finalize_acknowledged = True
+            self.save({'version':1,'initializeAttempted':self.initialize_attempted,
+                       'finalizeAttempted':True,'finalizeAcknowledged':True,
+                       'objects':list(self.records.values())})
             self.backend = None

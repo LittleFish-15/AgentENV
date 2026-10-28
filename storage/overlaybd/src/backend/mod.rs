@@ -8,6 +8,8 @@ pub mod switch;
 pub mod tar;
 pub mod ub;
 pub(crate) mod ub_protocol;
+pub mod demand;
+pub(crate) mod demand_protocol;
 
 // Backward-compatible path while implementation is aligned to overlaybd registryfs_v2.
 #[cfg(feature = "full")]

@@ -75,6 +75,30 @@ class StoredDaxMapping:
                 start - stored.HEADER_BYTES, stop - start)
         return bytes(result)
 
+    @classmethod
+    def from_fd(cls, fd, replica, device):
+        """Adopt an inherited readonly DAX FD; no path reopen or mmap.
+
+        Ownership transfers on entry, including validation failure. The parent
+        keeps its mount/UB lease until the broker has explicitly retired.
+        """
+        value=cls.__new__(cls)
+        value.fd=fd;value.mapping=None;value.access='read_iter'
+        try:
+            replica.validate()
+            if replica.allowRepositoryFallback:
+                raise ValueError('Inherited DAX file cannot enable fallback')
+            value.replica=replica;value.header=replica.header()
+            value.observed=fsdax.validate_fd(fd,replica.fileBytes)
+            if value.observed['device']!=device:
+                raise ValueError('Inherited file does not belong to the declared DAX volume')
+            stored.verify_mapping(replica,value)
+            fsdax.validate_fd(fd,replica.fileBytes)
+            return value
+        except BaseException:
+            value.close()
+            raise
+
     def read_payload(self, offset, count):
         if self.access == 'mmap':
             return self.mapping[offset:offset + count]

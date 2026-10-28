@@ -247,15 +247,55 @@ pub(crate) fn ub_replica_index(kind: &str) -> Option<PathBuf> {
     std::env::var_os(variable).map(PathBuf::from)
 }
 
+/// The bool identifies the demand index schema. Memory keeps its original path.
+pub(crate) fn layer_backing_index(kind: &str) -> RepositoryResult<Option<(PathBuf, bool)>> {
+    use crate::cfg::{ConfigManager, RootfsBackingMode};
+    if kind != "rootfs" {
+        return Ok(ub_replica_index(kind).map(|path| (path, false)));
+    }
+    let snapshot = &ConfigManager::global_config().snapshot;
+    select_rootfs_index(snapshot.rootfs_backing_mode, ub_replica_index("rootfs"),
+                        snapshot.rootfs_demand_index.clone())
+        .map_err(|error| RepositoryError::backend("select rootfs backing mode", error))
+}
+
+fn select_rootfs_index(mode: crate::cfg::RootfsBackingMode, full: Option<PathBuf>, demand: Option<PathBuf>)
+    -> anyhow::Result<Option<(PathBuf, bool)>> {
+    use crate::cfg::RootfsBackingMode;
+    match mode {
+        RootfsBackingMode::Legacy => {
+            anyhow::ensure!(demand.is_none(), "demand index requires explicit ub_demand mode");
+            Ok(full.map(|path| (path, false)))
+        }
+        RootfsBackingMode::Local => {
+            anyhow::ensure!(full.is_none() && demand.is_none(), "local mode conflicts with UB indices");
+            Ok(None)
+        }
+        RootfsBackingMode::UbFull => {
+            anyhow::ensure!(demand.is_none(), "full and demand indices conflict");
+            Ok(Some((full.ok_or_else(|| anyhow::anyhow!("ub_full needs AENV_UB_ROOTFS_REPLICAS"))?, false)))
+        }
+        RootfsBackingMode::UbDemand => {
+            anyhow::ensure!(full.is_none(), "ub_demand cannot use the full UB index");
+            let path = demand.ok_or_else(|| anyhow::anyhow!("ub_demand needs its explicit metadata index"))?;
+            anyhow::ensure!(path.is_absolute(), "demand index must be absolute");
+            Ok(Some((path, true)))
+        }
+    }
+}
+
 pub(crate) async fn resolve_ub_runtime_config(
     source: &Path,
     kind: &str,
 ) -> RepositoryResult<PathBuf> {
-    let Some(index) = ub_replica_index(kind) else {
+    let Some((index, demand)) = layer_backing_index(kind)? else {
         return Ok(source.to_path_buf());
     };
     let source = source.to_path_buf();
-    tokio::task::spawn_blocking(move || overlaybd::config::ub_runtime_config_view(&source, &index))
+    tokio::task::spawn_blocking(move || {
+        if demand { overlaybd::config::demand_runtime_config_view(&source, &index) }
+        else { overlaybd::config::ub_runtime_config_view(&source, &index) }
+    })
         .await
         .map_err(|error| RepositoryError::backend("join UB runtime config binding", error))?
         .map_err(|error| RepositoryError::backend("bind UB runtime config", error))

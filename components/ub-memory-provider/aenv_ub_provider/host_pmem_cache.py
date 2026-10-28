@@ -85,7 +85,11 @@ def collect(file_fd, length, volume):
             address=None;raise OSError(ctypes.get_errno(),'Block cache mmap failed')
         vector=(ctypes.c_ubyte*((volume.bytes+page-1)//page))()
         if libc.mincore(address,volume.bytes,vector):raise OSError(ctypes.get_errno(),'Block cache mincore failed')
-        return {'state':'measured',**count_residency(vector,ranges,page),
+        logical=0;file_ranges=[]
+        for offset,size in ranges:
+            file_ranges.append({'fileOffset':logical,'deviceOffset':offset,'bytes':size})
+            logical+=size
+        return {'state':'measured',**count_residency(vector,ranges,page),'fileDataRanges':file_ranges,
                 'meaning':'ordinary block cache; data extents separated from other cached blocks'}
     except (OSError,ValueError) as error:
         return {'state':'unavailable','reason':str(error),'blockPageCacheBytes':None,
