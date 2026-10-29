@@ -2,6 +2,7 @@ import base64
 import copy
 import datetime as dt
 import gzip
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -43,9 +44,10 @@ class RelayTests(unittest.TestCase):
                          'machineId': 'fixture-machine', 'bootId': 'fixture-boot',
                          'kernel': 'fixture', 'architecture': 'aarch64'}
         self.config = {'protocol': relay.VERSION, 'node': 'node-a', 'sessionId': 'session-one',
-                       'uid': 1204, 'gid': 1205, 'hostname': 'server1', 'machineId': 'fixture-machine',
+                       'uid': 1204, 'gid': 1205, 'mode': 'manual', 'hostname': 'server1', 'machineId': 'fixture-machine',
                        'runnerSha256': 'fixture-runner', 'expiresAt': at(NOW + 3600),
                        'allowedOperations': ['identity-v1', 'retained-inventory-v1'],
+                       'allowedScopes': ['readonly'],
                        'identity': self.identity, 'resultRepo': 'owner/private-results',
                        'resultRepoId': 2, 'resultBranch': 'main'}
         self.job = {'schema': 1, 'jobId': 'job-one', 'node': 'node-a', 'sessionId': 'session-one',
@@ -188,7 +190,7 @@ class RelayTests(unittest.TestCase):
         directory = self.mkdir(self.root / 'child-environment')
         with patch.dict(relay.os.environ, {'GITHUB_TOKEN': 'not-for-child', 'OTHER_SECRET': 'private'}), \
              patch.object(relay.subprocess, 'Popen', return_value=Child()) as spawn:
-            relay.execute_readonly(['reviewed-program'], directory, 1)
+            relay.execute_bounded(['reviewed-program'], directory, 1)
         env = spawn.call_args.kwargs['env']
         self.assertNotIn('GITHUB_TOKEN', env)
         self.assertNotIn('OTHER_SECRET', env)
@@ -199,6 +201,102 @@ class RelayTests(unittest.TestCase):
             with self.assertRaises(relay.Stop):
                 relay.prompt_tokens()
         prompt.assert_not_called()
+
+    def manual_queue(self, ids):
+        return {'schema': 1, 'mode': 'manual', 'roundId': 'round-one',
+                'node': 'node-a', 'sessionId': 'session-one', 'jobIds': ids, 'stop': False}
+
+    def test_manual_invocation_fetches_once_executes_once_and_returns(self):
+        fetched = []
+        def fetch(job_id):
+            fetched.append(job_id)
+            return self.job
+        result = relay.manual_turn(self.runner(), self.manual_queue(['job-one']), fetch, self.identity, NOW)
+        self.assertEqual(fetched, ['job-one'])
+        self.assertEqual(self.executions, 1)
+        self.assertEqual(result['state'], 'round_uploaded')
+        self.assertTrue(result['nextStepRequiresUserInvocation'])
+
+    def test_manual_invocation_does_not_execute_a_future_round(self):
+        with self.assertRaises(relay.Stop):
+            relay.manual_turn(self.runner(), self.manual_queue(['job-one', 'job-two']),
+                              lambda job_id: self.job, self.identity, NOW)
+        self.assertEqual(self.executions, 0)
+
+    def test_repeating_manual_command_does_not_repeat_uploaded_task(self):
+        queue = self.manual_queue(['job-one'])
+        first = relay.manual_turn(self.runner(), queue, lambda x: self.job, self.identity, NOW)
+        second = relay.manual_turn(self.runner(), queue, lambda x: self.job, self.identity, NOW)
+        self.assertEqual(first['state'], 'round_uploaded')
+        self.assertEqual(second['state'], 'already_uploaded')
+        self.assertEqual(self.executions, 1)
+
+    def test_next_manual_round_only_runs_after_next_invocation(self):
+        relay.manual_turn(self.runner(), self.manual_queue(['job-one']), lambda x: self.job, self.identity, NOW)
+        self.assertEqual(self.executions, 1)
+        next_job = dict(self.job, jobId='job-two')
+        queue = dict(self.manual_queue(['job-two']), roundId='round-two')
+        result = relay.manual_turn(self.runner(), queue, lambda x: next_job, self.identity, NOW)
+        self.assertEqual(result['roundId'], 'round-two')
+        self.assertEqual(self.executions, 2)
+
+    def test_empty_manual_round_returns_immediately_without_fetch(self):
+        def forbidden(job_id):
+            self.fail('Empty round must not fetch or wait for a job')
+        result = relay.manual_turn(self.runner(), self.manual_queue([]), forbidden, self.identity, NOW)
+        self.assertEqual(result['state'], 'no_task')
+        self.assertEqual(self.executions, 0)
+
+    def reviewed_job(self, raw):
+        script = {'repo': relay.SOURCE_REPO, 'commit': 'a' * 40,
+                  'path': 'dev-relay/example_readonly.py',
+                  'blob': hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest(),
+                  'sha256': relay.digest(raw), 'bytes': len(raw), 'seconds': 30,
+                  'scope': 'readonly', 'nodes': ['node-a']}
+        self.config['allowedOperations'].append('reviewed-python-v1')
+        return dict(self.job, kind='reviewed-python-v1', script=script, input={})
+
+    def test_next_reviewed_script_can_be_selected_without_changing_client(self):
+        raw = b'print("reviewed-read-only-fixture")\n'
+        job = self.reviewed_job(raw)
+        class Public:
+            def source(self, descriptor):
+                return raw
+        self.runner(public=Public()).run_job(job, self.identity, NOW)
+        self.assertEqual(self.executions, 1)
+        result = json.loads(next(iter(self.results.files.values())))
+        self.assertEqual(result['script']['sha256'], relay.digest(raw))
+
+    def test_reviewed_script_cannot_change_repository_or_request_root_scope(self):
+        job = self.reviewed_job(b'fixture')
+        for field, value in (('repo', 'other/repository'), ('scope', 'root'), ('path', 'dev-relay/../outside.py')):
+            changed = copy.deepcopy(job); changed['script'][field] = value
+            with self.subTest(field=field), self.assertRaises(relay.Stop):
+                self.runner().run_job(changed, self.identity, NOW)
+        self.assertEqual(self.executions, 0)
+
+    def test_reviewed_script_input_is_a_private_json_file_not_shell_arguments(self):
+        raw = b'print("fixture")\n'
+        job = self.reviewed_job(raw)
+        job['input'] = {'message': 'text with ; symbols remains JSON data'}
+        class Public:
+            def source(self, descriptor):return raw
+        seen = []
+        def execute(argv, directory, seconds):
+            seen.extend(argv)
+            self.assertEqual(relay.load(directory / 'task-input.json'), job['input'])
+            return self.execute(argv, directory, seconds)
+        self.runner(public=Public(), execute=execute).run_job(job, self.identity, NOW)
+        self.assertEqual(len(seen), 4)
+        self.assertNotIn(job['input']['message'], seen)
+
+    def test_reviewed_script_wrong_source_bytes_are_rejected(self):
+        job = self.reviewed_job(b'approved-source')
+        class Public:
+            def source(self, descriptor):return b'other-source'
+        with self.assertRaises(relay.Stop):
+            self.runner(public=Public()).run_job(job, self.identity, NOW)
+        self.assertEqual(self.executions, 0)
 
 
 class ApiTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Bounded, ordinary-user GitHub relay. v1 executes only reviewed read-only operations."""
+"""User-triggered GitHub relay: fetch one round, execute once, upload, exit."""
 import argparse
 import base64
 import datetime as dt
@@ -31,7 +31,11 @@ OPS = {
         'bytes': 10656,
     },
     'identity-v1': {'nodes': ('node-a', 'node-b', 'node-c', 'node-d'), 'seconds': 15},
+    'reviewed-python-v1': {'nodes': ('node-a', 'node-b', 'node-c', 'node-d'), 'seconds': 300},
 }
+SCOPES = {'node-a': ('readonly', 'source-export'), 'node-b': ('readonly', 'source-export'),
+          'node-c': ('readonly', 'workspace-files'), 'node-d': ('readonly', 'workspace-files')}
+SCOPE_SECONDS = {'readonly': 300, 'source-export': 1800, 'workspace-files': 7200}
 
 
 class Stop(RuntimeError):
@@ -217,7 +221,12 @@ class GitHub:
         need(status == 200 and current == raw, 'Result upload not confirmed byte-for-byte')
 
     def source(self, operation):
-        status, row, _ = self.request('GET', '/repos/' + SOURCE_REPO + '/git/blobs/' + operation['blob'])
+        if 'commit' in operation:
+            path = '/repos/' + SOURCE_REPO + '/contents/' + urllib.parse.quote(operation['path'], safe='/')
+            path += '?ref=' + operation['commit']
+        else:
+            path = '/repos/' + SOURCE_REPO + '/git/blobs/' + operation['blob']
+        status, row, _ = self.request('GET', path)
         need(status == 200 and row.get('sha') == operation['blob'] and row.get('encoding') == 'base64', 'Source blob differs')
         raw = base64.b64decode(''.join(row['content'].split()), validate=True)
         need(len(raw) == row['size'] == operation['bytes'] and digest(raw) == operation['sha256'], 'Source digest differs')
@@ -232,8 +241,10 @@ def validate_profile(profile, current, runner_sha, now):
     need(current['architecture'] == 'aarch64', 'This experimental cohort requires ARM64')
     need(not profile.get('machineId') or profile['machineId'] == current['machineId'], 'Machine identity differs')
     need(profile['runnerSha256'] == runner_sha, 'Runner version differs; explicit update needed')
+    need(profile.get('mode') == 'manual', 'Only user-triggered manual rounds are supported')
     need(now < timestamp(profile['expiresAt']), 'Relay session expired')
     need(set(profile['allowedOperations']) <= {name for name, op in OPS.items() if profile['node'] in op['nodes']}, 'Unsupported operation scope')
+    need(set(profile.get('allowedScopes', ())) <= set(SCOPES[profile['node']]), 'Unsupported node capability')
 
 
 def choose_node(session, current):
@@ -247,13 +258,34 @@ def choose_node(session, current):
 
 
 def validate_job(job, config, current, now):
-    need(set(job) == {'schema', 'jobId', 'node', 'sessionId', 'kind', 'notBefore', 'expiresAt'}, 'Unexpected job fields; arbitrary commands are forbidden')
+    fields = {'schema', 'jobId', 'node', 'sessionId', 'kind', 'notBefore', 'expiresAt'}
+    if job.get('kind') == 'reviewed-python-v1':
+        fields |= {'script', 'input'}
+    need(set(job) == fields, 'Unexpected job fields; arbitrary commands are forbidden')
     need(job['schema'] == 1 and job['node'] == config['node'] and job['sessionId'] == config['sessionId'], 'Job identity differs')
     identifier(job['jobId'])
     need(job['kind'] in config['allowedOperations'] and job['kind'] in OPS, 'Operation not allowed')
     need(job['node'] in OPS[job['kind']]['nodes'], 'Operation not allowed on this node')
     need(timestamp(job['notBefore']) <= now < timestamp(job['expiresAt']) <= timestamp(config['expiresAt']), 'Job outside valid time window')
     need(current == config['identity'], 'Boot/machine/user identity changed; explicit reconciliation required')
+    if job['kind'] == 'reviewed-python-v1':
+        script = job['script']
+        need(isinstance(script, dict) and set(script) == {'repo', 'commit', 'path', 'blob', 'sha256',
+             'bytes', 'seconds', 'scope', 'nodes'}, 'Reviewed script descriptor differs')
+        need(script['repo'] == SOURCE_REPO and re.fullmatch('[0-9a-f]{40}', script['commit'])
+             and re.fullmatch('[0-9a-f]{40}', script['blob'])
+             and re.fullmatch('[0-9a-f]{64}', script['sha256']), 'Untrusted source repository or identity')
+        need(script['path'].startswith('dev-relay/') and script['path'].endswith('.py')
+             and re.fullmatch(r'[A-Za-z0-9_./-]+', script['path'])
+             and '..' not in Path(script['path']).parts, 'Script must be reviewed experimental Python source')
+        need(isinstance(script['nodes'], list) and config['node'] in script['nodes']
+             and script['scope'] in config.get('allowedScopes', ())
+             and script['scope'] in SCOPES[config['node']], 'Script not approved for this node/scope')
+        need(type(script['bytes']) is int and 0 < script['bytes'] <= 128 * 1024
+             and type(script['seconds']) is int and 1 <= script['seconds'] <= SCOPE_SECONDS[script['scope']],
+             'Script resource bound differs')
+        need(isinstance(job['input'], dict) and len(encoded(job['input'])) <= 64 * 1024,
+             'Task input must be bounded JSON data')
 
 
 def redact(raw, secrets):
@@ -265,7 +297,7 @@ def redact(raw, secrets):
     return re.sub(r'(?im)(authorization\s*[:=]\s*)(?:bearer|token)\s+\S+', r'\1[REDACTED]', text).encode()
 
 
-def execute_readonly(argv, directory, seconds):
+def execute_bounded(argv, directory, seconds):
     stdout_path, stderr_path = directory / 'stdout.log', directory / 'stderr.log'
     env = {key: os.environ[key] for key in ('HOME', 'LANG', 'LC_ALL') if key in os.environ}
     env.update(PATH='/usr/bin:/bin:/usr/sbin:/sbin', PYTHONDONTWRITEBYTECODE='1')
@@ -276,9 +308,9 @@ def execute_readonly(argv, directory, seconds):
         deadline = time.monotonic() + seconds
         while child.poll() is None:
             if time.monotonic() >= deadline:
-                reason = 'read_only_task_timeout'
+                reason = 'task_timeout'
             elif stdout_path.stat().st_size > MAX_OUTPUT or stderr_path.stat().st_size > MAX_ERROR:
-                reason = 'read_only_task_output_limit'
+                reason = 'task_output_limit'
             if reason:
                 child.terminate()
                 try:
@@ -288,12 +320,12 @@ def execute_readonly(argv, directory, seconds):
                 break
             time.sleep(0.2)
     if stdout_path.stat().st_size > MAX_OUTPUT or stderr_path.stat().st_size > MAX_ERROR:
-        reason = reason or 'read_only_task_output_limit'
+        reason = reason or 'task_output_limit'
     return {'returncode': child.returncode, 'stopReason': reason}
 
 
 class Runner:
-    def __init__(self, root, config, control, results, public=None, execute=execute_readonly, mkdir=secure_dir):
+    def __init__(self, root, config, control, results, public=None, execute=execute_bounded, mkdir=secure_dir):
         self.root, self.config, self.control, self.results = Path(root), config, control, results
         self.public, self.execute, self.mkdir = public or GitHub(), execute, mkdir
 
@@ -337,7 +369,7 @@ class Runner:
             need(state['jobSha256'] == job_sha, 'Job ID reused with different payload')
             self.upload(directory)
             return
-        operation = OPS[job['kind']]
+        operation = job['script'] if job['kind'] == 'reviewed-python-v1' else OPS[job['kind']]
         if job['kind'] == 'identity-v1':
             argv = [sys.executable, '-I', '-B', str(Path(__file__).resolve()), '_identity']
         else:
@@ -354,6 +386,8 @@ class Runner:
         self.mkdir(directory)
         state = {'state': 'running', 'jobId': job['jobId'], 'jobSha256': job_sha,
                  'startedAt': utc(), 'identity': current}
+        if job['kind'] == 'reviewed-python-v1':
+            atomic(directory / 'task-input.json', job['input'], replace=False)
         atomic(directory / 'state.json', state, replace=False)
         # Once running is journaled, any exception requires reconciliation, never blind replay.
         try:
@@ -372,8 +406,11 @@ class Runner:
         result = {'schema': 1, 'protocol': VERSION, 'node': self.config['node'],
                   'sessionId': self.config['sessionId'], 'jobId': job['jobId'], 'jobSha256': job_sha,
                   'operation': job['kind'], 'identity': current, 'startedAt': state['startedAt'],
+                  'script': job.get('script'),
                   'finishedAt': utc(), 'execution': execution, 'logs': logs,
-                  'scope': 'read-only job result; no hardware/data-path/savings acceptance inferred',
+                  'scope': job['script']['scope'] if job['kind'] == 'reviewed-python-v1' else 'readonly',
+                  'acceptance': 'transport receipt only; workload/hardware/savings acceptance is separate',
+                  'resourceCleanupConfirmed': False,
                   'SDKCalledByRelay': False, 'rootOperationsSupported': False}
         atomic(directory / 'result.json', result, replace=False)
         state.update(state='upload_pending', resultSha256=digest(encoded(result)))
@@ -382,11 +419,16 @@ class Runner:
 
     def flush(self):
         jobs = self.root / 'jobs'
+        uploaded = []
         if jobs.is_dir():
             need(not jobs.is_symlink() and jobs.resolve() == jobs, 'Jobs root redirected')
             for directory in sorted(jobs.iterdir()):
                 need(directory.is_dir() and not directory.is_symlink(), 'Job directory differs')
+                previous = load(directory / 'state.json')['state']
                 self.upload(directory)
+                if previous == 'upload_pending':
+                    uploaded.append(directory.name)
+        return uploaded
 
 
 def prompt_tokens():
@@ -436,12 +478,39 @@ def enroll(args, root):
     print('RELAY_ENROLLED_NODE=' + config['node'])
 
 
-def run(root, max_minutes):
+def manual_turn(runner, queue, fetch_job, current, now, secrets=()):
+    config = runner.config
+    need(isinstance(queue, dict) and queue.get('schema') == 1 and queue.get('mode') == 'manual'
+         and queue.get('sessionId') == config['sessionId'] and queue.get('node') == config['node'],
+         'Manual round queue identity differs')
+    round_id = identifier(queue['roundId'])
+    uploaded = runner.flush()
+    if queue.get('stop') is True:
+        return {'state': 'queue_stopped', 'roundId': round_id, 'resultsResent': uploaded}
+    jobs = queue.get('jobIds')
+    need(isinstance(jobs, list) and len(jobs) <= 1, 'Each manual invocation allows at most one task')
+    if not jobs:
+        return {'state': 'no_task', 'roundId': round_id, 'resultsResent': uploaded}
+    job_id = identifier(jobs[0])
+    job = fetch_job(job_id)
+    need(job['jobId'] == job_id, 'Fetched job ID differs from queue')
+    validate_job(job, config, current, now)
+    print('RELAY_MANUAL_TASK node=' + config['node'] + ' round=' + round_id +
+          ' task=' + job_id + ' kind=' + job['kind'], flush=True)
+    state_path = runner.root / 'jobs' / job_id / 'state.json'
+    already_done = state_path.exists() and load(state_path)['state'] == 'uploaded'
+    runner.run_job(job, current, now, secrets)
+    result = load(runner.root / 'jobs' / job_id / 'result.json')
+    return {'state': 'already_uploaded' if already_done else 'round_uploaded', 'roundId': round_id,
+            'jobId': job_id, 'execution': result['execution'], 'resultsResent': uploaded,
+            'nextStepRequiresUserInvocation': True}
+
+
+def run(root):
     import fcntl
     current = identity()
     config = load(root / 'config.json', True)
     secrets = load(root / 'credentials.json', True)
-    validate_profile(config, current, digest(Path(__file__).read_bytes()), time.time())
     need(current == config['identity'], 'Boot identity changed')
     control, results = GitHub(secrets['controlToken']), GitHub(secrets['resultToken'])
     lock_fd = os.open(root / 'runner.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -454,57 +523,41 @@ def run(root, max_minutes):
         except BlockingIOError:
             raise Stop('Another relay runner already holds this node lock') from None
         control.private_repo(config['controlRepo'], config['controlRepoId'])
+        code, raw, _ = control.contents(config['controlRepo'], 'profiles/' + config['node'] + '.json', config['controlBranch'])
+        if code != 200:
+            raise Network(code)
+        profile = json.loads(raw)
+        validate_profile(profile, current, digest(Path(__file__).read_bytes()), time.time())
+        need(profile['node'] == config['node'] and profile['sessionId'] == config['sessionId'],
+             'Session changed; previous local journals must be reconciled first')
+        for key in ('protocol', 'node', 'sessionId', 'uid', 'gid', 'hostname', 'machineId',
+                    'runnerSha256', 'expiresAt', 'allowedOperations', 'allowedScopes', 'mode'):
+            config[key] = profile[key]
+        atomic(root / 'config.json', config)
         registration = {'protocol': VERSION, 'node': config['node'], 'sessionId': config['sessionId'],
                         'identity': current, 'runnerSha256': config['runnerSha256'],
                         'allowedOperations': config['allowedOperations']}
         runner = Runner(root, config, control, results)
-        etag, queue = None, None
-        registered = False
-        deadline = min(time.monotonic() + max_minutes * 60,
-                       time.monotonic() + timestamp(config['expiresAt']) - time.time())
-        print('RELAY_RUNNING_' + config['node'], flush=True)
-        while time.monotonic() < deadline and not (root / 'stop.request').exists():
-            pause = 60
-            try:
-                need(identity() == current, 'Node identity changed')
-                if not registered:
-                    results.immutable_result(config['resultRepo'], config['resultRepoId'], config['resultBranch'],
-                        'registrations/' + config['sessionId'] + '/' + config['node'] + '.json', encoded(registration))
-                    registered = True
-                runner.flush()
-                code, raw, new_tag = control.contents(config['controlRepo'], 'queues/' + config['node'] + '.json',
-                                                       config['controlBranch'], etag)
-                if code == 200:
-                    queue = json.loads(raw); etag = new_tag
-                elif code != 304:
-                    raise Network(code)
-                queue_unchanged = code == 304
-                need(isinstance(queue, dict) and queue.get('sessionId') == config['sessionId']
-                     and queue.get('node') == config['node'] and queue.get('schema') == 1, 'Queue identity differs')
-                if queue.get('stop') is True:
-                    break
-                jobs = queue.get('jobIds')
-                need(isinstance(jobs, list) and len(jobs) <= 16 and len(set(jobs)) == len(jobs), 'Invalid queue')
-                for job_id in jobs:
-                    if (root / 'stop.request').exists():
-                        break
-                    identifier(job_id)
-                    local_state = root / 'jobs' / job_id / 'state.json'
-                    if queue_unchanged and local_state.exists() and load(local_state)['state'] == 'uploaded':
-                        continue
-                    code, raw, _ = control.contents(config['controlRepo'], 'jobs/' + job_id + '.json', config['controlBranch'])
-                    if code != 200:
-                        raise Network(code)
-                    runner.run_job(json.loads(raw), current, time.time(), tuple(secrets.values()))
-                atomic(root / 'status.json', {'state': 'polling', 'node': config['node'], 'lastPoll': utc()})
-            except Network as error:
-                pause = error.retry_after
-                atomic(root / 'status.json', {'state': 'network_wait_results_preserved', 'httpStatus': error.status, 'at': utc()})
-            until = min(time.monotonic() + pause, deadline)
-            while time.monotonic() < until and not (root / 'stop.request').exists():
-                time.sleep(min(1, max(0, until - time.monotonic())))
-        atomic(root / 'status.json', {'state': 'stopped_or_session_expired', 'at': utc()})
-        print('RELAY_STOPPED_NO_RESOURCE_CLEANUP', flush=True)
+        if (root / 'stop.request').exists():
+            print('RELAY_STOP_REQUESTED_NO_TASK_EXECUTED'); return
+        results.immutable_result(config['resultRepo'], config['resultRepoId'], config['resultBranch'],
+            'registrations/' + config['sessionId'] + '/' + config['node'] + '.json', encoded(registration))
+        code, raw, _ = control.contents(config['controlRepo'], 'queues/' + config['node'] + '.json',
+                                       config['controlBranch'])
+        if code != 200:
+            raise Network(code)
+        def fetch_job(job_id):
+            code, raw, _ = control.contents(config['controlRepo'], 'jobs/' + job_id + '.json', config['controlBranch'])
+            if code != 200:
+                raise Network(code)
+            return json.loads(raw)
+        # Secrets stay in memory for redaction and never enter a child environment.
+        outcome = manual_turn(runner, json.loads(raw), fetch_job, current, time.time(), tuple(secrets.values()))
+        atomic(root / 'status.json', dict(outcome, node=config['node'], finishedAt=utc()))
+        print('BEGIN_RELAY_MANUAL_ROUND')
+        print(json.dumps(outcome, indent=2))
+        print('END_RELAY_MANUAL_ROUND')
+        print('RELAY_EXITED_WAIT_FOR_NEXT_USER_COMMAND', flush=True)
 
 
 def main():
@@ -514,7 +567,7 @@ def main():
     p = sub.add_parser('enroll')
     p.add_argument('--node', default='auto', choices=('auto', 'node-a', 'node-b', 'node-c', 'node-d'))
     p.add_argument('--control-repo', required=True); p.add_argument('--result-repo', required=True)
-    p = sub.add_parser('run'); p.add_argument('--max-minutes', type=int, default=240)
+    sub.add_parser('run')
     sub.add_parser('stop'); sub.add_parser('status'); sub.add_parser('_identity')
     args = parser.parse_args()
     os.umask(0o077)
@@ -527,8 +580,7 @@ def main():
     if args.command == 'enroll':
         enroll(args, root)
     elif args.command == 'run':
-        need(1 <= args.max_minutes <= 480, 'Run duration must be 1..480 minutes')
-        run(root, args.max_minutes)
+        run(root)
     elif args.command == 'stop':
         atomic(root / 'stop.request', {'requestedAt': utc()})
         print('STOP_REQUESTED_AFTER_CURRENT_READ_ONLY_TASK')

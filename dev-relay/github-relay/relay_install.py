@@ -11,9 +11,9 @@ import subprocess
 import tempfile
 
 BASE = Path('/home/jwk/agent/github-relay')
-RUNNER_BLOB = '1ec4535c68139e044b8340ded6c44f23687b70de'
-RUNNER_SHA = '8e8aae80d7e97df1d9718dd842c12e054950cc0634c9d8e3fc2d71d21606d49f'
-RUNNER_BYTES = 28244
+RUNNER_BLOB = '4fe2da5a6c3a84463605e4db884b1fc3d9ecd8f0'
+RUNNER_SHA = 'b958c459c09db2fe72d508762e8bdab06bd642bfc2f33c6723462ac45353fdcd'
+RUNNER_BYTES = 31491
 RUNNER_NAME = 'runner-' + RUNNER_SHA[:12] + '.py'
 
 

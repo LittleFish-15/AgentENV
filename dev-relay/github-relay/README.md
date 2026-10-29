@@ -1,106 +1,101 @@
-# AgentENV read-only GitHub relay v1
+# AgentENV manual GitHub exchange v1
 
-This first version closes the task/result transport loop for ordinary-user
-read-only inspections. It is not a generic shell agent, kernel deployment
-agent, or hardware acceptance test.
+This is a user-triggered script/result exchange. Each invocation fetches the
+current round, executes at most one assigned task, uploads the result, and exits.
+There is no background polling, daemon, automatic next step, or model heartbeat.
+The user says that execution is finished; the controller then reads results,
+analyzes them and publishes the next round. The user invokes the same entry again.
 
-## Separation and permissions
+## One-time setup
 
-- Reviewed runner/source code is distributed from the existing experiment branch.
-- Jobs/profiles/queues live in a **private control repository**. Node credentials
-  need Metadata read and Contents read there.
-- Registrations/results/attention receipts live in a **different private results
-  repository**. A second node credential needs Metadata read and Contents write.
-- Use dedicated fine-grained PATs, not desktop administrator credentials. Enter
-  them through the hidden terminal prompts. They are saved only in the ordinary
-  user's private state directory, with mode 0600. Do not paste them into chat,
-  shell arguments, environment exports, scripts, commits, or reports.
-- First enrollment requires an interactive terminal. Noninteractive secret input
-  and getpass's echoed fallback are refused before a token prompt is displayed.
-- All runtime actions require Linux, real/effective UID1204, matching GID1205,
-  the enrolled node identity, and zero Inheritable/Permitted/Effective/Ambient
-  capabilities. Root execution is refused.
-- Repository identity and private visibility are checked. Results are never
-  redirected to a public repository when private upload fails.
+Reviewed code is distributed from LittleFish-15/AgentENV's experiment branch.
+Private profiles, round queues and jobs live in a private control repository.
+Registrations and results live in a separate private results repository.
+Use a dedicated fine-grained Contents-read token for control and a different
+Contents-write token for results. Enter them only at hidden interactive prompts.
+They stay in a 0600 credential file in the enrolled user's private home state.
+No desktop administrator token is distributed. Noninteractive token prompts
+are rejected before getpass can fall back to echoed input.
 
-The runner cannot create GitHub PATs for the user. Initial token creation and
-starting the fixed entry once on each machine are onboarding steps. Subsequent
-task and result transfers do not require copying terminal logs into chat.
+Only ordinary Linux UID1204/GID1205 with zero Inheritable/Permitted/Effective/
+Ambient capabilities is accepted. Enrollment binds host, machine and current
+boot. Repository private visibility and identity are checked before uploads.
+Nothing falls back to a public result channel.
 
-## Supported operations
+## Reviewed tasks and scope
 
-1. `retained-inventory-v1`, on node-a/node-b only: the already reviewed immutable
-   inventory source, Git blob `040068bd8ef9e85f9fac8073eab3cc6c51557c8d`, SHA256
-   `b0788d2683d3038dc85fa9b3892f183d5eaf0ca8597a6fc715ee763db4319658`.
-   It inventories retained Runtime/FC/dependencies, selected snapshot metadata,
-   memory layers, private replay identities and the existing container. It does
-   not execute the replay, modify a service, allocate UB, or copy large payloads.
-2. `identity-v1`: reports the enrolled ordinary-user node identity.
+The initial round inventories A/B retained artifacts and obtains C/D identities.
+The historical inventory source is fixed to Git blob
+040068bd8ef9e85f9fac8073eab3cc6c51557c8d and SHA256
+b0788d2683d3038dc85fa9b3892f183d5eaf0ca8597a6fc715ee763db4319658.
+This does not start a service, execute the workload, create a Guest or allocate UB.
 
-No arbitrary `command`, `argv`, `env`, script URL or root operation is accepted
-in a job. A new operation needs a reviewed runner release and explicit scope.
-The complete four-Guest launcher/controller is still separate unfinished work;
-this relay does not turn a read-only inventory into a successful experiment.
+`reviewed-python-v1` can select the next reviewed Python script without changing
+the fixed client. Its descriptor binds this source repository, an immutable
+commit, a path under dev-relay/, Git blob, exact SHA256/length, node list, scope
+and a bounded duration. Source bytes must match before execution. No arbitrary
+shell command, URL, argv or environment is accepted. Optional input is bounded
+JSON data in the private job directory, not interpolated into shell arguments.
 
-## Local journal and retry behavior
+Profiles restrict operation/scope by node. A/B roles permit read-only inspection
+and approved immutable-source export; C/D roles permit read-only inspection and
+approved work within their ordinary workspace. The current profiles enable
+read-only scope. Reviewed task scripts remain responsible for validating their
+specific input paths, budgets and effects; this is not an OS filesystem sandbox.
+Root scope is not supported. Modules, mounts, system services and privilege changes
+still need the user's separate concrete approval and corresponding reviewed tools.
 
-- Private state defaults to `~/.local/state/agentenv-github-relay`.
-- An OS file lock prevents two runners from executing on the same enrollment.
-- Each job is bound to node, session, payload digest, current boot/machine/user
-  identity and a valid time window.
-- `running` is durably written before process launch. An interruption with an
-  unresolved running journal uploads an attention receipt and stops. It never
-  silently reruns the job or claims resource cleanup.
-- A completed process produces a durable `upload_pending` result. Network
-  failure retries only result upload, never the underlying operation.
-- Remote results are immutable. Existing identical bytes reconcile a lost
-  upload ACK; different bytes stop instead of being overwritten.
-- Logs have explicit size/time limits, known-token redaction and deterministic
-  compression. Truncation is reported, never hidden. The original logs stay local.
-- v1 can terminate only its own bounded read-only child at timeout/output limit.
-  This policy must not be reused for SDK allocation, Guest mutation or root work.
+## Manual round semantics
 
-Task queues use conditional requests/ETags, approximately one-minute polling,
-and bounded backoff. Results are uploaded at task boundaries. No per-second Git
-commits, large images, snapshots or payload files are used as the control channel.
+- One current round per node, with zero or one task. No task means immediate exit.
+- A private local journal binds job ID, payload hash and node/boot identity.
+- Repeating the command does not rerun an already uploaded job.
+- Upload failure preserves a completed result. Repeating the same command retries
+  upload only, rather than repeating the node operation.
+- A journal left running after interruption produces an attention receipt and
+  stops for reconciliation. It never silently retries or claims cleanup.
+- Results are immutable. Identical existing bytes reconcile an upload ACK;
+  different bytes stop without overwrite.
+- A node lock prevents two concurrent invocations on the same enrollment.
+- Logs have size/time limits, credential redaction and deterministic compression.
+  Truncation is explicit; the original bounded logs remain local.
+- Only the relay's own bounded child can be terminated for a read-only timeout
+  or output limit. Mutating task scripts must implement their own confirmed
+  lifecycle and must not treat interruption as successful rollback.
 
-## Commands
+Each user invocation reads the latest approved profile and round once. It does
+not wait for a new round. Publishing a later task does not start anything on a
+machine until the user runs the fixed command there again.
 
-After downloading the exact runner version and checking its published SHA:
+## Node commands
+
+After a one-time pinned installation:
+
+```bash
+bash /home/jwk/agent/github-relay/start.sh
+```
+
+The entry enrolls once if necessary, then executes one round and exits. Subsequent
+calls reuse the two credentials. Keep the interactive terminal open only until
+the current round finishes; no long-running terminal is required afterward.
+
+The implementation commands are:
 
 ```bash
 /usr/bin/python3 -I -B relay_runner.py enroll --control-repo OWNER/PRIVATE_CONTROL --result-repo OWNER/PRIVATE_RESULTS
 /usr/bin/python3 -I -B relay_runner.py run
-```
-
-Enrollment automatically selects a unique node from the private session profile.
-The first command prompts for the two restricted tokens only on first enrollment;
-later calls reuse the enrolled state. Existing identity mismatches are preserved,
-not overwritten. A partial enrollment requires explicit reconciliation.
-
-The first version runs in the foreground for up to 240 minutes, bounded further
-by the session expiry. Keep that terminal open. No system service is installed.
-The same fixed command can be used to restart after an ordinary disconnect;
-the journal prevents repeated completed jobs. Unknown running jobs stop for review.
-
-From another ordinary-user terminal:
-
-```bash
 /usr/bin/python3 -I -B relay_runner.py status
-/usr/bin/python3 -I -B relay_runner.py stop
 ```
 
-Stop is checked between read-only jobs; the current job is bounded by its own
-timeout. It performs no resource cleanup. A persisted stop request is not
-silently cleared by a later `run`. Do not delete state directories to bypass it.
+Use the exact installed runner path shown by the installation. Boot identity
+changes and unknown prior outcomes require explicit reconciliation. Do not remove
+state to bypass the guard. The optional stop flag blocks a future manual call;
+it performs no resource cleanup and is not silently cleared.
 
 ## Verification boundary
 
-Local tests cover wrong node/session/boot, arbitrary-command rejection,
-source mismatch, duplicate jobs, lost upload ACKs, upload-only retry,
-interruption reporting, private-repository enforcement, conflicting results,
-identity selection and credential redaction/environment isolation.
-
-These are logic/transport tests. Native Linux enrollment, filesystem permissions,
-locking and the actual private GitHub roundtrip from each target still require
-the first user-started node run. No Guest/UB/DAX or savings result is implied.
+Local tests cover one-call/one-round return, no automatic future task, duplicate
+calls, transfer-only retry, unknown interruption, source mismatch, node/boot/scope
+binding, repository privacy, immutable result conflicts, log redaction and hidden
+credential prompting. These do not constitute native target acceptance.
+Actual A/B/C/D roundtrips and later UB/DAX/Guest/cache/savings acceptance are separate.
