@@ -15,6 +15,8 @@ agent, or hardware acceptance test.
   them through the hidden terminal prompts. They are saved only in the ordinary
   user's private state directory, with mode 0600. Do not paste them into chat,
   shell arguments, environment exports, scripts, commits, or reports.
+- First enrollment requires an interactive terminal. Noninteractive secret input
+  and getpass's echoed fallback are refused before a token prompt is displayed.
 - All runtime actions require Linux, real/effective UID1204, matching GID1205,
   the enrolled node identity, and zero Inheritable/Permitted/Effective/Ambient
   capabilities. Root execution is refused.

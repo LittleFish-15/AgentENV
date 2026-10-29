@@ -193,6 +193,13 @@ class RelayTests(unittest.TestCase):
         self.assertNotIn('GITHUB_TOKEN', env)
         self.assertNotIn('OTHER_SECRET', env)
 
+    def test_noninteractive_enrollment_never_prompts_for_secret(self):
+        with patch.object(relay.sys.stdin, 'isatty', return_value=False), \
+             patch.object(relay.getpass, 'getpass') as prompt:
+            with self.assertRaises(relay.Stop):
+                relay.prompt_tokens()
+        prompt.assert_not_called()
+
 
 class ApiTests(unittest.TestCase):
     def test_public_results_repository_is_rejected_before_upload(self):

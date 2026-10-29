@@ -1,6 +1,8 @@
 """Install the pinned ordinary-user relay entry; no system services or root changes."""
 import argparse
+import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -9,9 +11,9 @@ import subprocess
 import tempfile
 
 BASE = Path('/home/jwk/agent/github-relay')
-RUNNER_COMMIT = 'defa56afc47446d57182d56e0fd99eddb8e42525'
-RUNNER_SHA = '8a8200b0d1dfe8e4fac70431ba61db5274a145b7e0a875195df640af93890adf'
-RUNNER_BYTES = 28097
+RUNNER_BLOB = '1ec4535c68139e044b8340ded6c44f23687b70de'
+RUNNER_SHA = '8e8aae80d7e97df1d9718dd842c12e054950cc0634c9d8e3fc2d71d21606d49f'
+RUNNER_BYTES = 28244
 RUNNER_NAME = 'runner-' + RUNNER_SHA[:12] + '.py'
 
 
@@ -74,12 +76,15 @@ def main():
         need(tool.st_uid == 0 and not stat.S_IMODE(tool.st_mode) & 0o022, 'curl ownership differs')
         fd, temporary = tempfile.mkstemp(prefix='download-', dir=BASE)
         os.close(fd)
-        url = 'https://api.github.com/repos/LittleFish-15/AgentENV/contents/dev-relay/github-relay/relay_runner.py?ref=' + RUNNER_COMMIT
+        url = 'https://api.github.com/repos/LittleFish-15/AgentENV/git/blobs/' + RUNNER_BLOB
         result = subprocess.run([str(curl), '-fL', '--connect-timeout', '10', '--max-time', '45',
-                                 '--max-filesize', '65536', '-H', 'Accept: application/vnd.github.raw+json',
+                                 '--max-filesize', '65536', '-H', 'Accept: application/vnd.github+json',
                                  url, '-o', temporary], stdin=subprocess.DEVNULL, timeout=50)
         need(result.returncode == 0, 'Download failed; temporary file preserved')
-        raw = Path(temporary).read_bytes()
+        metadata = json.loads(Path(temporary).read_bytes())
+        need(metadata.get('sha') == RUNNER_BLOB and metadata.get('encoding') == 'base64'
+             and metadata.get('size') == RUNNER_BYTES, 'Runner blob metadata differs')
+        raw = base64.b64decode(''.join(metadata['content'].split()), validate=True)
     need(len(raw) == RUNNER_BYTES and hashlib.sha256(raw).hexdigest() == RUNNER_SHA, 'Runner length or SHA differs')
     write_exact(target, raw, 0o600)
     start = BASE / 'start.sh'

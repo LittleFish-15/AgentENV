@@ -390,6 +390,8 @@ class Runner:
 
 
 def prompt_tokens():
+    need(sys.stdin.isatty() and sys.stderr.isatty(),
+         'First enrollment requires an interactive terminal; token echo fallback is refused')
     control = getpass.getpass('Control repository read token (hidden): ').strip()
     result = getpass.getpass('Results repository write token (hidden): ').strip()
     need(control.startswith('github_pat_') and result.startswith('github_pat_') and control != result,
