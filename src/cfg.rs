@@ -1046,6 +1046,7 @@ impl AppConfig {
     }
 
     fn validate(&self) -> Result<()> {
+        self.validate_rootfs_backing()?;
         self.validate_pool_config()?;
         self.image.cache.gc.validate()?;
         NetworkConfig::validate(&self.network)?;
@@ -1061,6 +1062,24 @@ impl AppConfig {
         self.validate_disk_rate_limit()?;
         self.validate_volume_limits()?;
         self.validate_template_builder()?;
+        Ok(())
+    }
+
+    fn validate_rootfs_backing(&self) -> Result<()> {
+        match self.snapshot.rootfs_backing_mode {
+            RootfsBackingMode::UbDemand => {
+                let index = self.snapshot.rootfs_demand_index.as_ref().ok_or_else(|| {
+                    anyhow!("ub_demand requires snapshot.rootfs_demand_index")
+                })?;
+                if !index.is_absolute() {
+                    bail!("snapshot.rootfs_demand_index must be absolute");
+                }
+            }
+            _ if self.snapshot.rootfs_demand_index.is_some() => {
+                bail!("snapshot.rootfs_demand_index requires ub_demand mode");
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1510,6 +1529,21 @@ impl SandboxProxyConfig {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn demand_rootfs_configuration_is_explicit_and_checked_at_startup() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.snapshot.rootfs_backing_mode, RootfsBackingMode::Legacy);
+        assert!(config.validate_rootfs_backing().is_ok());
+        config.snapshot.rootfs_backing_mode = RootfsBackingMode::UbDemand;
+        assert!(config.validate_rootfs_backing().is_err());
+        config.snapshot.rootfs_demand_index = Some(PathBuf::from("relative-index.json"));
+        assert!(config.validate_rootfs_backing().is_err());
+        config.snapshot.rootfs_demand_index = Some(std::env::temp_dir().join("demand-index.json"));
+        assert!(config.validate_rootfs_backing().is_ok());
+        config.snapshot.rootfs_backing_mode = RootfsBackingMode::UbFull;
+        assert!(config.validate_rootfs_backing().is_err());
+    }
 
     #[test]
     fn bundled_default_config_loads() -> Result<()> {

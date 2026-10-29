@@ -249,7 +249,7 @@ pub(crate) fn ub_replica_index(kind: &str) -> Option<PathBuf> {
 
 /// The bool identifies the demand index schema. Memory keeps its original path.
 pub(crate) fn layer_backing_index(kind: &str) -> RepositoryResult<Option<(PathBuf, bool)>> {
-    use crate::cfg::{ConfigManager, RootfsBackingMode};
+    use crate::cfg::ConfigManager;
     if kind != "rootfs" {
         return Ok(ub_replica_index(kind).map(|path| (path, false)));
     }

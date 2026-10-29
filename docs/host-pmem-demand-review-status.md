@@ -42,16 +42,37 @@ evidence that the demand chain has been accepted.
   protocol tests; the two counts must not be added as unique coverage.
 - `git diff --check` passed; publication excludes credentials, private payloads,
   and field reports.
-- The complete aarch64 OverlayBD cross-check has **not passed**: the local C
-  dependency compiler encountered `AccessDenied`. Full aenv build, workspace
-  formatting/clippy, and Linux integration checks remain required.
+- Update: the actual aarch64 OverlayBD library cross-check now passes after
+  resolving the local compiler-cache permission issue. This compiles the new
+  production VirtualFile backend, not just a protocol harness.
+- An isolated Rust 1.91.1 compiler and host/ARM64 standard libraries have now
+  been obtained and verified against official SHA256 records. With that
+  compiler, the default-full-feature ARM64 OverlayBD library and all test
+  targets compile, including the actual VirtualFile/Unix test. The tests have
+  not executed on Linux. Main aenv checking now reaches the cross OpenSSL
+  development-library requirement; it has not yet passed. Formatting/clippy
+  and native integration are still pending.
+- Actual owner/node/root role assembly and a foreground debug entry now exist
+  in `demand_runtime.py` and `start.sh`. Seven role/startup tests, one overlap and
+  retirement service-chain test and three broker-wire tests pass. SDK/DAX and,
+  in the service-chain test, journal storage are mocked boundaries.
+- An actual production Rust Session interoperates with the actual Python
+  broker over a loopback TCP test transport (open, read, EOF clamping and lease
+  exit). Payload mapping is a test double. This is not the complete native
+  VirtualFile/Unix/SDK/Guest path.
+- Node-agent diagnostics now record bounded request timing/bytes without
+  payloads, report dropped tracing explicitly, and return a bounded admin
+  summary instead of full publications/receipts. No per-read fsync is added.
+- `start.sh prepare` explicitly prepares trusted manifests from retained
+  layers through O_DIRECT, separate from runtime startup and UB allocation.
 - No target SDK operation, module change, service deployment, Guest launch,
   two-node demand acceptance, or demand-savings measurement was performed.
 
 ## Work still required before deployment
 
-1. Assemble owner/node/root roles into executable, validated configuration and
-   service entry points. The current classes alone are not an operator entry.
+1. Finish concrete two-node role configuration, trust provisioning and system
+   unit packaging around the executable role assembly. The current debug entry
+   alone is not a ready target deployment.
 2. Test the actual Rust-to-service path, concurrent first misses, repeated reads,
    cross-chunk reads, authentication, lost responses, and error propagation.
 3. Complete retirement and explicit reconciliation tests, including partial

@@ -52,6 +52,7 @@ class Broker(stored.Broker):
     def handle(self, stream):
         acquired = False
         request_id = 0
+        in_read = False
         try:
             stream.settimeout(5)
             if hasattr(socket, 'SO_PEERCRED') and self.uid is not None:
@@ -83,6 +84,7 @@ class Broker(stored.Broker):
                 require(request_id == expected_id and 0 < count <= stored.CHUNK
                         and offset <= size and count <= size-offset, 'Invalid demand range/request ID')
                 expected_id += 1
+                in_read = True
                 start = time.monotonic_ns()
                 ok = False
                 require(self.payload_slots.acquire(timeout=layer.requestTimeoutMs/1000), 'Demand response slots busy')
@@ -97,6 +99,7 @@ class Broker(stored.Broker):
                         stream.settimeout(layer.requestTimeoutMs/1000)
                         stream.sendall(RESPONSE.pack(MAGIC, 0, len(data), request_id)+data)
                         ok = True
+                        in_read = False
                         with self.condition:self.reads += 1;self.bytes += count
                     finally:
                         if self.event:
@@ -109,7 +112,10 @@ class Broker(stored.Broker):
                     with self.condition:self.active_payloads -= 1
                     self.payload_slots.release()
         except EOFError:
-            pass
+            # Idle peer EOF is normal; EOF raised by the data path is a failed
+            # read and must not disappear from acceptance/accounting counters.
+            if in_read:
+                with self.condition:self.failed_reads += 1;self.payload_failures += 1
         except Exception:
             with self.condition:self.failed_reads += 1
             try:stream.settimeout(1);stream.sendall(RESPONSE.pack(MAGIC, 1, 0, request_id))

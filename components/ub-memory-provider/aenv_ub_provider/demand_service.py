@@ -159,6 +159,7 @@ class NodeAgent:
     def __init__(self,layers,manifests,registry,index_path,uid,max_payload_responses=4,event=None):
         self.registry,self.index_path=registry,Path(index_path)
         self.layers=layers
+        self.event=event
         mappings=[LogicalDemandMapping(l,manifests[l.manifestSha256[7:]],registry) for l in layers]
         require(len({l.brokerSocket for l in layers})==1,'One local demand socket required')
         self.broker=Broker(layers,mappings,uid,max_payload_responses,event)
@@ -175,6 +176,21 @@ class NodeAgent:
         atomic_json(self.index_path,{'version':2,'state':'retiring','mode':'host-dax-demand',
                                     'replicas':[asdict(l) for l in self.layers]})
         result=self.registry.drain()
+        if callable(getattr(self.event,'close',None)):self.event.close()
         atomic_json(self.index_path,{'version':2,'state':'retired','mode':'host-dax-demand',
                                     'replicas':[asdict(l) for l in self.layers]})
+        return result
+
+    def status(self):
+        # The local framed protocol is bounded to 4096 bytes. Do not send full
+        # publication credentials/receipts for every view in a status response.
+        with self.registry.condition:
+            views=[{'manifest':key[0],'chunk':key[1],'phase':entry['phase'],'users':entry['users']}
+                   for key,entry in list(self.registry.entries.items())[:16]]
+            result={'closed':self.registry.closed,'totalViews':len(self.registry.entries),'views':views}
+        with self.broker.condition:
+            result['broker']={'active':self.broker.active,'reads':self.broker.reads,'bytes':self.broker.bytes,
+                              'failedReads':self.broker.failed_reads,'activePayloads':self.broker.active_payloads,
+                              'peakPayloads':self.broker.peak_payloads}
+        if callable(getattr(self.event,'status',None)):result['trace']=self.event.status()
         return result

@@ -130,9 +130,11 @@ class Coordinator:
         if method=='status':
             return {'state':'CLOSED' if self.closed else 'SERVING','cache':self.cache.snapshot()}
         if method=='close-admission':
+            require(node==self.owner_node,'Only owner may close global admission')
             with self.lock:self.closed=True;self._save()
             return {'state':'CLOSED'}
         if method=='finish':
+            require(node==self.owner_node,'Only owner may finalize global ownership')
             with self.lock:require(self.closed and not self.grants,'Close admission and retire all node views first')
             snapshot=self.cache.snapshot()
             require(all(e['phase']=='READY' and not e['pins'] for e in snapshot['entries']),
