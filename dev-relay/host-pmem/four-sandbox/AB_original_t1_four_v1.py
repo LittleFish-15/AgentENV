@@ -292,12 +292,18 @@ SOURCE=Path('/home/jwk/agent/deployments/agentenv-lazy-four-32ce41c')
 ORIGINAL=Path('/home/jwk/agent/deployments/agentenv-ae9c626-baseline')
 COMMAND_FAILURES=[]
 
+def output_mode(path,uid,mode):
+    # Runtime and zero-capability proxy run as jwk and must read these public
+    # configs/wrappers. Credentials and state remain in root-only directories.
+    return 0o644 if uid==0 and mode==0o600 and path.is_relative_to(BASE/'public') else mode
+
 def identity():
     return {'hostname':socket.gethostname(),'machineId':Path('/etc/machine-id').read_text().strip(),
         'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'kernel':__import__('platform').release(),
         'architecture':__import__('platform').machine(),'uid':1204,'gid':1205}
 
 def put(path,raw,uid=0,gid=0,mode=0o600):
+    mode=output_mode(path,uid,mode)
     need(path.parent.resolve()==path.parent and not path.is_symlink(),'Redirected output')
     if path.exists():need(read(path,len(raw)+1)==raw and path.stat().st_uid==uid,'Prior file differs');return
     fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,mode)
