@@ -52,6 +52,7 @@ class NativeChunkPublisher:
                    'objects': list(self.records.values()), 'physicalIncrementBytes': None})
 
     def _initialize(self):
+        require(not self.finalize_attempted and not self.finalize_acknowledged,'Owner finalization prevents new publications')
         if self.backend is not None:
             return
         require(not self.initialize_attempted, 'Unconfirmed SDK initialization cannot be retried')
@@ -77,6 +78,7 @@ class NativeChunkPublisher:
             return self._publish(manifest, chunk, generation, object_name)
 
     def _publish(self, manifest, chunk, generation, object_name):
+        require(not self.finalize_attempted and not self.finalize_acknowledged,'Owner finalization prevents new publications')
         require(callable(self.image_factory) and callable(getattr(self.view_controller, 'retire', None)),
                 'Native image builder and all-node view controller must be configured before allocation')
         require(object_name not in self.records, 'Existing object intent preserved')
@@ -171,3 +173,8 @@ class NativeChunkPublisher:
                        'finalizeAttempted':True,'finalizeAcknowledged':True,
                        'objects':list(self.records.values())})
             self.backend = None
+        else:
+            self.finalize_acknowledged = True
+            self.save({'version':1,'initializeAttempted':self.initialize_attempted,
+                       'finalizeAttempted':False,'finalizeAcknowledged':True,
+                       'objects':list(self.records.values())})

@@ -2,6 +2,12 @@
 
 Status: **WIP / NOT DEPLOYABLE / NOT TWO-NODE ACCEPTED**.
 
+Latest local lifecycle checks: 215 provider tests, 214 passed and one native
+Linux O_DIRECT test skipped on Windows. Two-root readiness is now mandatory
+before metadata publication/data allocation. Final global release waits for
+node SDK-finalization receipts; signed global completion gates release of the
+root control references. These are local logic tests, not a native acceptance.
+
 This snapshot exposes the actual in-progress aenv integration for review. It is
 not a release artifact, deployment instruction, or claim of hardware savings.
 The independent full-mode branch and running target services are untouched.

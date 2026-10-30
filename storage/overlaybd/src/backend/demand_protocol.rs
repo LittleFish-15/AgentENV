@@ -34,7 +34,9 @@ impl<T: Read + Write> Session<T> {
         let manifest = hex_bytes::<32>(manifest.strip_prefix("sha256:").unwrap_or(manifest))?;
         if file_bytes == 0
             || !wire_bytes.is_multiple_of(4 * 1024 * 1024)
-            || file_bytes.checked_add(4096).is_none_or(|end| end > wire_bytes)
+            || file_bytes
+                .checked_add(4096)
+                .is_none_or(|end| end > wire_bytes)
         {
             return Err(invalid("invalid demand logical wire range"));
         }
@@ -64,7 +66,11 @@ impl<T: Read + Write> Session<T> {
         let status = u32::from_be_bytes(response[8..12].try_into().unwrap());
         let count = u32::from_be_bytes(response[12..16].try_into().unwrap());
         let received_id = u64::from_be_bytes(response[16..24].try_into().unwrap());
-        if &response[..8] != MAGIC || received_id != request_id || status != 0 || count as usize != expected {
+        if &response[..8] != MAGIC
+            || received_id != request_id
+            || status != 0
+            || count as usize != expected
+        {
             return Err(invalid(&format!(
                 "demand response refused or mismatched: status={status}, request={received_id}, bytes={count}"
             )));
@@ -74,7 +80,9 @@ impl<T: Read + Write> Session<T> {
 
     pub fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         if !self.healthy {
-            return Err(invalid("demand session failed; no implicit reconnect or source fallback"));
+            return Err(invalid(
+                "demand session failed; no implicit reconnect or source fallback",
+            ));
         }
         let count = self.file_bytes.saturating_sub(offset).min(len as u64) as usize;
         if count > MAX_READ {
@@ -93,8 +101,13 @@ impl<T: Read + Write> Session<T> {
         while done < result.len() {
             let count = (result.len() - done).min(MAX_CHUNK);
             let request = self.next_request;
-            self.next_request = self.next_request.checked_add(1).ok_or_else(|| invalid("request ID exhausted"))?;
-            let at = offset.checked_add(done as u64).ok_or_else(|| invalid("demand offset overflow"))?;
+            self.next_request = self
+                .next_request
+                .checked_add(1)
+                .ok_or_else(|| invalid("request ID exhausted"))?;
+            let at = offset
+                .checked_add(done as u64)
+                .ok_or_else(|| invalid("demand offset overflow"))?;
             self.stream.write_all(&request.to_be_bytes())?;
             self.stream.write_all(&at.to_be_bytes())?;
             self.stream.write_all(&(count as u32).to_be_bytes())?;
@@ -118,21 +131,40 @@ mod tests {
         output: Vec<u8>,
     }
     impl Read for Wire {
-        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> { self.input.read(b) }
+        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+            self.input.read(b)
+        }
     }
     impl Write for Wire {
-        fn write(&mut self, b: &[u8]) -> io::Result<usize> { self.output.extend_from_slice(b); Ok(b.len()) }
-        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
     fn response(id: u64, status: u32, bytes: &[u8]) -> Vec<u8> {
         let mut b = MAGIC.to_vec();
-        b.extend_from_slice(&status.to_be_bytes()); b.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-        b.extend_from_slice(&id.to_be_bytes()); b.extend_from_slice(bytes); b
+        b.extend_from_slice(&status.to_be_bytes());
+        b.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        b.extend_from_slice(&id.to_be_bytes());
+        b.extend_from_slice(bytes);
+        b
     }
     fn open(input: Vec<u8>) -> io::Result<Session<Wire>> {
-        Session::open(Wire { input: Cursor::new(input), output: vec![] },
-            "aenv_0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef",
-            &"a".repeat(64), 2 * MAX_CHUNK as u64, 4 * 1024 * 1024, &"b".repeat(64))
+        Session::open(
+            Wire {
+                input: Cursor::new(input),
+                output: vec![],
+            },
+            "aenv_0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef",
+            &"a".repeat(64),
+            2 * MAX_CHUNK as u64,
+            4 * 1024 * 1024,
+            &"b".repeat(64),
+        )
     }
     #[test]
     fn open_has_no_read_request() {
@@ -142,21 +174,26 @@ mod tests {
     }
     #[test]
     fn exact_read_and_request_id() {
-        let mut input = response(0, 0, &[]); input.extend(response(1, 0, b"data"));
+        let mut input = response(0, 0, &[]);
+        input.extend(response(1, 0, b"data"));
         assert_eq!(open(input).unwrap().read_at(9, 4).unwrap(), b"data");
     }
     #[test]
     fn wrong_id_or_error_is_terminal() {
         for (id, status) in [(2, 0), (1, 2)] {
-            let mut input = response(0, 0, &[]); input.extend(response(id, status, b"data"));
-            let mut s = open(input).unwrap(); assert!(s.read_at(0, 4).is_err());
-            let written = s.stream.output.len(); assert!(s.read_at(0, 4).is_err());
+            let mut input = response(0, 0, &[]);
+            input.extend(response(id, status, b"data"));
+            let mut s = open(input).unwrap();
+            assert!(s.read_at(0, 4).is_err());
+            let written = s.stream.output.len();
+            assert!(s.read_at(0, 4).is_err());
             assert_eq!(written, s.stream.output.len());
         }
     }
     #[test]
     fn full_protocol_cannot_impersonate_demand() {
-        let mut input = response(0, 0, &[]); input[..8].copy_from_slice(b"AENVUB1\0");
+        let mut input = response(0, 0, &[]);
+        input[..8].copy_from_slice(b"AENVUB1\0");
         assert!(open(input).is_err());
     }
 }

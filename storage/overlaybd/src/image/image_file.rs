@@ -1,8 +1,8 @@
+use crate::backend::demand::DemandLayerFile;
 use crate::backend::local::LocalFile;
 use crate::backend::switch::new_switch_file;
 use crate::backend::tar::new_tar_file_adaptor;
 use crate::backend::ub::UbLayerFile;
-use crate::backend::demand::DemandLayerFile;
 use crate::config::{DownloadConfig, ImageConfig, LayerConfig, UpperConfig, UpperMode};
 use crate::image::helper::prepare_runtime_upper;
 use crate::image::image_service::CacheDownloadRequest;
@@ -559,10 +559,11 @@ impl ImageFile {
         index: usize,
     ) -> Result<OpenedLowerLayer> {
         let demand = layer.demand.is_some();
-        let local_path = if demand || layer
-            .ub
-            .as_ref()
-            .is_some_and(|r| !r.allow_repository_fallback)
+        let local_path = if demand
+            || layer
+                .ub
+                .as_ref()
+                .is_some_and(|r| !r.allow_repository_fallback)
         {
             None
         } else {
@@ -573,7 +574,10 @@ impl ImageFile {
             let file: Arc<dyn VirtualFile> = Arc::new(DemandLayerFile::open(reference).await?);
             let tar_file = new_tar_file_adaptor(file).await?;
             let switched = new_switch_file(tar_file, false, None).await?;
-            OpenedLowerLayer { file: switched, download: None }
+            OpenedLowerLayer {
+                file: switched,
+                download: None,
+            }
         } else if let Some(replica) = &layer.ub {
             // UB takes precedence even when a durable local file also exists.
             // Only an explicit, identity-verified fallback may use that copy.

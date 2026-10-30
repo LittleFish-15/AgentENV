@@ -68,10 +68,14 @@ class Coordinator:
                                  nodes=nodes,budget_bytes=budget_bytes,reservation_bytes=reservation_bytes)
         self.operations = {}; self.lock = threading.RLock(); self.closed = False
         self.grants = {}
+        self.ready_nodes = {}
+        self.drained_nodes = {}
+        self.global_receipt = None
 
     def _save(self):
         atomic_json(self.root/'operations.json',{'run':self.run,'closed':self.closed,
-                    'operations':list(self.operations.values())})
+                    'operations':list(self.operations.values()),'readyNodes':self.ready_nodes,
+                    'drainedNodes':self.drained_nodes,'globalReleaseReceipt':self.global_receipt})
 
     def acquire(self, node, operation, manifest_id, index):
         require(isinstance(operation,str) and len(operation)==32 and all(c in '0123456789abcdef' for c in operation),
@@ -80,6 +84,8 @@ class Coordinator:
         require(type(index) is int and 0 <= index < len(manifest.chunks),'Invalid chunk selection')
         key = (node,operation)
         with self.lock:
+            require(set(self.ready_nodes)==set(self.cache.nodes),'Both root frontends must be ready before any UB publication')
+            require(not self.drained_nodes,'A peer has drained; no new acquisitions in this run')
             if key in self.operations:
                 entry=self.operations[key]
                 require((entry['manifest'],entry['chunk'])==(manifest_id,index),'Operation ID reused for another chunk')
@@ -104,6 +110,33 @@ class Coordinator:
     def dispatch(self,node,request):
         require(request.get('run')==self.run,'Wrong demand run')
         method=request['method'];params=request.get('params',{})
+        if method=='ready':
+            root=params['root'];body=root['body']
+            require(node in self.cache.nodes and hmac.compare_digest(root['mac'],proof_mac(self.evidence.keys[node],body)),
+                    'Root readiness MAC differs')
+            require(body.get('version')==1 and body.get('kind')=='demand-root-ready'
+                    and body.get('run')==self.run and body.get('node')==node
+                    and body.get('rootControlPinned') is True and body.get('bootId')
+                    and body.get('kernelRelease') and body.get('moduleSrcversion'),'Incomplete root readiness evidence')
+            with self.lock:
+                require(not self.closed,'Global admission is closed')
+                if node in self.ready_nodes:require(self.ready_nodes[node]==root,'Changed readiness identity; preserve run')
+                else:self.ready_nodes[node]=root;self._save()
+                return {'state':'READY' if set(self.ready_nodes)==set(self.cache.nodes) else 'WAITING_FOR_PEER',
+                        'readyNodes':sorted(self.ready_nodes)}
+        if method=='node-drained':
+            source=params['source']
+            with self.lock:
+                require(node in self.ready_nodes and not any(ticket.node==node for ticket in self.grants.values()),
+                        'Node has outstanding grants or was never ready')
+                if node==self.owner_node:
+                    require(source.get('disposition')=='owner_anchor_retained','Owner anchors must remain until global deletion')
+                else:
+                    require(source.get('disposition')=='importer_finalized' and source.get('finalizeAcknowledged') is True,
+                            'Importer finalization not acknowledged')
+                if node in self.drained_nodes:require(self.drained_nodes[node]==source,'Node drain receipt changed')
+                else:self.drained_nodes[node]=source;self._save()
+                return {'state':'DRAINED','node':node}
         if method=='acquire':
             return self.acquire(node,request['operation'],params['manifest'],params['chunk'])
         if method=='query':
@@ -128,20 +161,29 @@ class Coordinator:
                     'state':'RELEASED','releasedLease':ticket.lease};self._save()
             return {'state':'RELEASED'}
         if method=='status':
-            return {'state':'CLOSED' if self.closed else 'SERVING','cache':self.cache.snapshot()}
+            return {'state':'CLOSED' if self.closed else 'SERVING','cache':self.cache.snapshot(),
+                    'readyNodes':sorted(self.ready_nodes),'requiredNodes':sorted(self.cache.nodes)}
         if method=='close-admission':
             require(node==self.owner_node,'Only owner may close global admission')
             with self.lock:self.closed=True;self._save()
             return {'state':'CLOSED'}
         if method=='finish':
             require(node==self.owner_node,'Only owner may finalize global ownership')
-            with self.lock:require(self.closed and not self.grants,'Close admission and retire all node views first')
+            with self.lock:
+                require(self.closed and not self.grants,'Close admission and retire all node views first')
+                require(set(self.drained_nodes)==set(self.ready_nodes),'Wait for acknowledged node SDK finalization')
+                if self.global_receipt is not None:
+                    return {'state':'RELEASED','cache':self.cache.snapshot(),'rootReleaseReceipt':self.global_receipt}
             snapshot=self.cache.snapshot()
             require(all(e['phase']=='READY' and not e['pins'] for e in snapshot['entries']),
                     'Unknown/filling/pinned objects prevent run finalization')
             for _ in snapshot['entries']:self.cache.retire_idle()
             self.publisher.finalize()
-            return {'state':'RELEASED','cache':self.cache.snapshot()}
+            body={'version':1,'kind':'demand-global-released','run':self.run,'ownerNode':self.owner_node,
+                  'globalObjectsReleased':True,'ownerFinalizationAcknowledged':True}
+            with self.lock:
+                self.global_receipt={'body':body,'mac':proof_mac(self.image_key,body)};self._save()
+            return {'state':'RELEASED','cache':self.cache.snapshot(),'rootReleaseReceipt':self.global_receipt}
         raise ValueError('Unsupported coordinator method')
 
 

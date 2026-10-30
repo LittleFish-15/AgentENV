@@ -42,14 +42,24 @@ pub struct DemandLayerRef {
 impl DemandLayerRef {
     pub fn validate(&self) -> Result<()> {
         UbLayerRef {
-            broker_socket: self.broker_socket.clone(), object_name: self.object_name.clone(),
-            generation: self.generation.clone(), layer_digest: self.layer_digest.clone(),
-            file_bytes: self.file_bytes, mapping_bytes: self.logical_wire_bytes,
+            broker_socket: self.broker_socket.clone(),
+            object_name: self.object_name.clone(),
+            generation: self.generation.clone(),
+            layer_digest: self.layer_digest.clone(),
+            file_bytes: self.file_bytes,
+            mapping_bytes: self.logical_wire_bytes,
             allow_repository_fallback: false,
-        }.validate()?;
-        let digest = self.manifest_sha256.strip_prefix("sha256:").context("demand manifest needs sha256 identity")?;
+        }
+        .validate()?;
+        let digest = self
+            .manifest_sha256
+            .strip_prefix("sha256:")
+            .context("demand manifest needs sha256 identity")?;
         crate::backend::ub_protocol::hex_bytes::<32>(digest)?;
-        ensure!((1..=300_000).contains(&self.request_timeout_ms), "invalid bounded demand request timeout");
+        ensure!(
+            (1..=300_000).contains(&self.request_timeout_ms),
+            "invalid bounded demand request timeout"
+        );
         Ok(())
     }
 }
@@ -57,32 +67,65 @@ impl DemandLayerRef {
 pub fn bind_demand_layers(cfg: &mut ImageConfig, index_path: &Path) -> Result<()> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Index { version: u32, state: String, mode: String, replicas: Vec<DemandLayerRef> }
+    struct Index {
+        version: u32,
+        state: String,
+        mode: String,
+        replicas: Vec<DemandLayerRef>,
+    }
     use std::io::Read;
     let mut bytes = Vec::new();
-    std::fs::File::open(index_path)?.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    std::fs::File::open(index_path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 1024 * 1024, "demand index too large");
     let index: Index = serde_json::from_slice(&bytes)?;
-    ensure!(index.version == 2 && index.state == "metadata_ready" && index.mode == "host-dax-demand",
-            "expected explicit metadata-ready Host DAX demand index");
-    ensure!(!index.replicas.is_empty() && index.replicas.len() <= 64, "invalid demand layer count");
+    ensure!(
+        index.version == 2 && index.state == "metadata_ready" && index.mode == "host-dax-demand",
+        "expected explicit metadata-ready Host DAX demand index"
+    );
+    ensure!(
+        !index.replicas.is_empty() && index.replicas.len() <= 64,
+        "invalid demand layer count"
+    );
     let mut by_digest = std::collections::HashMap::new();
     for replica in index.replicas {
         replica.validate()?;
-        ensure!(by_digest.insert(replica.layer_digest.clone(), replica).is_none(), "duplicate demand digest");
+        ensure!(
+            by_digest
+                .insert(replica.layer_digest.clone(), replica)
+                .is_none(),
+            "duplicate demand digest"
+        );
     }
-    let selected = cfg.lowers.iter().map(|layer| {
-        ensure!(layer.ub.is_none(), "full UB and demand cannot bind the same layer");
-        let replica = by_digest.get(&layer.digest).context("missing explicit demand lower")?;
-        ensure!(replica.file_bytes == layer.size, "demand lower differs from immutable snapshot");
-        Ok(replica.clone())
-    }).collect::<Result<Vec<_>>>()?;
+    let selected = cfg
+        .lowers
+        .iter()
+        .map(|layer| {
+            ensure!(
+                layer.ub.is_none(),
+                "full UB and demand cannot bind the same layer"
+            );
+            let replica = by_digest
+                .get(&layer.digest)
+                .context("missing explicit demand lower")?;
+            ensure!(
+                replica.file_bytes == layer.size,
+                "demand lower differs from immutable snapshot"
+            );
+            Ok(replica.clone())
+        })
+        .collect::<Result<Vec<_>>>()?;
     for (layer, replica) in cfg.lowers.iter_mut().zip(selected) {
         layer.demand = Some(replica);
-        layer.file.clear(); layer.dir.clear(); layer.repo_blob_url.clear();
+        layer.file.clear();
+        layer.dir.clear();
+        layer.repo_blob_url.clear();
     }
     // Older binaries must fail rather than ignore a new field and read locally.
-    cfg.repo_blob_url.clear(); cfg.acceleration_layer = false; cfg.record_trace_path.clear();
+    cfg.repo_blob_url.clear();
+    cfg.acceleration_layer = false;
+    cfg.record_trace_path.clear();
     Ok(())
 }
 
@@ -196,7 +239,11 @@ pub fn demand_runtime_config_view(image_path: &Path, index_path: &Path) -> Resul
     bound_runtime_config_view(image_path, index_path, true)
 }
 
-fn bound_runtime_config_view(image_path: &Path, index_path: &Path, demand: bool) -> Result<PathBuf> {
+fn bound_runtime_config_view(
+    image_path: &Path,
+    index_path: &Path,
+    demand: bool,
+) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     let mut raw = Vec::new();
@@ -209,8 +256,11 @@ fn bound_runtime_config_view(image_path: &Path, index_path: &Path, demand: bool)
     );
     let mut cfg: ImageConfig = serde_json::from_slice(&raw)?;
     resolve_image_config_local_paths(image_path, &mut cfg);
-    if demand { bind_demand_layers(&mut cfg, index_path)?; }
-    else { bind_ub_layer_replicas(&mut cfg, index_path)?; }
+    if demand {
+        bind_demand_layers(&mut cfg, index_path)?;
+    } else {
+        bind_ub_layer_replicas(&mut cfg, index_path)?;
+    }
     validate_image_config(&cfg)?;
     let serialized = serde_json::to_vec_pretty(&cfg)?;
     let key = format!("{:x}", Sha256::digest(&serialized));
@@ -943,14 +993,24 @@ pub fn validate_image_config(cfg: &ImageConfig) -> Result<()> {
     );
 
     for layer in &cfg.lowers {
-        ensure!(layer.ub.is_none() || layer.demand.is_none(), "full and demand lower bindings conflict");
+        ensure!(
+            layer.ub.is_none() || layer.demand.is_none(),
+            "full and demand lower bindings conflict"
+        );
         if let Some(replica) = &layer.demand {
             replica.validate()?;
-            ensure!(layer.digest == replica.layer_digest && layer.size == replica.file_bytes,
-                    "demand identity/size differs from snapshot");
-            ensure!(layer.file.is_empty() && layer.dir.is_empty() && layer.repo_blob_url.is_empty(),
-                    "demand lower cannot include a local/repository fallback");
-            ensure!(!cfg.acceleration_layer && cfg.record_trace_path.is_empty(), "demand cannot enable full prefetch");
+            ensure!(
+                layer.digest == replica.layer_digest && layer.size == replica.file_bytes,
+                "demand identity/size differs from snapshot"
+            );
+            ensure!(
+                layer.file.is_empty() && layer.dir.is_empty() && layer.repo_blob_url.is_empty(),
+                "demand lower cannot include a local/repository fallback"
+            );
+            ensure!(
+                !cfg.acceleration_layer && cfg.record_trace_path.is_empty(),
+                "demand cannot enable full prefetch"
+            );
         }
         if let Some(replica) = &layer.ub {
             replica.validate()?;
@@ -963,7 +1023,10 @@ pub fn validate_image_config(cfg: &ImageConfig) -> Result<()> {
             !layer.file.is_empty() || !layer.digest.is_empty() || !layer.dir.is_empty(),
             "each lower must provide at least one of file/dir/digest"
         );
-        let is_remote = layer.ub.is_none() && layer.demand.is_none() && layer.file.is_empty() && !layer.digest.is_empty();
+        let is_remote = layer.ub.is_none()
+            && layer.demand.is_none()
+            && layer.file.is_empty()
+            && !layer.digest.is_empty();
         ensure!(
             !(is_remote && layer.effective_repo_blob_url(&cfg.repo_blob_url).is_empty()),
             "repoBlobUrl is required for remote lower layers"
@@ -984,12 +1047,18 @@ mod tests {
 
     fn demand_reference() -> DemandLayerRef {
         DemandLayerRef {
-            broker_socket: if cfg!(windows) { r"C:\dmd\b.sock".into() } else { "/run/aenv-demand/b.sock".into() },
+            broker_socket: if cfg!(windows) {
+                r"C:\dmd\b.sock".into()
+            } else {
+                "/run/aenv-demand/b.sock".into()
+            },
             object_name: "aenv_0123456789abcdef0123456789abcdef".into(),
             generation: "0123456789abcdef0123456789abcdef".into(),
-            layer_digest: format!("sha256:{}", "a".repeat(64)), file_bytes: 8192,
+            layer_digest: format!("sha256:{}", "a".repeat(64)),
+            file_bytes: 8192,
             logical_wire_bytes: 4 * 1024 * 1024,
-            manifest_sha256: format!("sha256:{}", "b".repeat(64)), request_timeout_ms: 30_000,
+            manifest_sha256: format!("sha256:{}", "b".repeat(64)),
+            request_timeout_ms: 30_000,
         }
     }
 
@@ -998,13 +1067,25 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let reference = demand_reference();
         let path = directory.path().join("demand.json");
-        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
-            "version":2,"state":"metadata_ready","mode":"host-dax-demand","replicas":[reference]
-        })).unwrap()).unwrap();
-        let mut config = ImageConfig { lowers: vec![LayerConfig {
-            file: "/missing/must-not-open".into(), dir: "/missing/cache".into(),
-            digest: reference.layer_digest.clone(), size: reference.file_bytes, ..Default::default()
-        }], repo_blob_url: "https://invalid.example/forbidden".into(), ..Default::default() };
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version":2,"state":"metadata_ready","mode":"host-dax-demand","replicas":[reference]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut config = ImageConfig {
+            lowers: vec![LayerConfig {
+                file: "/missing/must-not-open".into(),
+                dir: "/missing/cache".into(),
+                digest: reference.layer_digest.clone(),
+                size: reference.file_bytes,
+                ..Default::default()
+            }],
+            repo_blob_url: "https://invalid.example/forbidden".into(),
+            ..Default::default()
+        };
         bind_demand_layers(&mut config, &path).unwrap();
         let layer = &config.lowers[0];
         assert_eq!(layer.demand.as_ref(), Some(&reference));
@@ -1026,11 +1107,25 @@ mod tests {
     #[test]
     fn demand_and_full_bindings_conflict() {
         let demand = demand_reference();
-        let full = UbLayerRef { broker_socket: demand.broker_socket.clone(), object_name: demand.object_name.clone(),
-            generation: demand.generation.clone(), layer_digest: demand.layer_digest.clone(), file_bytes: demand.file_bytes,
-            mapping_bytes: demand.logical_wire_bytes, allow_repository_fallback: false };
-        let config = ImageConfig { lowers: vec![LayerConfig { ub: Some(full), demand: Some(demand.clone()),
-            digest: demand.layer_digest.clone(), size: demand.file_bytes, ..Default::default() }], ..Default::default() };
+        let full = UbLayerRef {
+            broker_socket: demand.broker_socket.clone(),
+            object_name: demand.object_name.clone(),
+            generation: demand.generation.clone(),
+            layer_digest: demand.layer_digest.clone(),
+            file_bytes: demand.file_bytes,
+            mapping_bytes: demand.logical_wire_bytes,
+            allow_repository_fallback: false,
+        };
+        let config = ImageConfig {
+            lowers: vec![LayerConfig {
+                ub: Some(full),
+                demand: Some(demand.clone()),
+                digest: demand.layer_digest.clone(),
+                size: demand.file_bytes,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         assert!(validate_image_config(&config).is_err());
     }
 

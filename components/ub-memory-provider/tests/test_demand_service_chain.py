@@ -58,6 +58,8 @@ class Factory:
         return dict(root=dict(body=body,mac=proof_mac(b'k'*32,body)),
                     importDisposition='owner_anchor_retained' if self.node=='a' else 'unmap_acknowledged')
     def finalize(self):pass
+    def finalization_receipt(self):
+        return {'disposition':'owner_anchor_retained'} if self.node=='a' else {'disposition':'importer_finalized','finalizeAcknowledged':True}
 
 
 class ServiceChainTests(unittest.TestCase):
@@ -75,6 +77,22 @@ class ServiceChainTests(unittest.TestCase):
             root=Path(tempfile.gettempdir())/'unused-demand-chain';publisher=Publisher()
             coordinator=Coordinator('a'*32,{manifest.sha256:manifest},publisher,root/'owner',['a','b'],
                 {'a':b'k'*32,'b':b'k'*32},budget_bytes=256*MIB,image_key=b'i'*32,owner_node='a')
+            # No operation is admitted (and no publisher is called) until
+            # both exact root readiness receipts have been authenticated.
+            with self.assertRaisesRegex(ValueError,'Both root'):
+                coordinator.acquire('a','0'*32,manifest.sha256,0)
+            for node in ('a','b'):
+                body=dict(version=1,kind='demand-root-ready',run='a'*32,node=node,rootControlPinned=True,
+                          bootId='test-boot-'+node,kernelRelease='test-kernel',moduleSrcversion='test-candidate')
+                proof=dict(body=body,mac=proof_mac(b'k'*32,body))
+                if node=='b':
+                    with self.assertRaisesRegex(ValueError,'Both root'):
+                        coordinator.acquire('a','0'*32,manifest.sha256,0)
+                    wrong=dict(body=body,mac='0'*64)
+                    with self.assertRaisesRegex(ValueError,'MAC'):
+                        Client(coordinator,node).call('ready','1'*32,{'root':wrong})
+                Client(coordinator,node).call('ready','1'*32,{'root':proof})
+            self.assertEqual(publisher.fills,[])
             mappings=[];registries=[];factories=[]
             for node in ('a','b'):
                 factory=Factory(node,data);factories.append(factory)

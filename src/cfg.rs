@@ -1068,9 +1068,10 @@ impl AppConfig {
     fn validate_rootfs_backing(&self) -> Result<()> {
         match self.snapshot.rootfs_backing_mode {
             RootfsBackingMode::UbDemand => {
-                let index = self.snapshot.rootfs_demand_index.as_ref().ok_or_else(|| {
-                    anyhow!("ub_demand requires snapshot.rootfs_demand_index")
-                })?;
+                let index =
+                    self.snapshot.rootfs_demand_index.as_ref().ok_or_else(|| {
+                        anyhow!("ub_demand requires snapshot.rootfs_demand_index")
+                    })?;
                 if !index.is_absolute() {
                     bail!("snapshot.rootfs_demand_index must be absolute");
                 }
@@ -1533,7 +1534,10 @@ mod tests {
     #[test]
     fn demand_rootfs_configuration_is_explicit_and_checked_at_startup() {
         let mut config = AppConfig::default();
-        assert_eq!(config.snapshot.rootfs_backing_mode, RootfsBackingMode::Legacy);
+        assert_eq!(
+            config.snapshot.rootfs_backing_mode,
+            RootfsBackingMode::Legacy
+        );
         assert!(config.validate_rootfs_backing().is_ok());
         config.snapshot.rootfs_backing_mode = RootfsBackingMode::UbDemand;
         assert!(config.validate_rootfs_backing().is_err());

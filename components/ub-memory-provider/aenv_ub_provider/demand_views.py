@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from . import contract, host_pmem_cli, host_pmem_lease, host_pmem_rootfs, stored
+from . import contract, host_pmem, host_pmem_cli, host_pmem_lease, host_pmem_rootfs, stored
 from .demand_control import proof_mac
 from .host_dax_demand import require
 from .io import atomic_json
@@ -45,14 +45,50 @@ class RootSupervisor:
     def __init__(self,config,manifests,image_key,receipt_key):
         require(os.getuid()==os.geteuid()==0,'Root supervisor requires root')
         self.config,self.manifests,self.image_key,self.receipt_key=config,manifests,image_key,receipt_key
-        self.root=Path(config['root']);self.root.mkdir(mode=0o700,exist_ok=False)
+        self.root=Path(config['root'])
+        require(self.root.is_absolute() and self.root.parent.resolve(strict=True)==self.root.parent
+                and not self.root.exists() and not self.root.is_symlink(),'Existing/redirected root state preserved')
+        parent=self.root.parent.stat()
+        require(parent.st_uid==0 and not parent.st_mode&0o022,'Protected root state parent required')
         self.records={};self.processes={};self.lock=threading.RLock()
         require(Path('/sys/module/obmm/srcversion').read_text().strip()==config['moduleSrcversion']
                 and os.uname().release==config['kernelRelease'],'Configured kernel/candidate differs')
+        require(Path('/sys/module/obmm/parameters/pmem_ro_enable').read_text().strip() in ('Y','1'),
+                'Readonly pmem frontend is not enabled; no demand admission')
         engine_pid,_=unit_pid(config.get('engineUnit','ubse.service'),config.get('engineUid',985))
         self.engine=region_provenance.attest_engine(engine_pid)
+        # Pin the exact registered frontend for this supervisor's lifetime.
+        # Opening the control device creates no UB object or local volume.
+        self.control=host_pmem.open_control()
+        try:self.root.mkdir(mode=0o700,exist_ok=False)
+        except BaseException:
+            os.close(self.control);raise
 
-    def _save(self):atomic_json(self.root/'supervisor.json',{'run':self.config['run'],'records':self.records})
+    def readiness(self):
+        info=os.fstat(self.control)
+        require(stat.S_ISCHR(info.st_mode),'Root control reference no longer valid')
+        body={'version':1,'kind':'demand-root-ready','run':self.config['run'],
+              'node':self.config['node'],'rootControlPinned':True,
+              'kernelRelease':os.uname().release,'moduleSrcversion':self.config['moduleSrcversion'],
+              'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+        return {'body':body,'mac':proof_mac(self.receipt_key,body)}
+
+    def _save(self):atomic_json(self.root/'supervisor.json',{'run':self.config['run'],'records':self.records,
+                                                         'controlPinned':self.control is not None})
+
+    def release_control(self,receipt):
+        body=receipt['body']
+        require(hmac.compare_digest(receipt['mac'],proof_mac(self.image_key,body))
+                and body.get('version')==1 and body.get('kind')=='demand-global-released'
+                and body.get('run')==self.config['run'] and body.get('ownerNode')==self.config['ownerNode']
+                and body.get('globalObjectsReleased') is True and body.get('ownerFinalizationAcknowledged') is True,
+                'Global release/finalization receipt is missing or differs')
+        with self.lock:
+            require(all(record['phase']=='RELEASED' for record in self.records.values()),
+                    'Local root views remain live or uncertain')
+            if self.control is not None:
+                os.close(self.control);self.control=None;self._save()
+        return {'state':'ROOT_CONTROL_RELEASED','run':self.config['run'],'node':self.config['node']}
 
     def authorize(self,stream):
         pid,uid,_=struct.unpack('3i',stream.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
@@ -158,12 +194,15 @@ class RootSupervisor:
 
     def dispatch(self,request):
         require(request.get('run')==self.config['run'],'Wrong root scope')
+        if request['method']=='readiness':return self.readiness()
+        if request['method']=='release-control':return self.release_control(request['params']['receipt'])
         if request['method']=='prepare':return self.prepare(request['params'])
         if request['method']=='retire':return self.retire(request['params']['publication'])
         if request['method']=='status':
             generation=request['params'].get('generation')
             with self.lock:
-                return self.records.get(generation,{'phase':'NONE'}) if generation else {'run':self.config['run'],'state':'SERVING'}
+                return self.records.get(generation,{'phase':'NONE'}) if generation else {
+                    'run':self.config['run'],'state':'SERVING' if self.control is not None else 'ROOT_CONTROL_RELEASED'}
         raise ValueError('Unsupported root operation')
 
     def serve(self,path):

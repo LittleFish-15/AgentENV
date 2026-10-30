@@ -53,12 +53,15 @@ class LocalViewRegistry:
         self.node,self.coordinator,self.factory=node,coordinator,factory
         self.root=Path(root);self.root.mkdir(mode=0o700,exist_ok=False)
         self.entries={};self.condition=threading.Condition();self.closed=False
+        self.source_finalized=False;self.drain_operation=None;self.drain_receipt=None;self.drained_acknowledged=False
 
     def _save(self):
         rows=[]
         for key,entry in self.entries.items():
             rows.append({'manifest':key[0],'chunk':key[1],**{k:v for k,v in entry.items() if k!='view'}})
-        atomic_json(self.root/'views.json',{'node':self.node,'closed':self.closed,'entries':rows})
+        atomic_json(self.root/'views.json',{'node':self.node,'closed':self.closed,'entries':rows,
+            'sourceFinalized':self.source_finalized,'drainOperation':self.drain_operation,
+            'drainReceipt':self.drain_receipt,'drainedAcknowledged':self.drained_acknowledged})
 
     @contextmanager
     def read(self,manifest,chunk,timeout):
@@ -115,7 +118,14 @@ class LocalViewRegistry:
             result=self.coordinator.call('release-node',operation,{'ticket':entry['grant']['ticket'],'receipt':receipt})
             require(result.get('state')=='RELEASED','Global node release acknowledgment missing')
             with self.condition:entry['phase']='RELEASED';self._save()
-        self.factory.sources.finalize()
+        if not self.source_finalized:
+            self.factory.sources.finalize()
+            self.drain_receipt=self.factory.sources.finalization_receipt()
+            self.source_finalized=True;self._save()
+        if self.drain_operation is None:self.drain_operation=uuid.uuid4().hex;self._save()
+        result=self.coordinator.call('node-drained',self.drain_operation,{'source':self.drain_receipt})
+        require(result.get('state')=='DRAINED','Node finalization acknowledgment missing')
+        self.drained_acknowledged=True;self._save()
         return {'state':'RELEASED','node':self.node,'views':len(self.entries)}
 
     def status(self):
@@ -166,6 +176,15 @@ class NodeAgent:
 
     def start(self):
         require(not self.index_path.exists() and not self.index_path.is_symlink(),'Existing demand index preserved')
+        root=self.registry.factory.supervisor.call('readiness',{})
+        self.registry.coordinator.call('ready',uuid.uuid4().hex,{'root':root})
+        deadline=time.monotonic()+300
+        while True:
+            status=self.registry.coordinator.call('status',uuid.uuid4().hex)
+            require(status['state']!='CLOSED','Global admission closed before node startup')
+            if status['readyNodes']==status['requiredNodes']:break
+            require(time.monotonic()<deadline,'Peer root frontend not ready; no metadata index or SDK publication')
+            time.sleep(1)
         self.broker.start(self.layers[0].brokerSocket)
         atomic_json(self.index_path,{'version':2,'state':'metadata_ready','mode':'host-dax-demand',
                                     'replicas':[asdict(l) for l in self.layers]})

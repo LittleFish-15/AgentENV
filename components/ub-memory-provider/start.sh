@@ -23,14 +23,15 @@ case "$action" in
     [[ $(id -u) != 0 ]] || { echo 'Build as ordinary user'; exit 1; }
     export CARGO_TARGET_DIR=${AENV_DEMAND_TARGET_DIR:-"$repo/target-demand"}
     cd "$repo"
-    cargo build --locked --release --bin server -p agentenv
-    cargo build --locked --release -p uvm-ublk-daemon
+    cargo build --locked --release --bin server -p agentenv --features overlaybd/rootfs-read-trace
+    cargo build --locked --release -p uvm-ublk-daemon --features overlaybd/rootfs-read-trace
     sha256sum "$CARGO_TARGET_DIR/release/server" "$CARGO_TARGET_DIR/release/uvm-ublk-daemon"
     printf '%s\n' DEMAND_BINARIES_BUILT_NOT_DEPLOYED
     ;;
-  validate|serve|status|drain|close-admission|finish)
+  validate|serve|status|drain|close-admission|finish|release-root)
+    shift
     : "${AENV_DEMAND_CONFIG:?Set absolute private role configuration path}"
-    exec "$python" -I -B -c 'import sys,runpy;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("aenv_ub_provider.demand_runtime",run_name="__main__")' "$here" "$action" --config "$AENV_DEMAND_CONFIG"
+    exec "$python" -I -B -c 'import sys,runpy;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("aenv_ub_provider.demand_runtime",run_name="__main__")' "$here" "$action" --config "$AENV_DEMAND_CONFIG" "$@"
     ;;
-  *) echo 'Usage: start.sh [check|prepare|build|validate|serve|status|drain|close-admission|finish]'; exit 2 ;;
+  *) echo 'Usage: start.sh [check|prepare|build|validate|serve|status|drain|close-admission|finish|release-root]'; exit 2 ;;
 esac

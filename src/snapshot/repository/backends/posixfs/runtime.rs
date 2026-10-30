@@ -284,7 +284,9 @@ impl PosixFsRuntimeResolver {
                 "rootfs_layer" => "rootfs",
                 _ => "",
             };
-            if let Some((index, demand)) = crate::snapshot::runtime_support::layer_backing_index(kind)? {
+            if let Some((index, demand)) =
+                crate::snapshot::runtime_support::layer_backing_index(kind)?
+            {
                 let mut selected = overlaybd::config::ImageConfig {
                     lowers: vec![LayerConfig {
                         digest: layer.digest.clone(),
@@ -293,14 +295,19 @@ impl PosixFsRuntimeResolver {
                     }],
                     ..Default::default()
                 };
-                (if demand { overlaybd::config::bind_demand_layers(&mut selected, &index) }
-                 else { overlaybd::config::bind_ub_layer_replicas(&mut selected, &index) }).map_err(
-                    |error| RepositoryError::backend("select missing local layer from UB", error),
-                )?;
-                selected.lowers[0].demand.is_some() || selected.lowers[0]
-                    .ub
-                    .as_ref()
-                    .is_some_and(|r| !r.allow_repository_fallback)
+                (if demand {
+                    overlaybd::config::bind_demand_layers(&mut selected, &index)
+                } else {
+                    overlaybd::config::bind_ub_layer_replicas(&mut selected, &index)
+                })
+                .map_err(|error| {
+                    RepositoryError::backend("select missing local layer from UB", error)
+                })?;
+                selected.lowers[0].demand.is_some()
+                    || selected.lowers[0]
+                        .ub
+                        .as_ref()
+                        .is_some_and(|r| !r.allow_repository_fallback)
             } else {
                 false
             }

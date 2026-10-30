@@ -189,6 +189,9 @@ def node_admin(agent, config):
                     result = agent.status()
                 elif request['method'] == 'drain':
                     result = agent.stop()
+                elif request['method'] == 'release-root':
+                    require(agent.registry.drained_acknowledged,'Node drain acknowledgment required before root release')
+                    result=agent.registry.factory.supervisor.call('release-control',{'receipt':request['receipt']})
                 else:
                     raise ValueError('Unsupported node admin method')
                 contract.send_json(stream, {'ok': True, 'result': result})
@@ -198,8 +201,9 @@ def node_admin(agent, config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('validate', 'serve', 'status', 'drain', 'close-admission', 'finish'))
+    parser.add_argument('action', choices=('validate', 'serve', 'status', 'drain', 'close-admission', 'finish','release-root'))
     parser.add_argument('--config', required=True)
+    parser.add_argument('--receipt')
     args = parser.parse_args(argv)
     config = private_json(args.config); manifests = validate(config)
     if args.action == 'validate':
@@ -212,11 +216,16 @@ def main(argv=None):
         if config['role'] == 'owner':
             result = client(config).call(args.action, uuid.uuid4().hex)
         else:
-            require(config['role'] == 'node' and args.action in ('status', 'drain'), 'Wrong admin action')
+            require(config['role'] == 'node' and args.action in ('status', 'drain','release-root'), 'Wrong admin action')
             from . import contract
+            request={'run':config['run'],'method':args.action}
+            if args.action=='release-root':
+                require(args.receipt,'Owner global release receipt path required')
+                proof=private_json(args.receipt)
+                request['receipt']=proof.get('rootReleaseReceipt',proof)
             with socket.socket(socket.AF_UNIX) as stream:
                 stream.settimeout(330); stream.connect(config['adminSocket'])
-                contract.send_json(stream, {'run': config['run'], 'method': args.action})
+                contract.send_json(stream,request)
                 result = contract.receive_json(stream)
         print(json.dumps(result)); return
     require(os.environ.get('AENV_DEMAND_APPROVAL') == 'UB_DEMAND_' + config['run'],
@@ -225,7 +234,7 @@ def main(argv=None):
         assemble_owner(config, manifests).serve_forever()
     elif config['role'] == 'root':
         from .demand_views import RootSupervisor
-        root_config = dict(config['rootConfig'], run=config['run'], nodes=config['nodes'],
+        root_config = dict(config['rootConfig'], run=config['run'], node=config['node'], nodes=config['nodes'],
                            ownerNode=config['ownerNode'], root=config['stateRoot'])
         RootSupervisor(root_config, manifests, key_file(config['imageKey']),
                        key_file(config['receiptKey'])).serve(config['rootSocket'])

@@ -21,6 +21,7 @@ unconnected classes. The `components/ub-memory-provider/start.sh` entry exposes:
 | `drain` | Node only: refuse live aenv sessions, then retire local views/imports |
 | `close-admission` | Owner only: refuse new acquisitions, preserve existing reads |
 | `finish` | Owner only: delete unpinned objects only after authenticated node receipts |
+| `release-root --receipt PATH` | Node only: release this supervisor's control reference after signed global release |
 
 Set `AENV_DEMAND_CONFIG` to an absolute, owned 0600 JSON file. Serving requires
 the explicit run-scoped `AENV_DEMAND_APPROVAL=UB_DEMAND_<32-hex-run>` marker.
@@ -61,13 +62,21 @@ crash recovery from an old root/session process. Preserve logs and objects and
 perform explicit reconciliation; do not delete state to bypass that gate.
 
 Start root supervisor and owner, then node agents, then the isolated aenv
-runtime using the generated metadata index. Exact system unit/config generation,
+runtime using the generated metadata index. Each root supervisor pins its
+validated readonly pmem control FD and signs run/node/boot/kernel/module
+readiness. Both authenticated receipts are required before any publication;
+node metadata indices are withheld until this barrier passes. The control FD
+is a module reference, not a UB allocation, and remains until supervisor exit.
+Exact system unit/config generation,
 pinned deployment packaging and Linux native service integration are still
 required before this can be described as a ready two-node launch.
 
 Normal retirement: stop only this run's Guests/runtime/ublk consumers; close
-owner admission; drain both node agents; finish owner global release after both
-receipts. Stop the empty processes afterwards. An unknown result preserves
+owner admission; drain both node agents. The coordinator also requires explicit
+node SDK-finalization acknowledgments (the owner keeps its publication anchors
+until global deletion). Then finish owner global release; its signed receipt
+allows both node agents to release only their root supervisor control references.
+Stop the empty processes afterwards. An unknown result preserves
 resources. This entry never restores or unloads OBMM or stops UBSE.
 
 The default-full-feature ARM64 OverlayBD library and all test targets now

@@ -24,6 +24,7 @@ class Importer:
                    'objects':list(self.records.values()),'allocationCalls':0})
 
     def initialize(self):
+        require(not self.finalize_attempt and not self.finalize_ack,'Importer finalization prevents new attachments')
         if self.backend is not None:return
         require(not self.initialized_attempt,'Unconfirmed importer initialization; no retry')
         contract.linux_only()
@@ -86,9 +87,15 @@ class Importer:
                 self.finalize_attempt=True;self.persist();self.backend.finalize()
             self.finalize_ack=True;self.persist()
 
+    def finalization_receipt(self):
+        require(self.finalize_ack and not self.live,'Importer finalization not acknowledged')
+        return {'disposition':'importer_finalized','sdkInitialized':self.initialized_attempt,
+                'finalizeAcknowledged':True}
+
 
 class OwnerSources:
     """A reuses the publisher's existing readonly FD provider, without re-import."""
     def attach(self,publication):return dict(publication['image'])
     def retire(self,publication):return {'importDisposition':'owner_anchor_retained'}
     def finalize(self):return None
+    def finalization_receipt(self):return {'disposition':'owner_anchor_retained'}
