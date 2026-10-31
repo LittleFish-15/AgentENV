@@ -1,0 +1,129 @@
+[
+  {
+    "name": "aio",
+    "url": "https://sources.buildroot.net/libaio/libaio-0.3.113.tar.gz",
+    "expected": "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b",
+    "sha256": "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b",
+    "bytes": 49980
+  },
+  {
+    "name": "curl",
+    "repo": "curl/curl",
+    "commit": "57495c64871d18905a0941db9196ef90bafe9a29",
+    "url": "https://codeload.github.com/curl/curl/tar.gz/57495c64871d18905a0941db9196ef90bafe9a29",
+    "sha256": "0c7df3d2730de54d3e8eaa557c04ba60c5b68dab7a3904afd45b8de2bb72dc47",
+    "bytes": 3464188
+  },
+  {
+    "name": "e2fsprogs",
+    "repo": "data-accelerator/e2fsprogs",
+    "commit": "404deb95e6b0ed0ceb0148d289977e65bee7f8d0",
+    "expected": "2c3efbc3f98c6db52425fe4f5d04194c3f4abbb2676388617c57127c3d30a5a1",
+    "url": "https://codeload.github.com/data-accelerator/e2fsprogs/tar.gz/404deb95e6b0ed0ceb0148d289977e65bee7f8d0",
+    "sha256": "2c3efbc3f98c6db52425fe4f5d04194c3f4abbb2676388617c57127c3d30a5a1",
+    "bytes": 9686901
+  },
+  {
+    "name": "erofs-utils",
+    "repo": "erofs/erofs-utils",
+    "commit": "eec6f7a2755dfccc8f655aa37cf6f26db9164e60",
+    "expected": "4cccdb0932dd3c2ca0595451463e0819be8e14d99961c896f91f6f6a90082158",
+    "url": "https://codeload.github.com/erofs/erofs-utils/tar.gz/eec6f7a2755dfccc8f655aa37cf6f26db9164e60",
+    "sha256": "4cccdb0932dd3c2ca0595451463e0819be8e14d99961c896f91f6f6a90082158",
+    "bytes": 186465
+  },
+  {
+    "name": "lz4",
+    "repo": "lz4/lz4",
+    "commit": "ebb370ca83af193212df4dcbadcc5d87bc0de2f0",
+    "url": "https://codeload.github.com/lz4/lz4/tar.gz/ebb370ca83af193212df4dcbadcc5d87bc0de2f0",
+    "sha256": "eb1a93e934d4fd29df6e2061ba0bf447568561764d758f4a5662c0e29370ffa9",
+    "bytes": 387536
+  },
+  {
+    "name": "ocf",
+    "repo": "Open-CAS/ocf",
+    "commit": "c2dd2259e47c2e5e72dc77f99d0150a5d05496d7",
+    "expected": "b67a4cda8e940ab68b3f67995c04d1d6da1e3a8299dfef7136cd1a4626c61cf8",
+    "url": "https://codeload.github.com/Open-CAS/ocf/tar.gz/c2dd2259e47c2e5e72dc77f99d0150a5d05496d7",
+    "sha256": "b67a4cda8e940ab68b3f67995c04d1d6da1e3a8299dfef7136cd1a4626c61cf8",
+    "bytes": 364310
+  },
+  {
+    "name": "openssl",
+    "repo": "openssl/openssl",
+    "commit": "c3cc0f1386b0544383a61244a4beeb762b67498f",
+    "url": "https://codeload.github.com/openssl/openssl/tar.gz/c3cc0f1386b0544383a61244a4beeb762b67498f",
+    "sha256": "2a0d6d2469d33c1f8c2e1f7de712602d2bd9892d9aeadb2b7618ee947923333e",
+    "bytes": 15355875
+  },
+  {
+    "name": "overlaybd",
+    "repo": "kvcache-ai/overlaybd",
+    "commit": "df60cf3ae062f28563ee4a14687af27e9d17c20a",
+    "url": "https://codeload.github.com/kvcache-ai/overlaybd/tar.gz/df60cf3ae062f28563ee4a14687af27e9d17c20a",
+    "sha256": "7417c4d0f3abb0ac6b0f991508d06f3e95edddbc5b3b8021554f2d17c2764cfd",
+    "bytes": 1509677
+  },
+  {
+    "name": "photon",
+    "repo": "alibaba/PhotonLibOS",
+    "commit": "0178d14499d8639759a81e32ad58da5226df5e9b",
+    "expected": "b5d4a1fad757df6808e83108b2b311d310807e54c06ab9eef7896a2ece2647b0",
+    "url": "https://codeload.github.com/alibaba/PhotonLibOS/tar.gz/0178d14499d8639759a81e32ad58da5226df5e9b",
+    "sha256": "b5d4a1fad757df6808e83108b2b311d310807e54c06ab9eef7896a2ece2647b0",
+    "bytes": 1058675
+  },
+  {
+    "name": "rapidjson",
+    "repo": "Tencent/rapidjson",
+    "commit": "80b6d1c83402a5785c486603c5611923159d0894",
+    "url": "https://codeload.github.com/Tencent/rapidjson/tar.gz/80b6d1c83402a5785c486603c5611923159d0894",
+    "sha256": "458dba865f6df41fd0c2150a1bbf1897b92b3e750e7aae2f9481b6f05a423699",
+    "bytes": 1110569
+  },
+  {
+    "name": "zlib",
+    "repo": "madler/zlib",
+    "commit": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+    "url": "https://codeload.github.com/madler/zlib/tar.gz/51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+    "sha256": "d9e270d46252734aa49770fbc544125391617956266f220bd63216c834f3a522",
+    "bytes": 1572004
+  },
+  {
+    "name": "zstd",
+    "repo": "facebook/zstd",
+    "commit": "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+    "url": "https://codeload.github.com/facebook/zstd/tar.gz/f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+    "sha256": "4b0bd1f0cfb25e61b9103c35f27395530ff5b4c0d2513a00fd745849e85ea52c",
+    "bytes": 2453329
+  },
+  {
+    "name": "m4",
+    "url": "https://ftp.gnu.org/gnu/m4/m4-1.4.19.tar.gz",
+    "sha256": "3be4a26d825ffdfda52a56fc43246456989a3630093cced3fbddf4771ee58a70",
+    "bytes": 2953876,
+    "optionalBootstrap": true
+  },
+  {
+    "name": "autoconf",
+    "url": "https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.gz",
+    "sha256": "afb181a76e1ee72832f6581c0eddf8df032b83e2e0239ef79ebedc4467d92d6e",
+    "bytes": 2143794,
+    "optionalBootstrap": true
+  },
+  {
+    "name": "automake",
+    "url": "https://ftp.gnu.org/gnu/automake/automake-1.17.tar.gz",
+    "sha256": "397767d4db3018dd4440825b60c64258b636eaf6bf99ac8b0897f06c89310acd",
+    "bytes": 2451070,
+    "optionalBootstrap": true
+  },
+  {
+    "name": "libtool",
+    "url": "https://ftp.gnu.org/gnu/libtool/libtool-2.5.4.tar.gz",
+    "sha256": "da8ebb2ce4dcf46b90098daf962cffa68f4b4f62ea60f798d0ef12929ede6adf",
+    "bytes": 2016535,
+    "optionalBootstrap": true
+  }
+]
