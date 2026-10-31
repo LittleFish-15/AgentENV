@@ -59,8 +59,12 @@ def validate_config(config):
         common.add('hostPmemReaderEpochs')
     if role == 'publish':
         extra = {'readers', 'sourceRoot', 'images'} if mode == 'stored' else {'readers', 'catalog'}
-    elif role == 'import':
+    elif role in ('import', 'rejoin'):
         extra = {'readerId', 'manifest'}
+        if role == 'rejoin':
+            if mode != 'pmem':
+                raise ValueError('Read-only rejoin requires native pmem objects')
+            extra |= {'rejoinPermit', 'rejoinPermitSha256'}
     else:
         raise ValueError('Provider role must be publish or import')
     if (set(config) != common | extra or type(config['version']) is not int or config['version'] != 1
@@ -93,14 +97,18 @@ def manifest_inputs(config):
             or type(value['version']) is not int or value['version'] != 1
             or value['mode'] != config['mode']
             or re.fullmatch(r'[0-9a-f]{32}', value['ownerId']) is None
-            or config['readerId'] not in names(value['readers'])):
+            or (config['role'] != 'rejoin' and config['readerId'] not in names(value['readers']))):
         raise ValueError('Importer is not a reader of this exact generation')
+    names(value['readers'])
+    if config['role'] == 'rejoin':
+        from .rejoin import validate_permit
+        validate_permit(config, value)
     return value
 
 
 def inputs(config):
     data_socket = str(Path(config['workDir']) / 'data.sock')
-    if config['role'] == 'import':
+    if config['role'] in ('import', 'rejoin'):
         manifest = manifest_inputs(config)
         if config['mode'] == 'pmem':
             entries = [{'backing': dict(r['identity'], socket=data_socket)} for r in manifest['replicas']]
@@ -194,6 +202,11 @@ def control_reply(stream, reply):
 def serve(config, selected, manifest):
     import fcntl
     ordinary_linux()
+    if config['role'] == 'rejoin':
+        # Programmatic callers must pass the same gate as the CLI. A rejoin
+        # imports retained bytes; it never revives allocation ownership.
+        if manifest_inputs(config) != manifest:
+            raise ValueError('Rejoin manifest changed before SDK entry')
     if 'hostPmemReleaseReceipt' in config and len(selected) != 1:
         raise ValueError('Host pmem minimal gate requires exactly one guarded image')
     os.umask(0o077)
@@ -202,6 +215,9 @@ def serve(config, selected, manifest):
     lock = os.open(work / 'generation.lock', os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     state = {'version': 1, 'state': 'intent_before_sdk', 'role': config['role'], 'mode': config['mode']}
+    if config['role'] == 'rejoin':
+        state.update(rejoinPermitSha256=config['rejoinPermitSha256'],
+                     globalObjectDeletionAllowed=False)
     def journal(update):
         state.update(update)
         atomic_json(work / 'owner.json', state)
@@ -287,9 +303,12 @@ def serve(config, selected, manifest):
                         backend.close_maps()
                         backend.finalize()
                 journal({'state': 'released'})
-                if config['role'] == 'import':
-                    atomic_json(work / 'release.json', {'version': 1, 'ownerId': manifest['ownerId'],
-                        'readerId': config['readerId'], 'manifestSha256': identity(manifest), 'state': 'released'})
+                if config['role'] in ('import', 'rejoin'):
+                    receipt = {'version': 1, 'ownerId': manifest['ownerId'],
+                        'readerId': config['readerId'], 'manifestSha256': identity(manifest), 'state': 'released'}
+                    if config['role'] == 'rejoin':
+                        receipt['scope'] = 'readonly-rejoin-local-release'
+                    atomic_json(work / 'release.json', receipt)
                 control_reply(stream, {'state': 'released'})
                 return
     except BaseException as error:
