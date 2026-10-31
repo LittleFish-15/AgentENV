@@ -1,0 +1,15 @@
+--- a/build.sh
++++ b/build.sh
+@@ -18,10 +18,10 @@
+     --disable-uuidd --disable-fuse2fs --disable-fsck --disable-e2initrd-helper \
+     CFLAGS="-fPIC -O3" CXXFLAGS="-fPIC -O3" --prefix=`pwd`/${VERSION}
+ make -j8
+-make install-libs
++make install-libs LDCONFIG=:
+ 
+ mkdir libext2fs libext2fs/include libext2fs/lib
+-cp -r ${VERSION}/include/ext2fs libext2fs/include
++cp -r ${VERSION}/include/. libext2fs/include/
+ cp -P ${VERSION}/lib/libext2fs.so* libext2fs/lib
+ if [[ ${ARCH} == "aarch64" ]];then
+     tar -zcf libext2fs.${ARCH}.tar.gz libext2fs
