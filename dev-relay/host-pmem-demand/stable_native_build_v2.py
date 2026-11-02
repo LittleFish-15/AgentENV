@@ -99,7 +99,8 @@ def build(home,run=subprocess.run,image=None,image_sha=None):
     need(match and tuple(map(int,match.groups()))>=(1,91,1),'Native Rust >=1.91.1 required; nothing installed automatically')
     temporary=home/'agent/r'/('dmb-'+CORE_COMMIT[:8]);temporary.mkdir(mode=0o700,parents=True,exist_ok=True)
     need(temporary.resolve(strict=True)==temporary and temporary.stat().st_uid==1204 and not temporary.stat().st_mode&0o077,'Private short test temporary directory required')
-    env.update(TMPDIR=str(temporary),CARGO_INCREMENTAL='0',CARGO_PROFILE_RELEASE_DEBUG='0',CARGO_PROFILE_RELEASE_LTO='false',CMAKE_BUILD_PARALLEL_LEVEL='2')
+    env.update(TMPDIR=str(temporary),CARGO_PROFILE_DEV_DEBUG='0',CARGO_PROFILE_TEST_DEBUG='0',CARGO_INCREMENTAL='0',CARGO_PROFILE_RELEASE_DEBUG='0',CARGO_PROFILE_RELEASE_LTO='false',CMAKE_BUILD_PARALLEL_LEVEL='2')
+    need(shutil.disk_usage(directory).free>=8*1024**3,'At least 8 GiB free space required for isolated build')
     report={'state':'BUILD_INTENT','sourceCommit':CORE_COMMIT,'sourceTree':CORE_TREE,'SDK_called':False,
             'servicesChanged':False,'Guest_created':False,'twoNodeDemandAccepted':False,'moduleLoaded':False,'commands':[],
             'identity':{'hostname':platform.node(),'kernel':platform.release(),'architecture':platform.machine(),
@@ -130,6 +131,7 @@ def build(home,run=subprocess.run,image=None,image_sha=None):
                         print('PROGRESS phase='+label+' elapsed_s='+str(int(elapsed)),flush=True);progress=elapsed
                     need(time.monotonic()-started<timeout,'Build command deadline: '+label)
                     need(log.stat().st_size<=32*1024**2,'Build command log limit: '+label)
+                    need(shutil.disk_usage(directory).free>=2*1024**3,'Build disk reserve reached; preserve outputs')
                     time.sleep(0.5)
             except BaseException:
                 # Only this build command's new process group, never a service
@@ -148,6 +150,9 @@ def build(home,run=subprocess.run,image=None,image_sha=None):
         with log.open('rb') as stream:log_sha=hashlib.file_digest(stream,'sha256').hexdigest()
         report['commands'].append({'phase':label,'exitCode':child.returncode,'seconds':time.monotonic()-started,
             'logPath':str(log),'logSha256':log_sha,'logBytes':log.stat().st_size})
+        if child.returncode:
+            with log.open('rb') as tail:
+                tail.seek(max(0,log.stat().st_size-12000));report['failureLogTail']=tail.read().decode(errors='replace')
         atomic(receipt,report);need(child.returncode==0,'Native build phase failed: '+label)
         print('NATIVE_CORE_PHASE_PASSED='+label,flush=True)
     try:
