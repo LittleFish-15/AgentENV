@@ -29,16 +29,29 @@ impl DemandLayerFile {
             let timeout = Duration::from_millis(reference.request_timeout_ms);
             stream.set_read_timeout(Some(timeout))?;
             stream.set_write_timeout(Some(timeout))?;
-            Session::open(
-                stream,
-                &reference.object_name,
-                &reference.generation,
-                &reference.layer_digest,
-                reference.file_bytes,
-                reference.logical_wire_bytes,
-                &reference.manifest_sha256,
-            )
-            .context("open metadata-only demand layer")
+            let session = if reference.stable_pmem.is_none() {
+                Session::open(
+                    stream,
+                    &reference.object_name,
+                    &reference.generation,
+                    &reference.layer_digest,
+                    reference.file_bytes,
+                    reference.logical_wire_bytes,
+                    &reference.manifest_sha256,
+                )
+            } else {
+                Session::open_with_layout(
+                    stream,
+                    &reference.object_name,
+                    &reference.generation,
+                    &reference.layer_digest,
+                    reference.file_bytes,
+                    reference.logical_wire_bytes,
+                    &reference.manifest_sha256,
+                    reference.stable_pmem.as_ref(),
+                )
+            };
+            session.context("open metadata-only demand layer")
         })
         .await
         .context("join demand layer open")??;
@@ -144,6 +157,7 @@ mod tests {
             stream.write_all(b"xyz").unwrap();
         });
         let reference = DemandLayerRef {
+            stable_pmem: None,
             broker_socket: socket.to_str().unwrap().to_owned(),
             object_name: format!("aenv_{}", "b".repeat(32)),
             generation: "c".repeat(32),

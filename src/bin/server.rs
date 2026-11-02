@@ -32,6 +32,13 @@ pub static malloc_conf: &[u8] = b"dirty_decay_ms:1000,muzzy_decay_ms:1000,backgr
 #[derive(Debug, Parser)]
 #[command(name = "agentenv server")]
 struct ServerCli {
+    /// Prepare trusted stable-Host-pmem image metadata using native direct reads; no UB operations.
+    #[arg(long, requires_all = ["host_pmem_image_sha256", "host_pmem_manifest"], conflicts_with_all = ["setup_only", "setup_host"])]
+    prepare_host_pmem_image: Option<std::path::PathBuf>,
+    #[arg(long, requires = "prepare_host_pmem_image")]
+    host_pmem_image_sha256: Option<String>,
+    #[arg(long, requires = "prepare_host_pmem_image")]
+    host_pmem_manifest: Option<std::path::PathBuf>,
     /// Run setup/provisioning only, then exit.
     #[arg(long)]
     setup_only: bool,
@@ -55,10 +62,22 @@ struct ServerCli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = ServerCli::parse();
+    if let Some(source) = cli.prepare_host_pmem_image.as_deref() {
+        overlaybd::backend::demand_source::prepare_image(
+            source,
+            cli.host_pmem_image_sha256
+                .as_deref()
+                .expect("clap requires digest"),
+            cli.host_pmem_manifest
+                .as_deref()
+                .expect("clap requires output"),
+        )?;
+        println!("HOST_PMEM_IMAGE_METADATA_PREPARED_NO_UB");
+        return Ok(());
+    }
     agentenv::logging::init();
     agentenv_observability::init_prometheus_recorder()?;
-
-    let cli = ServerCli::parse();
     let config_manager = if let Some(config_path) = cli.config.as_deref() {
         agentenv::cfg::ConfigManager::init_global_from_path(config_path)?
     } else {

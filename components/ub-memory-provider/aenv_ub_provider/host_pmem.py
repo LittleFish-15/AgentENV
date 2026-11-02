@@ -5,6 +5,7 @@ does not destroy a volume. Local retirement never authorizes owner deallocation.
 """
 from dataclasses import asdict, dataclass
 import errno
+import ctypes
 import hashlib
 import os
 from pathlib import Path
@@ -23,6 +24,25 @@ CREATE_BYTES = HEADER.size + MAX_SEGMENTS * SEGMENT.size
 CREATE = (1 << 30) | (CREATE_BYTES << 16) | (0xb8 << 8)
 QUERY = (3 << 30) | (STATUS.size << 16) | (0xb8 << 8) | 1
 DESTROY = (1 << 30) | (STATUS.size << 16) | (0xb8 << 8) | 2
+SPARSE_BYTES = 4 * 1024 ** 3
+LOAD_BYTES = 256 * 1024
+SPARSE_HEADER = struct.Struct('=II16sQQ')
+INSTALL_HEADER = struct.Struct('=II16sQ')
+RANGE_STATUS = struct.Struct('=II16sQQQ')
+SPARSE_CREATE = 0x4028b803
+INSTALL = 0x4038b804
+QUERY_RANGE = 0xc030b805
+GET_MISS = 0xc028b806
+FAIL_MISS = 0x4028b807
+POOL_CREATE = 0x4030b808
+POOL_FILL = 0x4048b809
+POOL_ACCEPT = 0x4048b80a
+POOL_SLOT = 0xc048b80b
+POOL_BIND = 0x4058b80c
+POOL_DESTROY = 0x4048b80d
+POOL_DATA = struct.Struct('=II16sQQ32s')
+POOL_STATE = struct.Struct('=II16sQII32s')
+POOL_BINDING = struct.Struct('=II16s16sQQ32s')
 
 
 def identity(value):
@@ -84,14 +104,14 @@ def status_request(volume_uuid, volume_id=0):
     return bytearray(STATUS.pack(ABI, 0, identity(volume_uuid), volume_id, *([0] * 10)))
 
 
-def parse_status(data, volume_uuid):
+def parse_status(data, volume_uuid, expected_state=1):
     if len(data) != STATUS.size:
         raise ValueError('Unexpected STATUS size')
     version, reserved, observed_uuid, *fields = STATUS.unpack(data)
     if version != ABI or reserved or observed_uuid != identity(volume_uuid):
         raise ValueError('STATUS ABI or UUID differs')
     result = VolumeStatus(volume_uuid, *fields)
-    if result.state != 1 or result.major == 0 or not 0 < result.bytes <= MAX_BYTES:
+    if result.state != expected_state or result.major == 0 or not 0 < result.bytes <= MAX_BYTES:
         raise ValueError('Invalid serving volume status')
     return result
 
@@ -126,6 +146,141 @@ class Control:
 
     def destroy(self, observed):
         self.ioctl(self.fd, DESTROY, status_request(observed.uuid, observed.id), True)
+
+
+class SparseControl(Control):
+    """Explicit sparse ABI; old full callers still reject state=2.
+
+    Operations are single attempts. A lost response requires journal/QUERY
+    reconciliation, never an automatic second allocation or reinstallation.
+    This API neither allocates UB nor authorizes a controlled partial writer.
+    """
+    def create_sparse(self, volume_uuid, image_bytes):
+        if (type(image_bytes) is not int or not 0 < image_bytes <= SPARSE_BYTES
+                or image_bytes % self.page_size or LOAD_BYTES % self.page_size):
+            raise ValueError('Invalid aligned sparse image length')
+        request = bytearray(SPARSE_HEADER.pack(ABI, 0, identity(volume_uuid), SPARSE_BYTES, image_bytes))
+        self.ioctl(self.fd, SPARSE_CREATE, request, True)
+
+    def query(self, volume_uuid):
+        request = status_request(volume_uuid)
+        self.ioctl(self.fd, QUERY, request, True)
+        status = parse_status(request, volume_uuid, expected_state=2)
+        if status.bytes != SPARSE_BYTES:
+            raise ValueError('Sparse device logical capacity differs')
+        return status
+
+    def install(self, volume_uuid, offset, segment):
+        if type(offset) is not int or not 0 <= offset < SPARSE_BYTES or offset % LOAD_BYTES:
+            raise ValueError('Invalid logical install offset')
+        encoded = create_request(volume_uuid, [segment], self.page_size)
+        if offset + segment.bytes > SPARSE_BYTES:
+            raise ValueError('Backing exceeds logical device capacity')
+        self.validate_segments([segment])
+        request = bytearray(INSTALL_HEADER.pack(ABI, 0, identity(volume_uuid), offset)
+                            + encoded[HEADER.size:HEADER.size + SEGMENT.size])
+        self.ioctl(self.fd, INSTALL, request, True)
+
+    def query_range(self, volume_uuid, offset):
+        if type(offset) is not int or not 0 <= offset < SPARSE_BYTES or offset % LOAD_BYTES:
+            raise ValueError('Invalid range query offset')
+        request = bytearray(RANGE_STATUS.pack(ABI, 0, identity(volume_uuid), offset, 0, 0))
+        self.ioctl(self.fd, QUERY_RANGE, request, True)
+        version, state, observed, logical, mapped, size = RANGE_STATUS.unpack(request)
+        if (version != ABI or observed != identity(volume_uuid) or logical != offset
+                or state not in (0, 1, 2, 3, 4)
+                or (state == 1 and not (mapped <= offset < mapped + size <= SPARSE_BYTES))
+                or (state != 1 and (mapped or size))):
+            raise ValueError('Sparse range response differs')
+        return {'state': ('absent', 'mapped', 'pending', 'claimed', 'failed')[state],
+                'logicalOffset': logical, 'mappedOffset': mapped, 'mappedBytes': size,
+                'globalProvenanceAccepted': False}
+
+    def claim_miss(self, volume_uuid):
+        request = bytearray(SPARSE_HEADER.pack(ABI, 0, identity(volume_uuid), 0, 0))
+        try:
+            self.ioctl(self.fd, GET_MISS, request, True)
+        except OSError as error:
+            if error.errno == errno.EAGAIN:
+                return None
+            raise
+        version, reserved, observed, offset, size = SPARSE_HEADER.unpack(request)
+        if (version != ABI or reserved or observed != identity(volume_uuid)
+                or offset % LOAD_BYTES or offset >= SPARSE_BYTES
+                or not 0 < size <= LOAD_BYTES or offset + size > SPARSE_BYTES
+                or size % self.page_size):
+            raise ValueError('Sparse miss response differs; preserve claimed state')
+        return {'logicalOffset': offset, 'bytes': size}
+
+    def fail_miss(self, volume_uuid, offset, size):
+        if (type(offset) is not int or type(size) is not int or offset < 0
+                or offset % LOAD_BYTES or not 0 < size <= LOAD_BYTES
+                or size % self.page_size or offset + size > SPARSE_BYTES):
+            raise ValueError('Invalid failed miss range')
+        request = bytearray(SPARSE_HEADER.pack(ABI, 0, identity(volume_uuid), offset, size))
+        self.ioctl(self.fd, FAIL_MISS, request, True)
+
+    def create_pool(self, pool_uuid, segment, *, writer):
+        if type(writer) is not bool or segment.offset % LOAD_BYTES or segment.bytes % LOAD_BYTES:
+            raise ValueError('Pool role and load-unit alignment must be explicit')
+        encoded = create_request(pool_uuid, [segment], self.page_size)
+        if segment.bytes > SPARSE_BYTES:
+            raise ValueError('Pool exceeds bounded logical-image size')
+        self.validate_segments([segment])
+        request = bytearray(HEADER.pack(ABI, int(writer), identity(pool_uuid))
+                            + encoded[HEADER.size:HEADER.size + SEGMENT.size])
+        self.ioctl(self.fd, POOL_CREATE, request, True)
+
+    def _slot(self, pool_uuid, offset, size, digest):
+        if (type(offset) is not int or type(size) is not int or offset < 0
+                or offset % LOAD_BYTES or not 0 < size <= LOAD_BYTES
+                or size % self.page_size or offset + LOAD_BYTES > SPARSE_BYTES
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(c not in '0123456789abcdef' for c in digest)):
+            raise ValueError('Invalid pool slot identity/range/digest')
+        return identity(pool_uuid), bytes.fromhex(digest)
+
+    def fill_slot(self, pool_uuid, offset, data, digest):
+        if not isinstance(data, bytes):
+            raise ValueError('Bounded immutable slot payload required')
+        uid, pin = self._slot(pool_uuid, offset, len(data), digest)
+        if hashlib.sha256(data).digest() != pin:
+            raise ValueError('Source differs from trusted unit digest')
+        buffer = ctypes.create_string_buffer(data)
+        request = bytearray(POOL_DATA.pack(ABI, len(data), uid, offset, ctypes.addressof(buffer), pin))
+        self.ioctl(self.fd, POOL_FILL, request, True)
+
+    def accept_slot(self, pool_uuid, offset, size, digest):
+        uid, pin = self._slot(pool_uuid, offset, size, digest)
+        request = bytearray(POOL_DATA.pack(ABI, size, uid, offset, 0, pin))
+        self.ioctl(self.fd, POOL_ACCEPT, request, True)
+
+    def query_slot(self, pool_uuid, offset):
+        if type(offset) is not int or not 0 <= offset < SPARSE_BYTES or offset % LOAD_BYTES:
+            raise ValueError('Invalid slot query offset')
+        uid = identity(pool_uuid)
+        request = bytearray(POOL_STATE.pack(ABI, 0, uid, offset, 0, 0, bytes(32)))
+        self.ioctl(self.fd, POOL_SLOT, request, True)
+        version, state, observed, at, size, reserved, digest = POOL_STATE.unpack(request)
+        if (version != ABI or observed != uid or at != offset or reserved or state not in (0, 1, 2, 3)
+                or (state == 0 and (size or digest != bytes(32)))
+                or (state != 0 and not (0 < size <= LOAD_BYTES and size % self.page_size == 0))):
+            raise ValueError('Pool slot status differs')
+        return {'state': ('empty', 'filling', 'ready', 'poisoned')[state],
+                'offset': at, 'bytes': size, 'sha256': digest.hex(), 'peerAccepted': False}
+
+    def bind_slot(self, volume_uuid, logical_offset, pool_uuid, slot_offset, digest):
+        for offset in (logical_offset, slot_offset):
+            if type(offset) is not int or not 0 <= offset < SPARSE_BYTES or offset % LOAD_BYTES:
+                raise ValueError('Invalid slot binding offset')
+        _, pin = self._slot(pool_uuid, slot_offset, LOAD_BYTES, digest)
+        request = bytearray(POOL_BINDING.pack(ABI, 0, identity(volume_uuid), identity(pool_uuid),
+                                            slot_offset, logical_offset, pin))
+        self.ioctl(self.fd, POOL_BIND, request, True)
+
+    def destroy_pool(self, pool_uuid):
+        request = bytearray(POOL_STATE.pack(ABI, 0, identity(pool_uuid), 0, 0, 0, bytes(32)))
+        self.ioctl(self.fd, POOL_DESTROY, request, True)
 
 
 def open_control():

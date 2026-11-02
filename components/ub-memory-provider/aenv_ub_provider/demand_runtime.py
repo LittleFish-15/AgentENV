@@ -201,11 +201,16 @@ def node_admin(agent, config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('validate', 'serve', 'status', 'drain', 'close-admission', 'finish','release-root'))
+    parser.add_argument('action', choices=('validate', 'serve', 'status', 'drain', 'abort', 'close-admission', 'finish','release-root'))
     parser.add_argument('--config', required=True)
     parser.add_argument('--receipt')
     args = parser.parse_args(argv)
-    config = private_json(args.config); manifests = validate(config)
+    config = private_json(args.config)
+    if config.get('version')==2 and config.get('mode')=='host-dax-stable-demand':
+        from .demand_stable_runtime import run
+        return run(args,config)
+    require(args.action!='abort','Explicit abort is only implemented for stable runtime v2')
+    manifests = validate(config)
     if args.action == 'validate':
         print(json.dumps({'state': 'CONFIG_VALIDATED_NO_SDK', 'role': config['role'],
                           'manifests': len(manifests), 'SDK_called': False}))

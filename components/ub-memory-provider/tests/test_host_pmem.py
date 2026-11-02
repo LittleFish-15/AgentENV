@@ -257,5 +257,79 @@ class DaxReadPath(unittest.TestCase):
         self.assertEqual(self.fake_os.close.call_args_list, [mock.call(41), mock.call(40)])
 
 
+class SparsePmemAbi(unittest.TestCase):
+    def test_pool_binding_carries_expected_unit_digest(self):
+        volume='11111111-1111-4111-8111-111111111111'
+        pool='22222222-2222-4222-8222-222222222222';calls=[]
+        c=p.SparseControl(123,lambda fd,cmd,request,mutate:calls.append((cmd,bytes(request))),4096)
+        c.bind_slot(volume,p.LOAD_BYTES,pool,2*p.LOAD_BYTES,'a'*64)
+        self.assertEqual(calls[0][0],p.POOL_BIND)
+        self.assertEqual(p.POOL_BINDING.unpack(calls[0][1]),
+                         (1,0,p.identity(volume),p.identity(pool),2*p.LOAD_BYTES,p.LOAD_BYTES,bytes.fromhex('a'*64)))
+        with self.assertRaises(ValueError):c.bind_slot(volume,0,pool,0,'invalid')
+        self.assertEqual(len(calls),1)
+
+    def test_pool_fill_passes_exact_payload_and_rejects_wrong_source_hash(self):
+        import ctypes
+        import hashlib
+        uid='11111111-1111-4111-8111-111111111111'
+        data=b'x'*4096;digest=hashlib.sha256(data).hexdigest();calls=[]
+        def ioctl(fd,cmd,request,mutate):
+            calls.append(cmd)
+            if cmd==p.POOL_FILL:
+                version,size,observed,offset,address,pin=p.POOL_DATA.unpack(request)
+                self.assertEqual((version,size,observed,offset),(1,4096,p.identity(uid),0))
+                self.assertEqual(ctypes.string_at(address,size),data)
+                self.assertEqual(pin,bytes.fromhex(digest))
+            elif cmd==p.POOL_ACCEPT:
+                self.assertEqual(p.POOL_DATA.unpack(request)[4],0)
+        c=p.SparseControl(123,ioctl,4096)
+        c.fill_slot(uid,0,data,digest)
+        c.accept_slot(uid,0,4096,digest)
+        with self.assertRaises(ValueError):c.fill_slot(uid,0,data,'0'*64)
+        self.assertEqual(calls,[p.POOL_FILL,p.POOL_ACCEPT])
+
+    def test_pool_ioctl_failure_is_not_retried_and_ready_hash_is_checked(self):
+        uid='11111111-1111-4111-8111-111111111111';digest='a'*64
+        callback=mock.Mock(side_effect=OSError(errno.EINTR,'unknown'))
+        c=p.SparseControl(123,callback,4096)
+        with self.assertRaises(OSError):c.accept_slot(uid,0,4096,digest)
+        self.assertEqual(callback.call_count,1)
+        def ioctl(fd,cmd,request,mutate):
+            request[:]=p.POOL_STATE.pack(1,2,p.identity(uid),0,4096,0,bytes.fromhex(digest))
+        c.ioctl=ioctl
+        self.assertEqual(c.query_slot(uid,0)['sha256'],digest)
+        self.assertFalse(c.query_slot(uid,0)['peerAccepted'])
+
+    def test_capacity_is_only_a_small_control_request(self):
+        calls=[]
+        c=p.SparseControl(123,lambda fd,cmd,buf,mutate:calls.append((cmd,bytes(buf))),4096)
+        uid='11111111-1111-4111-8111-111111111111'
+        c.create_sparse(uid,4096)
+        self.assertEqual(calls[0][0],p.SPARSE_CREATE)
+        self.assertEqual(len(calls[0][1]),40)
+        self.assertEqual(p.SPARSE_HEADER.unpack(calls[0][1])[3:],(4*1024**3,4096))
+
+    def test_claim_empty_and_lost_reply_do_not_retry(self):
+        calls=[]
+        def ioctl(fd,cmd,buf,mutate):
+            calls.append(cmd);raise OSError(errno.EAGAIN,'none')
+        c=p.SparseControl(123,ioctl,4096);uid='11111111-1111-4111-8111-111111111111'
+        self.assertIsNone(c.claim_miss(uid));self.assertEqual(calls,[p.GET_MISS])
+        c.ioctl=mock.Mock(side_effect=OSError(errno.EINTR,'unknown'))
+        with self.assertRaises(OSError):c.claim_miss(uid)
+        self.assertEqual(c.ioctl.call_count,1)
+
+    def test_claim_and_range_identity_are_checked(self):
+        uid='11111111-1111-4111-8111-111111111111'
+        def ioctl(fd,cmd,buf,mutate):
+            if cmd==p.GET_MISS:buf[:]=p.SPARSE_HEADER.pack(1,0,p.identity(uid),p.LOAD_BYTES,4096)
+            elif cmd==p.QUERY_RANGE:buf[:]=p.RANGE_STATUS.pack(1,3,p.identity(uid),p.LOAD_BYTES,0,0)
+        c=p.SparseControl(123,ioctl,4096)
+        self.assertEqual(c.claim_miss(uid),{'logicalOffset':p.LOAD_BYTES,'bytes':4096})
+        self.assertEqual(c.query_range(uid,p.LOAD_BYTES)['state'],'claimed')
+        with self.assertRaises(ValueError):c.query_range(uid,1)
+
+
 if __name__ == '__main__':
     unittest.main()

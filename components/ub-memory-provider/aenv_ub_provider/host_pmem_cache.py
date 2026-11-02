@@ -51,6 +51,24 @@ def count_residency(vector, ranges, page_size):
             'otherBlockPageCacheBytes':total-data,'fileDataExtentPages':len(pages)}
 
 
+def file_layout(file_fd, length, image_bytes):
+    """Metadata only: FIEMAP offsets are device offsets, never host PFNs.
+
+    The caller binds the FD to its authenticated readonly mounted device.
+    Unsupported or sparse layouts fail; no synthetic zero/data fallback.
+    """
+    import fcntl
+    page = os.sysconf('SC_PAGE_SIZE')
+    request = bytearray(HEADER.size + CAPACITY * EXTENT.size)
+    HEADER.pack_into(request, 0, 0, length, 0, 0, CAPACITY, 0)
+    fcntl.ioctl(file_fd, FIEMAP, request, True)
+    cursor = 0; result = []
+    for offset, size in data_ranges(request, length, image_bytes, page):
+        result.append({'fileOffset': cursor, 'deviceOffset': offset, 'bytes': size})
+        cursor += size
+    return result
+
+
 def collect(file_fd, length, volume):
     """Return unavailable on unsupported measurement instead of assuming zero."""
     import fcntl

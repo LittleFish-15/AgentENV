@@ -28,10 +28,10 @@ case "$action" in
     sha256sum "$CARGO_TARGET_DIR/release/server" "$CARGO_TARGET_DIR/release/uvm-ublk-daemon"
     printf '%s\n' DEMAND_BINARIES_BUILT_NOT_DEPLOYED
     ;;
-  validate|serve|status|drain|close-admission|finish|release-root)
+  validate|serve|status|drain|abort|close-admission|finish|release-root)
     shift
     : "${AENV_DEMAND_CONFIG:?Set absolute private role configuration path}"
     exec "$python" -I -B -c 'import sys,runpy;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("aenv_ub_provider.demand_runtime",run_name="__main__")' "$here" "$action" --config "$AENV_DEMAND_CONFIG" "$@"
     ;;
-  *) echo 'Usage: start.sh [check|prepare|build|validate|serve|status|drain|close-admission|finish|release-root]'; exit 2 ;;
+  *) echo 'Usage: start.sh [check|prepare|build|validate|serve|status|drain|abort|close-admission|finish|release-root]'; exit 2 ;;
 esac

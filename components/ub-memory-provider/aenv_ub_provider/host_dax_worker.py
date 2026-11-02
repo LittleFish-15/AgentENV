@@ -18,9 +18,9 @@ import sys
 import threading
 import uuid
 
-from . import contract, fsdax, host_dax, stored
+from . import contract, fsdax, host_dax, stored, demand_wire, host_pmem_cache
 
-MAX_MESSAGE=65536
+MAX_MESSAGE=1024*1024
 
 
 def send(stream,value):
@@ -37,7 +37,7 @@ def receive(stream):
 
 def validate(config,control_fd=None):
     if (set(config)!={'version','uid','gid','parentPid','device','socket','files','payloadResponses'}
-            or type(config['version']) is not int or config['version']!=1
+            or type(config['version']) is not int or config['version'] not in (1,2)
             or any(type(config[k]) is not int or config[k]<=0 for k in ('uid','gid','parentPid','device'))
             or type(config['payloadResponses']) is not int or not 1<=config['payloadResponses']<=8
             or not isinstance(config['files'],list) or not 1<=len(config['files'])<=64):
@@ -46,9 +46,11 @@ def validate(config,control_fd=None):
     for item in config['files']:
         if set(item)!={'fd','replica'} or type(item['fd']) is not int or item['fd']<=2 or item['fd']==control_fd:
             raise ValueError('Invalid inherited descriptor')
-        r=stored.Replica(**item['replica']).validate()
-        if r.brokerSocket!=config['socket'] or r.allowRepositoryFallback:
+        r=(demand_wire.Layer(**item['replica']) if config['version']==2 else stored.Replica(**item['replica'])).validate()
+        if r.brokerSocket!=config['socket'] or (config['version']==1 and r.allowRepositoryFallback):
             raise ValueError('Socket/fallback does not match inherited publication')
+        if config['version']==2 and r.stablePmem is None:
+            raise ValueError('Stable inherited broker requires exact image layouts')
         replicas.append(r);fds.append(item['fd'])
     if (len(set(fds))!=len(fds) or len({r.objectName for r in replicas})!=len(replicas)
             or len({r.layerDigest for r in replicas})!=len(replicas)):
@@ -66,11 +68,17 @@ def child(control_fd,pin):
     peer,uid,_=struct.unpack('3i',stream.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
     if peer!=config['parentPid'] or uid!=0 or os.getuid()!=config['uid'] or os.getgid()!=config['gid']:
         raise PermissionError('Inherited root controller/ordinary broker identity differs')
+    status=Path('/proc/self/status').read_text()
+    for name in ('CapInh','CapPrm','CapEff','CapAmb'):
+        if int(next(line.split()[1] for line in status.splitlines() if line.startswith(name+':')),16):
+            raise PermissionError('Inherited DAX broker must have no capabilities')
     mappings=[]
     try:
         for item,r in zip(config['files'],replicas):
-            mappings.append(host_dax.StoredDaxMapping.from_fd(item['fd'],r,config['device']))
-        broker=stored.Broker(replicas,mappings,max_payload_responses=config['payloadResponses'])
+            reader=host_dax.StableDaxMapping if config['version']==2 else host_dax.StoredDaxMapping
+            mappings.append(reader.from_fd(item['fd'],r,config['device']))
+        broker_type=demand_wire.Broker if config['version']==2 else stored.Broker
+        broker=broker_type(replicas,mappings,max_payload_responses=config['payloadResponses'])
         broker.start(config['socket'])
     except Exception as error:
         for mapping in mappings:mapping.close()
@@ -111,12 +119,14 @@ def child(control_fd,pin):
 
 class Worker:
     """Root-side owner. Unknown child outcome remains a retained consumer."""
-    def __init__(self,session,files,uid,gid,socket_path,save,payload_responses=2):
+    def __init__(self,session,files,uid,gid,socket_path,save,payload_responses=2,stable=None,child_package=None):
         if (os.getuid()!=0 or os.geteuid()!=0 or session.status is None
                 or session.record['phase'] not in ('mounted_pending_file_verification','local_read_verified')):
             raise ValueError('An active root-owned mounted session is required')
         self.session,self.files,self.uid,self.gid=session,files,uid,gid
         self.socket_path,self.save,self.limit=socket_path,save,payload_responses
+        self.stable=stable
+        self.child_package=child_package
         self.fds=[];self.process=None;self.control=None;self.attempted=False;self.retired=False
         self.record={'state':'not_started','retireIntent':False};self.pin=None
         session.retain_consumer(self)
@@ -146,8 +156,14 @@ class Worker:
                 self.fds.append(fd)
                 observed=fsdax.validate_fd(fd,r.fileBytes)
                 if observed['device']!=device:raise ValueError('Lower is outside the mounted UB image')
+                if self.stable is not None:
+                    layout={'imageSha256':self.stable['imageSha256'],'imageBytes':self.stable['imageBytes'],
+                            'logicalBytes':demand_wire.DEVICE_BYTES,'loadBytes':demand_wire.LOAD_BYTES,
+                            'extents':host_pmem_cache.file_layout(fd,r.fileBytes,self.stable['imageBytes'])}
+                    r=demand_wire.Layer(r.brokerSocket,r.objectName,r.generation,r.layerDigest,r.fileBytes,
+                        r.mappingBytes,self.stable['manifestSha256'],self.stable.get('requestTimeoutMs',30000),layout).validate()
                 rows.append({'fd':fd,'replica':asdict(r)})
-            config={'version':1,'uid':self.uid,'gid':self.gid,'parentPid':os.getpid(),
+            config={'version':2 if self.stable is not None else 1,'uid':self.uid,'gid':self.gid,'parentPid':os.getpid(),
                     'device':device,'socket':self.socket_path,'files':rows,'payloadResponses':self.limit}
             validate(config)
             self.pin=hashlib.sha256(contract.canonical(config)).hexdigest()
@@ -155,6 +171,16 @@ class Worker:
             self.control.settimeout(600)
             self.mark('launch_intent',configSha256=self.pin,fileCount=len(rows))
             package=str(Path(__file__).resolve().parents[1])
+            if self.child_package is not None:
+                candidate=Path(self.child_package)
+                if not candidate.is_absolute() or candidate.resolve(strict=True)!=candidate:
+                    raise ValueError('Ordinary broker package path redirected')
+                # Both copies must be the same reviewed package, not arbitrary child code.
+                current=Path(__file__).resolve().parent
+                for path in current.glob('*.py'):
+                    if hashlib.sha256(path.read_bytes()).digest()!=hashlib.sha256((candidate/'aenv_ub_provider'/path.name).read_bytes()).digest():
+                        raise ValueError('Ordinary broker package differs from root package')
+                package=str(candidate)
             bootstrap="import sys,runpy;p=sys.argv.pop(1);sys.path.insert(0,p);sys.argv[0]='host_dax_worker';runpy.run_module('aenv_ub_provider.host_dax_worker',run_name='__main__')"
             argv=[sys.executable,'-I','-B','-c',bootstrap,package,'--control-fd',str(peer.fileno()),'--config-sha256',self.pin]
             self.process=subprocess.Popen(argv,pass_fds=(*self.fds,peer.fileno()),
@@ -173,7 +199,10 @@ class Worker:
                     or result.get('fileCount')!=len(rows) or self.process.poll() is not None):
                 raise RuntimeError('Broker startup not confirmed')
             self.mark('serving',fileEvidence=result['files'],inheritedFiles=rows)
-            return {'index':stored.index_for([stored.Replica(**row['replica']) for row in rows]),
+            index=({'version':3,'state':'metadata_ready','mode':'host-dax-stable-demand',
+                    'replicas':[row['replica'] for row in rows]} if self.stable is not None
+                   else stored.index_for([stored.Replica(**row['replica']) for row in rows]))
+            return {'index':index,
                     'pid':self.process.pid,'files':result['files'],'configSha256':self.pin}
         except BaseException:
             if self.process is None:

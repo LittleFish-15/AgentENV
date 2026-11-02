@@ -18,6 +18,51 @@ from . import contract, fsdax, stored
 from .io import atomic_json
 
 
+class StableDaxMapping:
+    """An inherited lower FD on an authenticated stable sparse DAX volume.
+
+    Root must bind the immutable image/layout and retain the mount lease.
+    Opening validates S_DAX/device/length only: hashing the entire lower here
+    would fault every unit and accidentally turn demand loading into full load.
+    Content verification belongs to the loader before each unit is published.
+    """
+    @classmethod
+    def from_fd(cls, fd, layer, device):
+        from .demand_wire import validate_stable_layout
+        value = cls.__new__(cls)
+        value.fd = fd
+        try:
+            layer.validate()
+            validate_stable_layout(layer.stablePmem, layer.fileBytes)
+            value.layout = json.loads(json.dumps(layer.stablePmem))
+            value.file_bytes = layer.fileBytes
+            value.observed = fsdax.validate_fd(fd, layer.fileBytes)
+            if value.observed['device'] != device:
+                raise ValueError('Stable lower is not on the authenticated DAX device')
+            return value
+        except BaseException:
+            value.close()
+            raise
+
+    def read_stable_payload(self, offset, count, device_offset):
+        from .demand_wire import stable_device_offset
+        if (type(offset) is not int or type(count) is not int or offset < 0
+                or count <= 0 or offset > self.file_bytes or count > self.file_bytes - offset
+                or device_offset != stable_device_offset(self.layout, offset, count)):
+            raise ValueError('Stable lower read differs from trusted layout')
+        if self.fd is None:
+            raise RuntimeError('Stable DAX lower has retired')
+        data = os.pread(self.fd, count, offset)
+        if len(data) != count:
+            raise RuntimeError('Short stable DAX read; no repository fallback')
+        return data
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
 class StoredDaxMapping:
     """Read an immutable stored file via DAX; retain only a wire header in RAM.
 

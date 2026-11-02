@@ -1,6 +1,8 @@
 pub mod cache;
 pub mod demand;
+pub mod demand_layout;
 pub(crate) mod demand_protocol;
+pub mod demand_source;
 pub mod local;
 #[cfg(feature = "full")]
 pub mod oss;

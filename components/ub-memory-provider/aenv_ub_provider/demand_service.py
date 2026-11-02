@@ -167,6 +167,8 @@ class LogicalDemandMapping:
 
 class NodeAgent:
     def __init__(self,layers,manifests,registry,index_path,uid,max_payload_responses=4,event=None):
+        require(all(l.stablePmem is None for l in layers),
+                'Legacy chunk-device registry cannot assemble a stable pmem node')
         self.registry,self.index_path=registry,Path(index_path)
         self.layers=layers
         self.event=event

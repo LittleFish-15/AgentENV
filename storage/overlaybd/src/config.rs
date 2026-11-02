@@ -29,6 +29,8 @@ pub struct LayerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DemandLayerRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_pmem: Option<crate::backend::demand_layout::StablePmemLayout>,
     pub broker_socket: String,
     pub object_name: String,
     pub generation: String,
@@ -41,6 +43,9 @@ pub struct DemandLayerRef {
 
 impl DemandLayerRef {
     pub fn validate(&self) -> Result<()> {
+        if let Some(layout) = &self.stable_pmem {
+            layout.validate(self.file_bytes)?;
+        }
         UbLayerRef {
             broker_socket: self.broker_socket.clone(),
             object_name: self.object_name.clone(),
@@ -81,7 +86,9 @@ pub fn bind_demand_layers(cfg: &mut ImageConfig, index_path: &Path) -> Result<()
     ensure!(bytes.len() <= 1024 * 1024, "demand index too large");
     let index: Index = serde_json::from_slice(&bytes)?;
     ensure!(
-        index.version == 2 && index.state == "metadata_ready" && index.mode == "host-dax-demand",
+        ((index.version == 2 && index.mode == "host-dax-demand")
+            || (index.version == 3 && index.mode == "host-dax-stable-demand"))
+            && index.state == "metadata_ready",
         "expected explicit metadata-ready Host DAX demand index"
     );
     ensure!(
@@ -89,8 +96,29 @@ pub fn bind_demand_layers(cfg: &mut ImageConfig, index_path: &Path) -> Result<()
         "invalid demand layer count"
     );
     let mut by_digest = std::collections::HashMap::new();
+    let mut stable_image = None;
     for replica in index.replicas {
         replica.validate()?;
+        ensure!(
+            replica.stable_pmem.is_some() == (index.version == 3),
+            "stable device layouts require index v3; chunk-device layouts require v2"
+        );
+        if let Some(layout) = &replica.stable_pmem {
+            let identity = (
+                layout.image_sha256.clone(),
+                layout.image_bytes,
+                replica.broker_socket.clone(),
+                replica.generation.clone(),
+            );
+            if let Some(expected) = &stable_image {
+                ensure!(
+                    &identity == expected,
+                    "one stable device index cannot mix images, generations or brokers"
+                );
+            } else {
+                stable_image = Some(identity);
+            }
+        }
         ensure!(
             by_digest
                 .insert(replica.layer_digest.clone(), replica)
@@ -1047,6 +1075,7 @@ mod tests {
 
     fn demand_reference() -> DemandLayerRef {
         DemandLayerRef {
+            stable_pmem: None,
             broker_socket: if cfg!(windows) {
                 r"C:\dmd\b.sock".into()
             } else {
@@ -1102,6 +1131,59 @@ mod tests {
         let mut reference = serde_json::to_value(demand_reference()).unwrap();
         reference["allowRepositoryFallback"] = serde_json::json!(true);
         assert!(serde_json::from_value::<DemandLayerRef>(reference).is_err());
+    }
+
+    #[test]
+    fn demand_stable_index_requires_v3_and_a_single_shared_image() {
+        use crate::backend::demand_layout::{
+            FileExtent, StablePmemLayout, DEVICE_BYTES, LOAD_BYTES,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("stable.json");
+        let mut first = demand_reference();
+        first.stable_pmem = Some(StablePmemLayout {
+            image_sha256: format!("sha256:{}", "c".repeat(64)),
+            logical_bytes: DEVICE_BYTES,
+            image_bytes: LOAD_BYTES,
+            load_bytes: LOAD_BYTES,
+            extents: vec![FileExtent {
+                file_offset: 0,
+                device_offset: 4096,
+                bytes: first.file_bytes,
+            }],
+        });
+        let mut second = first.clone();
+        second.layer_digest = format!("sha256:{}", "d".repeat(64));
+        let original = ImageConfig {
+            lowers: vec![LayerConfig {
+                file: "/must-not-read".into(),
+                digest: first.layer_digest.clone(),
+                size: first.file_bytes,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for (version, mode, wrong_image, success) in [
+            (3, "host-dax-stable-demand", false, true),
+            (2, "host-dax-demand", false, false),
+            (3, "host-dax-stable-demand", true, false),
+        ] {
+            let mut other = second.clone();
+            if wrong_image {
+                other.stable_pmem.as_mut().unwrap().image_sha256 =
+                    format!("sha256:{}", "e".repeat(64));
+            }
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+                "version": version, "mode": mode, "state":"metadata_ready", "replicas":[first,other]
+            })).unwrap()).unwrap();
+            let mut cfg = original.clone();
+            assert_eq!(bind_demand_layers(&mut cfg, &path).is_ok(), success);
+            if success {
+                assert!(cfg.lowers[0].file.is_empty());
+            } else {
+                assert_eq!(cfg.lowers[0].file, "/must-not-read");
+            }
+        }
     }
 
     #[test]

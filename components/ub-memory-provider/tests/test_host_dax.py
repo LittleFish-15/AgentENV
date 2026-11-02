@@ -16,6 +16,25 @@ from aenv_ub_provider import host_dax, stored
 
 
 class HostDax(unittest.TestCase):
+    def test_stable_open_does_not_hash_or_read_entire_lower(self):
+        from aenv_ub_provider.demand_wire import Layer, DEVICE_BYTES, LOAD_BYTES
+        layout={'imageSha256':'sha256:'+'e'*64,'logicalBytes':DEVICE_BYTES,
+                'imageBytes':LOAD_BYTES,'loadBytes':LOAD_BYTES,
+                'extents':[{'fileOffset':0,'deviceOffset':4096,'bytes':len(self.data)}]}
+        layer=Layer(self.replica.brokerSocket,self.replica.objectName,self.replica.generation,
+                    self.replica.layerDigest,len(self.data),stored.ALIGN,'sha256:'+'d'*64,stablePmem=layout)
+        self.validator.return_value={'activeDax':True,'device':123}
+        fd=host_dax.os.open(self.path,os.O_RDONLY)
+        with mock.patch.object(host_dax.os,'pread',wraps=host_dax.os.pread) as read, \
+             mock.patch.object(host_dax.stored,'verify_mapping',side_effect=AssertionError('full hash forbidden')):
+            mapping=host_dax.StableDaxMapping.from_fd(fd,layer,123)
+            self.addCleanup(mapping.close)
+            read.assert_not_called()
+            self.assertEqual(mapping.read_stable_payload(7,3,4103),self.data[7:10])
+            self.assertEqual(read.call_count,1)
+            with self.assertRaises(ValueError):mapping.read_stable_payload(7,3,4104)
+            self.assertEqual(read.call_count,1)
+
     def setUp(self):
         self.root = Path(tempfile.gettempdir()) / ('host-dax-test-' + os.urandom(8).hex())
         self.root.mkdir(mode=0o777)
