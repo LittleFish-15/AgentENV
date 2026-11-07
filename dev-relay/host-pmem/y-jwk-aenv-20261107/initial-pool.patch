@@ -1,0 +1,207 @@
+--- a/crates/warm-pool/src/lib.rs
++++ b/crates/warm-pool/src/lib.rs
+@@ -93,6 +93,8 @@
+     /// keeps extra warm capacity instead of shrinking back to cold-start
+     /// behavior.
+     fill_target: Mutex<usize>,
++    /// One-time startup target; does not raise the steady-state refill target.
++    startup_fill_target: Mutex<Option<usize>>,
+     /// Background maintenance worker state.
+     maintenance_signal: Mutex<PoolMaintenanceSignal>,
+     /// Wakes the maintenance worker.
+@@ -113,6 +115,7 @@
+         Self {
+             pool: Mutex::new(VecDeque::new()),
+             fill_target: Mutex::new(fill_target),
++            startup_fill_target: Mutex::new(None),
+             config,
+             maintenance_signal: Mutex::new(PoolMaintenanceSignal::default()),
+             maintenance_cv: Condvar::new(),
+@@ -144,6 +147,15 @@
+ 
+     /// Compute the maintenance action based on current pool size.
+     pub fn compute_maintenance_action(&self, pool_len: usize) -> PoolMaintenanceAction {
++        {
++            let mut startup = self.startup_fill_target.lock().unwrap();
++            if let Some(target) = *startup {
++                if pool_len < target {
++                    return PoolMaintenanceAction::Fill(target - pool_len);
++                }
++                *startup = None;
++            }
++        }
+         let fill_target = self.current_fill_target();
+         if pool_len < fill_target {
+             let to_fill = fill_target.saturating_sub(pool_len);
+@@ -161,6 +173,12 @@
+             }
+         }
+         PoolMaintenanceAction::Idle
++    }
++
++    /// Request a one-time prefill without changing the normal refill target.
++    pub fn request_startup_fill(&self, target: usize) {
++        *self.startup_fill_target.lock().unwrap() = Some(target.min(self.config.high_watermark));
++        self.request_maintenance();
+     }
+ 
+     fn current_fill_target(&self) -> usize {
+@@ -396,6 +414,70 @@
+     use super::*;
+ 
+     #[test]
++    fn startup_prefill_does_not_raise_steady_state_target() {
++        let pool = WarmPool::<u32>::new(PoolConfig {
++            low_watermark: 300,
++            high_watermark: 1000,
++            maintenance_enabled: true,
++            startup_prewarm: true,
++        });
++        pool.request_startup_fill(1000);
++        assert_eq!(
++            pool.compute_maintenance_action(300),
++            PoolMaintenanceAction::Fill(700)
++        );
++        assert_eq!(
++            pool.compute_maintenance_action(1000),
++            PoolMaintenanceAction::Idle
++        );
++        for value in 0..1000 {
++            pool.try_push_bounded(value).unwrap();
++        }
++        for _ in 0..202 {
++            assert!(pool.try_acquire().is_some());
++        }
++        assert_eq!(pool.len(), 798);
++        assert_eq!(
++            pool.compute_maintenance_action(pool.len()),
++            PoolMaintenanceAction::Idle
++        );
++        assert_eq!(pool.current_fill_target(), 300);
++        // Acquisition pressure below low still uses the original growth policy.
++        for _ in 0..499 {
++            assert!(pool.try_acquire().is_some());
++        }
++        assert_eq!(pool.len(), 299);
++        assert_eq!(pool.current_fill_target(), 600);
++        assert_eq!(
++            pool.compute_maintenance_action(pool.len()),
++            PoolMaintenanceAction::Fill(301)
++        );
++    }
++
++    #[test]
++    fn startup_prefill_respects_high_watermark() {
++        let pool = WarmPool::<u32>::new(PoolConfig {
++            low_watermark: 2,
++            high_watermark: 10,
++            maintenance_enabled: true,
++            startup_prewarm: true,
++        });
++        pool.request_startup_fill(100);
++        assert_eq!(
++            pool.compute_maintenance_action(0),
++            PoolMaintenanceAction::Fill(10)
++        );
++        assert_eq!(
++            pool.compute_maintenance_action(10),
++            PoolMaintenanceAction::Idle
++        );
++        assert_eq!(
++            pool.compute_maintenance_action(9),
++            PoolMaintenanceAction::Idle
++        );
++    }
++
++    #[test]
+     fn config_validation_clamps_low_to_high() {
+         let config = PoolConfig {
+             low_watermark: 64,
+--- a/src/cfg.rs
++++ b/src/cfg.rs
+@@ -222,6 +222,9 @@
+ 
+ #[derive(Debug, Config, Clone)]
+ pub struct FirecrackerProcessPoolConfig {
++    /// Initial idle process count; defaults to the low watermark and is capped at high.
++    /// This does not raise the steady-state refill target.
++    pub startup_size: Option<usize>,
+     #[config(default = true)]
+     pub enabled: bool,
+     #[config(default = true)]
+@@ -234,6 +237,7 @@
+ 
+ #[derive(Debug, Clone)]
+ pub struct ResolvedFirecrackerPoolConfig {
++    pub startup_size: usize,
+     pub pool: warm_pool::PoolConfig,
+     pub fill_concurrency: usize,
+ }
+@@ -919,6 +923,10 @@
+         }
+ 
+         Some(ResolvedFirecrackerPoolConfig {
++            startup_size: pool
++                .startup_size
++                .unwrap_or(self.pool.low_watermark)
++                .min(self.pool.high_watermark),
+             pool: warm_pool::PoolConfig {
+                 low_watermark: self.pool.low_watermark,
+                 high_watermark: self.pool.high_watermark,
+--- a/src/sandbox/firecracker/pool.rs
++++ b/src/sandbox/firecracker/pool.rs
+@@ -49,6 +49,7 @@
+ }
+ 
+ pub struct FirecrackerPool {
++    startup_size: usize,
+     pool: WarmPool<WarmFirecracker>,
+     binary: PathBuf,
+     socket_timeout: Duration,
+@@ -119,6 +120,7 @@
+ 
+         Self {
+             pool: WarmPool::new(pool_config.pool),
++            startup_size: pool_config.startup_size,
+             binary,
+             socket_timeout,
+             socket_poll_interval,
+@@ -181,7 +183,7 @@
+         firecracker_pool_cleanup_result(failures)
+     }
+ 
+-    /// Eagerly initialize the pool and wait until `low_watermark` warm entries
++    /// Eagerly initialize the pool and wait until `startup_size` warm entries
+     /// exist, or until `timeout` elapses. This is best-effort; timeout is not an
+     /// error because the cold path remains available.
+     pub async fn prime(timeout: Duration) -> Result<()> {
+@@ -200,13 +202,15 @@
+             return Ok(());
+         }
+ 
+-        let target = pool.pool.config().low_watermark;
++        let target = pool.startup_size;
+         if target == 0 || pool.warm_len() >= target {
+             return Ok(());
+         }
+ 
++        pool.pool.request_startup_fill(target);
++
+         info!(
+-            low_watermark = target,
++            startup_size = target,
+             current = pool.warm_len(),
+             timeout_ms = timeout.as_millis(),
+             "priming firecracker pool"
+--- a/config/default.toml
++++ b/config/default.toml
+@@ -346,6 +346,9 @@
+ # startup_prewarm = true
+ 
+ [pool.firecracker]
++# Optional one-time startup population, capped by pool.high_watermark.
++# Defaults to pool.low_watermark; does not change the normal refill target.
++# startup_size = 1000
+ # Enable pre-spawned Firecracker processes for snapshot resume.
+ enabled = true
+ # Populate the process pool during server startup.

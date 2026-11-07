@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "source": {
+    "repository": "https://gitcode.com/boostkit/AgentENV.git",
+    "commit": "5ca17126c51ce1ac1cfaf31cf50d902ab54d55b7",
+    "patch": "initial-pool.patch",
+    "patch_sha256": "9f73bc40e2ea3e6b9b8599b1e6c0c4f24cde4536917819fc8599cf0d6ffab8f6",
+    "patch_files": [
+      "crates/warm-pool/src/lib.rs",
+      "src/cfg.rs",
+      "src/sandbox/firecracker/pool.rs",
+      "config/default.toml"
+    ],
+    "native_build_arch": "x86_64",
+    "toolchain": "1.91.1",
+    "source_provenance": "X historical pclin ae9c626 baseline; the four-file startup patch applies cleanly to the pinned boostkit commit. Y must record checkout, dirty diff and resulting binary hashes."
+  },
+  "service": {
+    "user": "jwk",
+    "suggested_unit": "jwk-aenv-y.service",
+    "root_service_mutation_allowed": false,
+    "suggested_base": "/data/jwk/aenv-y-20261107",
+    "suggested_api_url": "http://127.0.0.1:18080",
+    "port_conflict_policy": "stop and report; never kill an unrelated listener",
+    "network": "separate net/mount namespace, host loopback entry, consistent with X; record relay path in each test"
+  },
+  "pool": {
+    "low_watermark": 300,
+    "high_watermark": 1000,
+    "firecracker": {
+      "enabled": true,
+      "startup_prewarm": true,
+      "startup_size": 1000,
+      "fill_concurrency": 4
+    },
+    "initial_fill_target": 300,
+    "startup_target": 1000,
+    "dynamic_growth": "acquisition below low watermark doubles fill target up to high watermark; do not reset or force a constant target of 1000"
+  },
+  "sandbox": {
+    "vcpu": 2,
+    "memory_mib": 4096,
+    "template_task": "wikidata__wikidata-toolkit-717",
+    "variant": "stock, without java-followup modifications",
+    "architecture": "x86_64",
+    "historical_y_candidate": "01a17713-81c6-7e23-ace9-b9d2ebd86ec7",
+    "candidate_must_be_verified": true,
+    "snapshot_reuse_from_arm_allowed": false,
+    "provenance_required": [
+      "image_reference",
+      "image_digest",
+      "native_architecture",
+      "template_build_parameters",
+      "kernel_hash",
+      "firecracker_version",
+      "snapshot_hashes"
+    ]
+  },
+  "envd": {
+    "health_poll_interval_ms": 3,
+    "ready_timeout_ms": 60000,
+    "individual_health_timeout_ms": 1000
+  },
+  "logging": {
+    "AENV_LOG_FORMAT": "json",
+    "AENV_LOG_SPAN_EVENTS": "close",
+    "RUST_LOG": "agentenv=info,envd=info,uvm_ublk=info,agentenv::sandbox::firecracker::sandbox=debug",
+    "verify_against_X_before_final_comparison": true
+  },
+  "benchmark": {
+    "script_sha256": "6220ba809aeb7ab018dbb292bea22e01c54236165d2a914fbf144ec4f5684b2e",
+    "original_script_sha256": "63e86721f43cd2dd55c05798594e548807697c59f5ef391cab27c0c55bbb4555",
+    "only_script_change": "cleanup-run warmup index fallback compares integer zero, matching the observed X user script",
+    "sdk": "e2b==2.37.0",
+    "total": 100,
+    "batch_size": 100,
+    "default_run_sh_rounds": 5,
+    "initial_comparison_rounds": 10,
+    "warmup_full_lifecycles": 1,
+    "warmup_excluded": true,
+    "pause_keep_memory": true,
+    "operation_retries": false,
+    "raw_unit": "seconds",
+    "report_unit": "ms",
+    "table_columns": [
+      "操作",
+      "mean",
+      "P50",
+      "P95",
+      "max",
+      "wall"
+    ],
+    "stages": [
+      "create_sandbox",
+      "resume_sandbox",
+      "launch_sandbox",
+      "start_resume",
+      "load_snapshot_file",
+      "wait_for_ready",
+      "envd poll",
+      "envd init"
+    ],
+    "stage_aggregation": "associate same sandbox/request and phase; parent spans contain child spans; missing spans are unavailable, not zero",
+    "sdk_difference_label": "SDK minus server span includes SDK, networking, server work outside the span and serialization; do not label it pure HTTP"
+  },
+  "acceptance": [
+    "service UID is actual local jwk UID",
+    "native binaries and assets",
+    "zero user-created sandbox residue",
+    "actual Not started FC count reaches 1000 before initial benchmark",
+    "one complete warmup then 10 measured rounds",
+    "4000 formal SDK operations successful",
+    "summary valid=true remaining=0",
+    "per-round SDK and detailed span statistics in ms",
+    "record pool and host neighbor table deltas per round"
+  ],
+  "host_policy": {
+    "ARM_TLBI_changes": false,
+    "automatic_kernel_replacement": false,
+    "automatic_reboot": false,
+    "swapoff": false,
+    "drop_caches": false,
+    "unload_ublk_module": false,
+    "stop_incumbent_root_service": false,
+    "HZ": "observe existing kernel config; report difference from X HZ1000",
+    "neighbor_table": "read current shared IPv4 limits and errors first; preserve healthy larger limits; any necessary increase must be recorded explicitly"
+  }
+}
