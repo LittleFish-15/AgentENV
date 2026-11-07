@@ -1,0 +1,33 @@
+{
+  "commit": "ae9c62693839ce7effa2b45df31c0039ae4f9fbc",
+  "archive_sha256": "ca0c5e713b423c60b25e24187663fcba945721cc603d497b962168c124a35748",
+  "archive_bytes": 2302583,
+  "files": 802,
+  "symlinks": 1,
+  "parts": [
+    {
+      "name": "X-original-ae9c626.part001.bin",
+      "bytes": 716800,
+      "sha256": "6257a9937eb5efd6960f5ff34168584c893aeeb7992c35eabf26a6b789d818a9"
+    },
+    {
+      "name": "X-original-ae9c626.part002.bin",
+      "bytes": 716800,
+      "sha256": "129923865f3eca50c7319db1b36e272d3fda8fb556b229a1d22fd2b56c253110"
+    },
+    {
+      "name": "X-original-ae9c626.part003.bin",
+      "bytes": 716800,
+      "sha256": "971ca87645eb29fa37d06e89ff634685b92ddbbc16d5342a1f2b1d6ccee50d57"
+    },
+    {
+      "name": "X-original-ae9c626.part004.bin",
+      "bytes": 152183,
+      "sha256": "78108326cb4126f30e9a102b96a7e796d0ad6d777d1440c58aaa18e493f8a34d"
+    }
+  ],
+  "origin": "https://github.com/pclin1212/AgentENV",
+  "startup_patch_applied": false,
+  "X_staged_source": "/data/jwk/aenv-baseline-20261103/source/original-ae9c626",
+  "Y_source": "/data/jwk/aenv-y-ae9c626-20261107/source/original-ae9c626"
+}
