@@ -1,0 +1,32 @@
+{
+  "commit": "5ca17126c51ce1ac1cfaf31cf50d902ab54d55b7",
+  "tree": "1a9ffaf259f94adb770c6ecf4d3932d89a5ad248",
+  "files": 799,
+  "archive_sha256": "bb4864908e66e61d3b4a35921210c78ce01e93d5e4fe25142e5ff0d8f2932c86",
+  "archive_bytes": 2302854,
+  "parts": [
+    {
+      "name": "AgentENV-5ca17126-source.part001.bin",
+      "bytes": 716800,
+      "sha256": "7937ee18a86cf7606436d6478fb9a83159a087c26b99518cf8a42e6a073abb88"
+    },
+    {
+      "name": "AgentENV-5ca17126-source.part002.bin",
+      "bytes": 716800,
+      "sha256": "f295d448914acde0b65bc4c7593ff2a6310fee173b3171584a31eb2e34c86d52"
+    },
+    {
+      "name": "AgentENV-5ca17126-source.part003.bin",
+      "bytes": 716800,
+      "sha256": "a47c447e1a30d1cfe45224a3dff1c363da21a15f982d43a80b7521908efbc812"
+    },
+    {
+      "name": "AgentENV-5ca17126-source.part004.bin",
+      "bytes": 152454,
+      "sha256": "7bbf8fe1a0b6e6f6806b37b36b73d9bbbefeacfb1b1ca0ea950da7ca9482aed2"
+    }
+  ],
+  "commit_object": "AgentENV-5ca17126.commit",
+  "commit_object_sha256": "89af7573580d415df022f197c8edf4cf9caf250632470d0eda667c21346b64f6",
+  "origin": "https://gitcode.com/boostkit/AgentENV.git"
+}
