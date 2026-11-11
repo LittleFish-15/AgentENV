@@ -1,0 +1,13 @@
+{
+  "service_unit": {
+    "sha256": "49e24d3bf9ff3562a9d993e3ed478cfd36c3be1060900090a218245d93d92a2a",
+    "bytes": 923
+  },
+  "socket_unit": {
+    "sha256": "b3a02eb0ac7142ca9a946faebfbb798f4467c4cd59c66cf8220a54d4923698dc",
+    "bytes": 232
+  },
+  "old_proxy_sha256": "9e4565498f49cc9b8f08aa5022a6121fc14a360e598590885e814798e884dfc6",
+  "new_proxy_sha256": "93c9c7be94afe35a33bf471bd93c9656e5525d2893ce88be208870aa4a72f52c",
+  "dropin_sha256": "6e30824e14fcbcb01852a8930243bd0efa38f68b7b5d7961c31e94d628049015"
+}
