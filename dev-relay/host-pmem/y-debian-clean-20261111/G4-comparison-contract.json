@@ -1,0 +1,72 @@
+{
+  "source_commit": "ae9c62693839ce7effa2b45df31c0039ae4f9fbc",
+  "source_patches": [],
+  "fd_patch": false,
+  "pool": {
+    "low_watermark": 300,
+    "high_watermark": 1000,
+    "startup_extension": false,
+    "formal_observed_initial_fc": 600
+  },
+  "sdk": {
+    "e2b": "2.46.0",
+    "pyqwest": "0.10.0",
+    "python_major_minor": "3.11"
+  },
+  "formal_logging": {
+    "AENV_LOG_FORMAT": "compact",
+    "AENV_LOG_SPAN_EVENTS": null,
+    "RUST_LOG": "agentenv=warn"
+  },
+  "diagnostic_logging": {
+    "AENV_LOG_FORMAT": "json",
+    "AENV_LOG_SPAN_EVENTS": "close",
+    "RUST_LOG": "agentenv=info,envd=info,uvm_ublk=info,agentenv::sandbox::firecracker::sandbox=debug"
+  },
+  "benchmark": {
+    "total": 100,
+    "rounds": 5,
+    "batch_size": 100,
+    "request_timeout": 600,
+    "sandbox_timeout": 86400,
+    "pause_keep_memory": true
+  },
+  "warmup": "Run archived prewarm100 invocation (total100/batch100/rounds1, with its built-in1), then formal total100/batch100/rounds5 (also built-in1); warmups excluded from formal statistics.",
+  "formal_initial_pool_policy": "Verify observed 600 FC like archived G4; high watermark1000 does not mean initial1000. Do not patch fill_target.",
+  "sandbox": {
+    "task": "wikidata__wikidata-toolkit-717",
+    "cpu": 2,
+    "memory_mib": 4096,
+    "arch": "x86_64",
+    "use_java_followup": false
+  },
+  "firecracker_nofile": 1048576,
+  "api_measurement": "direct Rust API inside service netns; record path, do not compare host relay to direct",
+  "report_unit": "ms",
+  "formal_and_diagnostic_samples_separate": true,
+  "kernel_optimizations_applied": false,
+  "global_host_tuning_changed": false,
+  "x_host_observations": {
+    "numa_balancing": 0,
+    "THP": "madvise",
+    "arp_gc": [
+      16384,
+      32768,
+      65536
+    ],
+    "ublks_max": 10240
+  },
+  "record_differences": [
+    "architecture",
+    "host/guest kernel",
+    "HZ",
+    "Python patch version",
+    "Rust compiler",
+    "image digest/architecture",
+    "NUMA/THP/ARP",
+    "cgroup limits"
+  ],
+  "benchmark_original_sha256": "d4f5ea74fd01345dbf8df29b249bc8a4c0201a81fcbc10db4d6a5fbfcc1b30e9",
+  "benchmark_sha256": "7c26ea29fe8a117859365be18bd8893b1145b3e8c7bf9cdaaeb094a2d0e13263",
+  "benchmark_instrumentation": "The executed G4 copy records CLOCK_MONOTONIC phase start/end and writes phase-windows.json after each batch timing boundary; use identical executed bytes on Y."
+}
