@@ -1,0 +1,9 @@
+{
+  "values": {
+    "1": "4096",
+    "2": "8192",
+    "3": "16384"
+  },
+  "source": "Live read of X current IPv4 gc_thresh1/2/3 on2026-11-11",
+  "persistentFilesModified": false
+}
