@@ -1,0 +1,10 @@
+{
+  "sourceBytes": 61454,
+  "sourceSha256": "a97220c78905f7a45b2337d56f7095d41e7d072fcd7077808b737f0829faf3bc",
+  "roundWorkerSha256": "be58bc00eb2da7a91d945b67708b63bb0f9958ad7a656413b3c52aefb516aa4b",
+  "original041WorkerSha256": "e9432bd0ebc3cc2bdb7669d8f0f1f21ae72035ffccc2c211e14ed17f362dff96",
+  "rounds": 6,
+  "sameClientBinary": true,
+  "sameObserverAndMmap": true,
+  "inlineBytes": 81940
+}
