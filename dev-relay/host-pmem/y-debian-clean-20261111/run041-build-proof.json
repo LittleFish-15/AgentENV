@@ -1,0 +1,9 @@
+{
+  "sourceBytes": 80112,
+  "sourceSha256": "15a4d257c160d8c771268480783bc04befa9f4240b32a0918c43f4bc4bd6116c",
+  "restoreSourceSha256": "56f4f6dd542751914ab7df1fda8dd78ef4d928c203a04bf1f771b794046c54ec",
+  "diagnosticSourceSha256": "e9432bd0ebc3cc2bdb7669d8f0f1f21ae72035ffccc2c211e14ed17f362dff96",
+  "archived038OriginalSha256": "33a6e0ffde32517f7c74c87d759aafadbb6a5b3a18a12442882dd40847449bc0",
+  "requestImplementationUnchanged": true,
+  "inlineBase64Bytes": 106816
+}
