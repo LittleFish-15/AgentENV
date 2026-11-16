@@ -1,0 +1,30 @@
+{
+  "formalSourceSha256": "c36628348931d45a387194dce89019ae2a3194193e8f6faea382f8c512748acb",
+  "diagnosticSourceSha256": "686ff946607e8bc7094e914caceee51dae9fddaee6eca94f9a563e8d0fa8e094",
+  "requestImplementationByteIdentical": true,
+  "changes": "UID1002; before-clock and after-journal observer boundaries only",
+  "target": "linux/amd64",
+  "archivedClientVersion": "go1.27.4",
+  "binaryBytes": 9933730,
+  "binarySha256": "3f096497b116f5c0e4a1bf718a969016eee19fc83de471402d3e3d742ca123e6",
+  "compressedBytes": 5591882,
+  "compressedSha256": "fcf455e3e639f106894737f9fe6574c2bce0e2d7aeaf63c1ac65db088d81e0fd",
+  "binaryParts": [
+    "diagnostic038.part00.bin",
+    "diagnostic038.part01.bin",
+    "diagnostic038.part02.bin",
+    "diagnostic038.part03.bin",
+    "diagnostic038.part04.bin",
+    "diagnostic038.part05.bin",
+    "diagnostic038.part06.bin"
+  ],
+  "compiler": "go1.27.4 windows/amd64",
+  "buildFlags": [
+    "-trimpath"
+  ],
+  "GOOS": "linux",
+  "GOARCH": "amd64",
+  "CGO_ENABLED": "0",
+  "wrapperSourceSha256": "213730fd59569b4947cc09bc483ae569e830cd25c3f5317c8799815e41753ef0",
+  "diagnosticWrapperSha256": "d0512daa4c2113ade1a469fc62f8c17b2886f1ffb99663890f87334cf021c978"
+}
