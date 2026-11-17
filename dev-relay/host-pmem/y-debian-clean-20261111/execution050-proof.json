@@ -1,0 +1,39 @@
+{
+  "workerSha256": "aee3c6310810ebda6f3390789354cb7672c1745c39cdebb9cba88f8172733c3b",
+  "workerBytes": 24326,
+  "protocolSha256": "fd2abf72349d5323c5931d94ec87a4dc7ba20ba0edafdf5c67f23fc41b47b34b",
+  "priorVerifiedHashes": {
+    "X": {
+      "memory_study.py": "000231d53f2c6f424cb18f01b3ea5f79c7efb6833981f019e73ec47ac3bee345",
+      "page_path_probe.py": "629be3d8deb8332c5eb757000ee965342bb642cbed17e7694e8a3fab407e598a",
+      "build/aarch64/source/multiload": "298428c6f0724d20110820bf86340669cbab08c93d79fee55b1d2f1a327e7332",
+      "private-bin/numactl": "82c32127948534efe40a2d3da80c89aa61b69bfb03a13e05a6715faa362992bf",
+      "numa_exec.c": "ed00e08cbe5bb881e0064bd79f177cc828a6cc616aed9afd026d88f4180877e4"
+    },
+    "Y": {
+      "memory_study.py": "000231d53f2c6f424cb18f01b3ea5f79c7efb6833981f019e73ec47ac3bee345",
+      "page_path_probe.py": "629be3d8deb8332c5eb757000ee965342bb642cbed17e7694e8a3fab407e598a",
+      "build/x86_64/source/multiload": "6cf1c79bf79d95438fde34a64bbe7d47c4783b7477447dc823ac708f56922a35",
+      "numa_exec.c": "ed00e08cbe5bb881e0064bd79f177cc828a6cc616aed9afd026d88f4180877e4"
+    }
+  },
+  "sameWorkerForXY": false,
+  "priorWorkerSha256": "eb8f9a45d4e0dc131c5808cee8221cf50c1bd5e2a2568a84e22f971101641bf0",
+  "protocol": {
+    "ramCases": 33,
+    "repetitions": 3,
+    "samples": 3,
+    "pageWorkers": [
+      1,
+      100
+    ],
+    "pagePairs": 3
+  },
+  "sameSamplingAsY047": true,
+  "recognizedMonitorHashes": {
+    "spotbox_monitor.py": "85a14499460acdad1a7e3293f6370dc122a2d82450e0eeb1e660aa3ee46c2fe4",
+    "hcollect.py": "5226af919c8999d09aaa545f3d27f19a040be63e1c33a1174274768dcc4a8ac5"
+  },
+  "guardChange": "Admission excludes existing source-hash-verified read-only monitor CPU only. Runtime total external CPU increase/new process/RSS/PSI rules and all measurement code remain unchanged.",
+  "authorization": "User confirmed X idle and requested fresh complete study. Prior049 blocked known background monitoring at admission; no formal samples existed. This new full run preserves all earlier attempts; does not stop unknown workloads."
+}
