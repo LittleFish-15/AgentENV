@@ -1,0 +1,15 @@
+{
+  "driverSha256": "0454415cdaa188140750cd2056353f50427ae8600e23916f7ad7bf48a3a08bbf",
+  "driverBytes": 43796,
+  "files": {
+    "taskstats055.c": "6af6188200fc3d114949882605c19d8ef3151bd25bec3a4c765c1313603eae86",
+    "lifecycle_capture055.py": "5d10d20f0a8e95a17ae4d62fc4bcb80019ad47f20be2de63876ef1769127c8f2"
+  },
+  "rounds": 3,
+  "formalRounds": 3,
+  "diagnosticRounds": 3,
+  "concurrency": 100,
+  "anchor": false,
+  "faultAccounting": "live process differences or matched TID exit lifetime differences; incomplete coverage stays unknown",
+  "ioAccounting": "private tracefs completion events cropped to SDK windows, uevent device lifecycle, sysfs counters metadata; never open actual block device"
+}
