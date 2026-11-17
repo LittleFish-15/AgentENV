@@ -1,0 +1,18 @@
+"""Publish a bounded read-only ancestry observation after two lat_probe stops."""
+import ast,base64,datetime,importlib.util,json
+from pathlib import Path
+M=Path(__file__).resolve().parent;Y=M.parent/'y-debian-clean-20261111'
+s=importlib.util.spec_from_file_location('yc',Y.parent/'y-jwk-aenv-20261107/controller.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);c.H=M;c.SOURCE_PATH='dev-relay/host-pmem/y-debian-clean-20261111/'
+def main():
+ if (Y/'debian-runtime051-publication.private.json').exists():print('Y_DIAG051_ALREADY_PUBLISHED');return
+ previous=json.loads((Y/'debian-runtime050-publication.private.json').read_text(encoding='utf-8'));old=previous['jobs'][0];receipt=json.loads((Y/'collected-private'/old['jobId']/'report.json').read_text(encoding='utf-8'));assert receipt['state']=='completed' and receipt['exitCode']==0
+ raw=(M/'diagnose_y051.py').read_bytes();ast.parse(raw,feature_version=(3,11));client=c.client();prefix='root-entry-v1/'+old['sessionId'];qpath=prefix+'/queues/node-y.json';code,data,_=client.contents(c.c.CONTROL_REPO,qpath,'main');assert code==200 and json.loads(data)==previous['queue'],'Queue changed; preserve it'
+ commit,files=c.upload(client,['diagnose_y051.py','publish_y051.py'],'diagnostic: read-only Y memory-probe process ancestry observation')
+ now=datetime.datetime.now(datetime.timezone.utc);job={**old,'jobId':'y-debian-memory-process-diag-20261117-051-node-y','entry':files['diagnose_y051.py'],'sourceInlineBase64':base64.b64encode(raw).decode(),'argv':[],'seconds':100,'notBefore':(now-datetime.timedelta(minutes=2)).isoformat(),'expiresAt':(now+datetime.timedelta(days=3)).isoformat()}
+ job['authorizationBasis']='Continue user-authorized X/Y memory investigation using original Y manual unified entry. Y047 and Y050 receipts already read, both interrupted by a new external lat_probe process with about256MiB anonymous memory, despite user reporting other tests ended. This task is read-only diagnosis needed before another comparable test, not another benchmark. Preserve all original node/boot/entry/source/identity/output/private credential guards and inline source route. Native Python standard library only. Observe /proc for32samples1secondapart, targetcomm lat_probe,bw_probe,perf,multiload,multichase,mlc,stress-ng,stream and parentchains<=7; at most160uniqueprocessrecords and24targets/sample. Read processstat/comm/status/exe/cwd and scriptpath/hash metadata; no environments or arbitrary argv/secrets returned, full command onlySHA256. Capture parent identities so orphan/background loops can be identified. Never send signal, kill process, change service/sysctl/affinity/frequency, read real template contents, or start workload. Only create private /home/jwk/xy-memory-diagnosis-20261117-Y-051/result.json and normal bounded stdoutreceipt<500000bytes. No SSH to X and no impact to X benchmark. Publication does not trigger Y execution; user runs original root-start.sh manually.'
+ assert len(c.wire(job))<=128*1024
+ queue={**previous['queue'],'jobIds':[job['jobId']]};docs={qpath:queue,prefix+'/jobs/'+job['jobId']+'.json':job};c.c.HERE=Y;control=c.c.control_commit(client,{'name':c.c.CONTROL_REPO,'id':1438089258,'branch':'main'},docs,'Y only: read-only attribution of recurring memory probe; no benchmark')
+ for path,value in docs.items():
+  code,data,_=client.contents(c.c.CONTROL_REPO,path,'main');assert code==200 and json.loads(data)==value
+ c.H=Y;c.save('debian-runtime051-publication.private.json',{'jobs':[job],'queue':queue,'sourceCommit':commit,'controlCommit':control,'targetExecuted':False,'readOnlyDiagnosis':True});print('Y_DIAG051_READY readOnly=true durationSeconds=32 benchmarkStarted=false')
+if __name__=='__main__':main()
