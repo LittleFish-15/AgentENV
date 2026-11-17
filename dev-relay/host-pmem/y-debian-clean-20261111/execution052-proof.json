@@ -1,0 +1,45 @@
+{
+  "workerSha256": "7f24b7566b1de814d912cc037adfd59e93a297ef2809f4ac41db84f8194f2356",
+  "workerBytes": 23874,
+  "protocolSha256": "fd2abf72349d5323c5931d94ec87a4dc7ba20ba0edafdf5c67f23fc41b47b34b",
+  "priorVerifiedHashes": {
+    "X": {
+      "memory_study.py": "000231d53f2c6f424cb18f01b3ea5f79c7efb6833981f019e73ec47ac3bee345",
+      "page_path_probe.py": "629be3d8deb8332c5eb757000ee965342bb642cbed17e7694e8a3fab407e598a",
+      "build/aarch64/source/multiload": "298428c6f0724d20110820bf86340669cbab08c93d79fee55b1d2f1a327e7332",
+      "private-bin/numactl": "82c32127948534efe40a2d3da80c89aa61b69bfb03a13e05a6715faa362992bf",
+      "numa_exec.c": "ed00e08cbe5bb881e0064bd79f177cc828a6cc616aed9afd026d88f4180877e4"
+    },
+    "Y": {
+      "memory_study.py": "000231d53f2c6f424cb18f01b3ea5f79c7efb6833981f019e73ec47ac3bee345",
+      "page_path_probe.py": "629be3d8deb8332c5eb757000ee965342bb642cbed17e7694e8a3fab407e598a",
+      "build/x86_64/source/multiload": "6cf1c79bf79d95438fde34a64bbe7d47c4783b7477447dc823ac708f56922a35",
+      "numa_exec.c": "ed00e08cbe5bb881e0064bd79f177cc828a6cc616aed9afd026d88f4180877e4"
+    }
+  },
+  "sameWorkerForXY": false,
+  "priorWorkerSha256": "eb8f9a45d4e0dc131c5808cee8221cf50c1bd5e2a2568a84e22f971101641bf0",
+  "protocol": {
+    "ramCases": 33,
+    "repetitions": 3,
+    "samples": 3,
+    "pageWorkers": [
+      1,
+      100
+    ],
+    "pagePairs": 3
+  },
+  "sameSamplingAsY047": true,
+  "recognizedMonitorHashes": {
+    "spotbox_monitor.py": "85a14499460acdad1a7e3293f6370dc122a2d82450e0eeb1e660aa3ee46c2fe4",
+    "hcollect.py": "5226af919c8999d09aaa545f3d27f19a040be63e1c33a1174274768dcc4a8ac5"
+  },
+  "guardChange": "Admission excludes existing source-hash-verified read-only monitor CPU only. Runtime total external CPU increase/new process/RSS/PSI rules and all measurement code remain unchanged.",
+  "authorization": "User explicitly allowed ending the identified collect_metrics.sh collection, retaining existing logs, then retesting Y. Identity-bound targeted shutdown only; native perf interrupted and allowed to close; no shell cleanup traps or file deletions; RAM protocol unchanged.",
+  "controlWorkerSha256": "45dfb00b1efa5480edea909c4691256ecebd9f2d83bf96d819e11e00c3635310",
+  "controlWorkerBytes": 43015,
+  "stopWorkerSha256": "cfc919bccf887e32a63cbbaea600026e9748a63d39c569523bc95924ad96fe36",
+  "scope": "ram_protocol_only",
+  "sameRamSamplingAsX050": true,
+  "auxiliaryFileCasesScheduled": false
+}
