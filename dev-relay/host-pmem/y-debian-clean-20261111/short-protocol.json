@@ -1,0 +1,429 @@
+{
+  "status": "prepared_not_published_or_executed",
+  "purpose": "Short paired X/Y memory screening; not frequency causality proof",
+  "host_window_minutes_target": 10,
+  "host_window_minutes_budget": 12,
+  "physical_cores": 16,
+  "cpu_node": 0,
+  "memory_nodes": [
+    0
+  ],
+  "page_bytes": 4096,
+  "working_set_mib": 1024,
+  "bandwidth_budget": "total",
+  "bandwidth_threads": [
+    1,
+    4,
+    16
+  ],
+  "loaded_total_threads": [
+    4,
+    16
+  ],
+  "patterns": [
+    "stream-sum",
+    "stream-copy"
+  ],
+  "repetitions": 3,
+  "samples_per_run": 3,
+  "matrix": [
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 1,
+      "load_threads": 1,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 1,
+      "order": 1
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 4,
+      "load_threads": 4,
+      "per_worker_bytes": 268435456,
+      "target_bytes": 1073741824,
+      "repetition": 1,
+      "order": 2
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 1,
+      "load_threads": 1,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 1,
+      "order": 3
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 16,
+      "load_threads": 16,
+      "per_worker_bytes": 67108864,
+      "target_bytes": 1073741824,
+      "repetition": 1,
+      "order": 4
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-sum",
+      "threads": 16,
+      "load_threads": 15,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 17179869184,
+      "repetition": 1,
+      "order": 5
+    },
+    {
+      "memory_node": 0,
+      "mode": "latency",
+      "pattern": "simple",
+      "threads": 1,
+      "load_threads": 0,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 1,
+      "order": 6
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-sum",
+      "threads": 4,
+      "load_threads": 3,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 4294967296,
+      "repetition": 1,
+      "order": 7
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 16,
+      "load_threads": 16,
+      "per_worker_bytes": 67108864,
+      "target_bytes": 1073741824,
+      "repetition": 1,
+      "order": 8
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 4,
+      "load_threads": 4,
+      "per_worker_bytes": 268435456,
+      "target_bytes": 1073741824,
+      "repetition": 1,
+      "order": 9
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-copy",
+      "threads": 4,
+      "load_threads": 3,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 4294967296,
+      "repetition": 1,
+      "order": 10
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-copy",
+      "threads": 16,
+      "load_threads": 15,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 17179869184,
+      "repetition": 1,
+      "order": 11
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 1,
+      "load_threads": 1,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 2,
+      "order": 12
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 1,
+      "load_threads": 1,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 2,
+      "order": 13
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-sum",
+      "threads": 16,
+      "load_threads": 15,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 17179869184,
+      "repetition": 2,
+      "order": 14
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 4,
+      "load_threads": 4,
+      "per_worker_bytes": 268435456,
+      "target_bytes": 1073741824,
+      "repetition": 2,
+      "order": 15
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-copy",
+      "threads": 4,
+      "load_threads": 3,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 4294967296,
+      "repetition": 2,
+      "order": 16
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-sum",
+      "threads": 4,
+      "load_threads": 3,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 4294967296,
+      "repetition": 2,
+      "order": 17
+    },
+    {
+      "memory_node": 0,
+      "mode": "latency",
+      "pattern": "simple",
+      "threads": 1,
+      "load_threads": 0,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 2,
+      "order": 18
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 16,
+      "load_threads": 16,
+      "per_worker_bytes": 67108864,
+      "target_bytes": 1073741824,
+      "repetition": 2,
+      "order": 19
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 4,
+      "load_threads": 4,
+      "per_worker_bytes": 268435456,
+      "target_bytes": 1073741824,
+      "repetition": 2,
+      "order": 20
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 16,
+      "load_threads": 16,
+      "per_worker_bytes": 67108864,
+      "target_bytes": 1073741824,
+      "repetition": 2,
+      "order": 21
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-copy",
+      "threads": 16,
+      "load_threads": 15,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 17179869184,
+      "repetition": 2,
+      "order": 22
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-sum",
+      "threads": 4,
+      "load_threads": 3,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 4294967296,
+      "repetition": 3,
+      "order": 23
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 1,
+      "load_threads": 1,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 3,
+      "order": 24
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 16,
+      "load_threads": 16,
+      "per_worker_bytes": 67108864,
+      "target_bytes": 1073741824,
+      "repetition": 3,
+      "order": 25
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 4,
+      "load_threads": 4,
+      "per_worker_bytes": 268435456,
+      "target_bytes": 1073741824,
+      "repetition": 3,
+      "order": 26
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-copy",
+      "threads": 4,
+      "load_threads": 3,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 4294967296,
+      "repetition": 3,
+      "order": 27
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-copy",
+      "threads": 1,
+      "load_threads": 1,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 3,
+      "order": 28
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-copy",
+      "threads": 16,
+      "load_threads": 15,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 17179869184,
+      "repetition": 3,
+      "order": 29
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 16,
+      "load_threads": 16,
+      "per_worker_bytes": 67108864,
+      "target_bytes": 1073741824,
+      "repetition": 3,
+      "order": 30
+    },
+    {
+      "memory_node": 0,
+      "mode": "loaded_latency",
+      "pattern": "stream-sum",
+      "threads": 16,
+      "load_threads": 15,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 17179869184,
+      "repetition": 3,
+      "order": 31
+    },
+    {
+      "memory_node": 0,
+      "mode": "latency",
+      "pattern": "simple",
+      "threads": 1,
+      "load_threads": 0,
+      "per_worker_bytes": 1073741824,
+      "target_bytes": 1073741824,
+      "repetition": 3,
+      "order": 32
+    },
+    {
+      "memory_node": 0,
+      "mode": "bandwidth_total",
+      "pattern": "stream-sum",
+      "threads": 4,
+      "load_threads": 4,
+      "per_worker_bytes": 268435456,
+      "target_bytes": 1073741824,
+      "repetition": 3,
+      "order": 33
+    }
+  ],
+  "page_path": {
+    "working_set_mib": 1024,
+    "workers": [
+      1,
+      100
+    ],
+    "pairs": 3
+  },
+  "estimates_from_046": {
+    "X": {
+      "previous_ram_seconds": 1610.5073087572237,
+      "projected_short_ram_seconds": 429.31411664349724
+    },
+    "Y": {
+      "previous_ram_seconds": 1623.6915794218658,
+      "projected_short_ram_seconds": 433.38316461957874
+    }
+  },
+  "binary_policy": "Reuse each host previously verified native binary; verify SHA256. No cross-architecture binary copying.",
+  "environment_policy": "Human-confirmed exclusive window; preflight and ongoing external-process activity evidence. Preserve and reject the full affected study if interference is detected; no selective retries or fast-sample selection.",
+  "transport": {
+    "X": "existing direct connection",
+    "Y": "existing unified root-start.sh entry"
+  },
+  "exclusions": [
+    "No aenv lifecycle run bundled into this timing estimate",
+    "No global configuration or frequency change",
+    "No automatic stop of unrelated processes"
+  ],
+  "limitations": [
+    "Sparse curve cannot locate the exact bandwidth/latency knee",
+    "Three repeats are screening evidence, not a long-term stability claim",
+    "Cross-host rate differences alone do not establish frequency causality"
+  ],
+  "implementation_note": "Declarative protocol only. Existing 046 runner does not consume this file; prepare a new bounded worker and verify environment monitor before publication."
+}
