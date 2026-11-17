@@ -1,0 +1,14 @@
+{
+  "files": {
+    "numa_exec.c": "ed00e08cbe5bb881e0064bd79f177cc828a6cc616aed9afd026d88f4180877e4",
+    "memory_study.py": "000231d53f2c6f424cb18f01b3ea5f79c7efb6833981f019e73ec47ac3bee345",
+    "page_path_probe.py": "629be3d8deb8332c5eb757000ee965342bb642cbed17e7694e8a3fab407e598a",
+    "vendor/manifest.json": "1e951e85b2c242fc642c32deffd38231bd66b4ba28e4d3b8e1cf3a02dc298cc1",
+    "vendor/multichase-8b68e918.tar.gz": "949ee41f693f465517121aeaa088d707adea9208df0657717419cc1155bfdd03"
+  },
+  "payloadBytes": 56168,
+  "payloadSha256": "7da7544690faf17fe239b0405103a1e54c68bc3c9505cc5cdcb403575acca677",
+  "workerBytes": 82059,
+  "workerSha256": "eb8f9a45d4e0dc131c5808cee8221cf50c1bd5e2a2568a84e22f971101641bf0",
+  "inlineBytes": 109412
+}
